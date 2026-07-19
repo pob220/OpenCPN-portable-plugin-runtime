@@ -1,21 +1,33 @@
 # iGRIB portable component
 
-iGRIB is the first installable proof component for OpenCPN's experimental
-portable-plugin runtime. It exercises deterministic `.ocpnp` packaging,
-manifest and component-identity validation, Component Model instantiation,
-typed host calls, toolbar registration, vessel-position access, private
-settings, cancellable work, retained geographic overlays and trap containment.
+iGRIB is the standalone environmental reference plugin for OpenCPN's
+experimental hybrid portable-plugin runtime. It does not load, call or require
+the native xGRIB plugin. The portable Component Model guest registers actions,
+uses typed OpenCPN services and requests a host-owned environmental surface.
 
-In this Test-OpenCPN proof, its primary action requests the typed
-`org.opencpn.environment.viewer` host service. The 0.1 host compatibility
-adapter fulfils that request using an enabled xGRIB native plugin, so iGRIB
-opens the same xGRIB window and the same installed environmental data without
-passing native pointers, wxWidgets objects or graphics contexts to Wasm. The
-portable component still works when that optional provider is absent, but only
-its proof overlay, setting and job remain available.
+The current proof implements:
 
-This is deliberately a hybrid compatibility proof, not an independent rewrite
-of xGRIB's native implementation. A production iGRIB port still needs the RFC's
-environment dataset, HTTP, storage, declarative UI and supervised-helper
-services. The package is unsigned and accepted only in a test build with both
-the experimental runtime and developer mode explicitly enabled.
+- an accessible, host-rendered xGRIB-style viewer with timeline playback and
+  wind, current, pressure, wave-height and air-temperature layers;
+- ecCodes metadata and frame decoding in a separately supervised helper;
+- GFS/UKMO environmental generation plus optional waves and TPXO current
+  inputs through the signed `environmental-grib` helper;
+- user-selected input/output paths, namespaced private storage and a
+  permission-controlled host HTTP client;
+- retained geographic overlays, batched chart-coverage queries, settings,
+  cancellable jobs and deliberate-trap containment;
+- deterministic `.ocpnp` packaging, Ed25519 developer signing, strict archive
+  verification, atomic update and retained rollback copies.
+
+On Linux the helper is launched with explicit read-only/input/output mounts in
+a bubblewrap user/PID/IPC/UTS namespace and CPU/address-space limits. OpenCPN
+owns every wxWidgets and chart/rendering object; neither the component nor its
+helpers receive a graphics context or OpenCPN pointer.
+
+This remains experimental. The included signing key is deliberately public
+development material and is not a production trust root. Linux x86-64 has
+real-file, real-network and GUI evidence; Windows, macOS, Linux ARM64,
+Raspberry Pi and Flatpak must run `portable-runtime/tests/conformance.py` with
+target-built helper payloads before being described as supported. Generated
+weather and plugin overlays are planning aids, not authoritative navigation
+products.

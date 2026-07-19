@@ -1,10 +1,18 @@
 # RFC: Optional portable plugin runtime for OpenCPN
 
-Status: **research recommendation; not approved for implementation**
+Status: **experimental implementation validated on Linux x86-64; not approved for production**
 
 Scope: OpenCPN **5.14.0** (`Release_5.14.0`, commit `91f3b674366068a6ecd61a5e9aba204bba85f57e`)
 
 Date: 2026-07-19
+
+Implementation note: the research checkpoint was accepted for the isolated
+Test-OpenCPN tree. The vertical slice and an expanded standalone iGRIB proof
+are now implemented behind both experimental gates. See
+[prototype-status.md](prototype-status.md) and
+[conformance-linux-x86_64.md](conformance-linux-x86_64.md). The recommended
+production architecture and unresolved cross-platform/governance gates below
+remain proposals.
 
 ## Executive decision
 
@@ -208,21 +216,21 @@ WIT interfaces use semantic versions, generated bindings and conformance fixture
 
 ## Implementation stages and gates
 
-### Stage 1 — investigation and RFC (this work)
+### Stage 1 — investigation and RFC (complete)
 
 Review architecture, governance and dependency appetite. No runtime code.
 
-### Stage 2 — vertical slice after explicit approval
+### Stage 2 — vertical slice (complete on Linux x86-64)
 
 Behind both flags: discover one test-signed package; validate manifest; instantiate one Rust component; negotiate API/permissions; register one action; read a vessel-position snapshot; store one setting; run/cancel one job; submit/render one geographic polyline; contain a deliberate trap; disable and drop cleanly. Add unit, integration, negative-package, UI-thread and leak tests with each change. No general network, file, chart or helper API.
 
 Exit gate: the native-off build is bit-for-behavior unchanged; all 13 demonstration points pass; a trap cannot terminate OpenCPN; cancellation and shutdown meet provisional budgets; maintainers accept the core-service shape.
 
-### Stage 3 — architecture reference services and plugins
+### Stage 3 — architecture reference services (partially complete)
 
 Add host HTTP/storage, environment batch sampling, one chart-safety batch, retained route/corridor scenes and the two small reference components. Spike C/C++ and JavaScript/Python bindings separately; do not advertise a language until conformance passes.
 
-### Stage 4 — performance, conformance, platforms and helpers
+### Stage 4 — performance, conformance, platforms and helpers (Linux x86-64 evidence only)
 
 Run [performance-plan.md](performance-plan.md) and the independent conformance suite on all requested targets. Prototype the environmental helper and its Flatpak packaging. Decide whether canonical WIT lists suffice or a packed-buffer profile is justified.
 

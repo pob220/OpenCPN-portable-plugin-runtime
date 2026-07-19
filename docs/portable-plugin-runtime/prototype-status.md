@@ -1,80 +1,106 @@
-# Portable runtime prototype status
+# Portable runtime implementation status
 
-Status date: 2026-07-19. Baseline: OpenCPN Release_5.14.0 (`91f3b...`) in the
-separate Test-OpenCPN build/profile. This file records implementation evidence;
-it does not upgrade any experimental interface into a compatibility promise.
+Status date: 2026-07-19. Baseline: OpenCPN Release 5.14.0 in the separate
+Test-OpenCPN build/profile. The native xGRIB library was disabled and then
+moved to Test-OpenCPN's recoverable `plugins-disabled` directory for the final
+standalone test. The modified working OpenCPN 5.15 setup was not used.
 
-## Implemented vertical slice
+This is implementation evidence, not a production compatibility or navigation
+safety claim. Both the build option and runtime preference remain off by
+default.
 
-- Build flag `OCPN_ENABLE_PORTABLE_PLUGINS`, default `OFF`, and independent
-  runtime option `/PortablePlugins/EnableExperimental`, default false.
-- Parallel portable loader; the native loader and native plugin ABI are intact.
-- Wasmtime 46.0.1 Component Model bridge with WIT-generated bindings, inert
-  WASI defaults, 256 MiB store limit, finite fuel and an engine epoch ticker.
-- Bounded manifest discovery, exact prototype runtime/API negotiation,
-  permission allow-listing and exported component/manifest identity matching.
-- Typed value services for command registration, vessel position, namespaced
-  settings, retained geographic polyline scenes, cancellable jobs and the
-  transitional environmental-viewer adapter.
-- Component traps are converted to plugin failure; its scenes/jobs are removed
-  or cancelled and OpenCPN remains operational.
-- Deterministic `.ocpnp` producer and a developer installer which rejects path
-  traversal, Unicode/case collisions, cross-platform reserved names, links and
-  non-regular files, zip bombs, oversized archives, duplicate JSON keys,
-  undeclared files, digest mismatch and non-Wasm components.
-- Installable Rust Component Model iGRIB proof package. In compatibility mode
-  it opens the existing xGRIB UI through one typed host operation; no native
-  object crosses the component boundary.
+## Implemented
 
-## Verified on this host
+- Parallel Component Model loader using Wasmtime 46.0.1; the native loader and
+  C++ ABI remain intact.
+- Bounded manifest discovery, runtime/API negotiation, permission allow-list,
+  component/manifest identity matching, inert ambient WASI, 256 MiB component
+  memory limit, finite fuel and epoch interruption.
+- Typed WIT services for actions, vessel-position values, namespaced settings,
+  retained geographic overlays, cancellable jobs, environmental viewer,
+  chart-coverage batches, host HTTP-to-private-storage and bounded private
+  reads. No pointers, wxWidgets objects or graphics handles cross the boundary.
+- Host-rendered declarative iGRIB surface with timeline navigation/playback,
+  toggles for wind/current/pressure/waves/temperature, progress/cancellation,
+  open/settings/download/generate actions and native file pickers.
+- Standalone ecCodes helper supporting bounded `inspect` and `frame` operations
+  with structured result/error JSON and atomic result publication.
+- Environmental generator helper using versioned job/result/progress messages,
+  GFS and UKMO providers, optional waves and TPXO current inputs, user-selected
+  output and automatic reopening of completed output.
+- Linux helper containment with bubblewrap namespaces and explicit immutable
+  input/output/CA grants, `prlimit` CPU/address-space limits, child termination
+  on cancellation/disable and deterministic cleanup. Other OS supervision
+  policies are designed but not yet implemented or tested.
+- Deterministic `.ocpnp` packages, complete SHA-256 file inventory, Ed25519
+  signature verification, executable-path restrictions, malicious archive
+  rejection, immutable extracted files, atomic replacement and retained
+  rollback packages. The checked-in key is development-only.
+- Reusable cross-platform conformance runner which reports pass/skip rather
+  than extrapolating support.
 
-- Full Test-OpenCPN 5.14.0 application builds and links with `-Werror`.
-- CTest discovers and passes the real-component lifecycle/fault/identity test
-  and ten malicious/reproducible-package tests.
-- A clean feature-disabled build reaches 100%; its OpenCPN link command and
-  symbol table contain no portable-runtime manager, bridge or Wasmtime entry.
-- The final `.ocpnp` archive is reproducible across independent invocations
-  (`ad8aa12477d2bace995e70caa859eccc58f336f1c8a28ea90502ac66567b6174`
-  on this build) and passes a fresh developer install.
-- Isolated GUI launch loads iGRIB, invokes its action, persists its setting,
-  submits and renders a retained overlay, completes a background job and opens
-  the installed xGRIB window with the current GRIB dataset.
-- A deliberate guest trap is contained, followed by normal OpenCPN operation
-  and clean process exit.
-- The stock non-REST test set passes 56/56 and buffer tests pass 8/8. The five
-  REST cases cannot be isolated on this host because their fixed endpoint
-  reaches the intentionally untouched, already-running 5.15.0 instance; that
-  external version collision is recorded rather than stopping the working app.
-- The concurrently running modified OpenCPN 5.15.0 process/profile was not
-  stopped, written or used for the tests.
+## Linux x86-64 evidence
 
-## Not implemented / not production-ready
+- Full Test-OpenCPN links with `-Werror`.
+- Three CTests pass: real component lifecycle/trap/identity and typed service
+  exercise; 15 package/signing/update security tests; target package/helper
+  conformance.
+- Signed package install and replacement preserve executable helper modes and
+  retain the previous version in `.rollback`.
+- A 44,821,471-byte real GRIB fixture was decoded as 387 messages, seven
+  supported environmental field groups and 67 forecast times. A frame retained
+  5,960 samples. Timeline playback advanced and overlays remained responsive.
+- Malformed input returned a structured `environment-decode-failed` result and
+  did not affect OpenCPN.
+- The generator helper copied/validated the 44.8 MB fixture under containment
+  and published a valid 387-message GRIB.
+- The actual GUI generated a one-degree, one-hour NOAA GFS product over HTTPS,
+  wrote a 1,246-byte/six-message GRIB, reopened it and displayed 75 retained
+  samples. An initial missing CA mount and wxJSON string-conversion bug were
+  detected by this test and fixed before the final run.
+- The component's host HTTP action downloaded 7,655 bytes and read them back
+  through namespaced private storage.
+- A four-segment chart coverage request completed as one batch. A deliberate
+  Wasm trap was contained and OpenCPN continued operating.
+- Final GUI testing ran with native xGRIB absent from the Test plugin search
+  path. iGRIB therefore has no enabled or loadable native xGRIB provider.
 
-- Production signing, catalogue/TUF metadata, revocation, consent UI, updates,
-  rollback and state migration.
-- A general host-rendered declarative UI, HTTP client, credential broker,
-  capability storage, environmental dataset service, chart-safety batching,
-  route services, provider registry or native-helper supervisor.
-- Independent iGRIB environmental decode/generation. The exact xGRIB UI in this
-  proof depends on an enabled native xGRIB provider and is a migration adapter,
-  not the eventual platform-neutral implementation.
-- Guest execution is synchronously entered by the prototype UI dispatch path;
-  fuel/epoch limits bound failure, but production work requires a supervised
-  runtime executor so long calls never occupy the GUI thread.
-- ARM64, macOS, Windows and Flatpak builds/measurements. Portability outside the
-  tested Linux x86-64 host remains an architectural/toolchain conclusion, not
-  measured evidence.
+Measured conformance values for this machine are recorded in
+`conformance-linux-x86_64.md`. Values are observations, not release budgets.
 
-## Next gates
+## Still experimental or incomplete
 
-1. Review the RFC and this slice before broadening the WIT world.
-2. Move component entry calls to a serial supervised executor and marshal host
-   services onto their owning executors.
-3. Implement host HTTP, private storage/user-selected files and a minimal
-   declarative progress/form surface.
-4. Add immutable environmental dataset handles plus batch sampling; prototype
-   the ecCodes/NetCDF/PROJ helper protocol out of process.
-5. Add chart segment batching and the routing reference component, then run the
-   benchmark and cross-platform conformance plan.
-6. Select and implement production package/catalogue trust only after ownership
-   and security-response governance are accepted.
+- Windows x86-64, macOS Intel/Apple Silicon, Linux ARM64/Raspberry Pi and
+  Flatpak have not been built or executed in this session. Their helper
+  binaries, signing/notarisation and OS-specific process controls remain gates.
+- The package assembled here contains the Linux x86-64 helper payload. A single
+  multi-target archive requires the central build service to add all signed
+  target helpers; the Wasm component itself is unchanged across targets.
+- The UI is an xGRIB-style functional surface, not a pixel-for-pixel port of
+  every xGRIB preference, cursor interpolation, contour option or provider
+  dialog. Broader parity should be incremental, not an expansion of the WIT
+  boundary into wxWidgets.
+- Chart coverage batching is real, but structured land/depth/drying/conflict
+  safety evidence and route-shaped immutable caches are not yet implemented.
+- Production catalogue/TUF metadata, revocation, user permission-consent UI,
+  OS credential stores, state migrations and a security-response ownership
+  agreement remain absent.
+- Guest entry dispatch and some host callbacks still need a dedicated serial
+  runtime executor before production so no potentially long guest call can
+  occupy the wx event thread.
+- CPU and memory quotas are enforced for the component and Linux helpers, but
+  per-plugin fair scheduling, cgroup/job-object/App Sandbox profiles and robust
+  helper restart throttling remain production work.
+
+## Next release gates
+
+1. Run the same conformance package on every target and publish target-built
+   helpers in one signed multi-target archive.
+2. Add Windows Job Object/restricted-token, macOS sandbox/hardened-runtime and
+   Flatpak policy tests; add Linux seccomp/cgroup controls where deployable.
+3. Move runtime entry to a serial supervisor executor and add shutdown/leak
+   soak tests.
+4. Add immutable environment dataset handles plus sample batches, then the
+   structured chart-safety service and routing reference component.
+5. Complete catalogue trust/revocation/consent and select an owned Wasmtime LTS
+   before any production enablement.

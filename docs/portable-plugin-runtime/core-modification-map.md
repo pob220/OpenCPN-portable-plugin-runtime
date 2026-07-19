@@ -1,6 +1,15 @@
 # OpenCPN 5.14.0 core modification map
 
-These are proposals, not implementation instructions. New service classes deliberately live outside `ocpn_plugin.h` and have no Wasmtime dependency. `OCPN_ENABLE_PORTABLE_PLUGINS` is a CMake option defaulting `OFF`; `EnablePortablePluginsExperimental` is a runtime preference defaulting false. Both must be true to discover packages.
+This map retains the production service decomposition proposed by the RFC.
+The Linux x86-64 proof has implemented the guarded call sites in root
+`CMakeLists.txt`, `gui/src/ocpn_app.cpp`, `gui/src/ocpn_frame.cpp`,
+`gui/src/chcanv.cpp`, `gui/src/gl_chart_canvas.cpp`, and the new
+`gui/{include/gui,src}/portable_{plugin_manager,grib_host}.*` plus
+`portable-runtime/`. Broader model-layer extraction shown below is still the
+recommended refactor; prototype services currently co-located in
+`portable_plugin_manager.cpp` must not become the permanent service layer.
+`OCPN_ENABLE_PORTABLE_PLUGINS` defaults off and the independent runtime option
+must also be enabled. New public boundaries remain outside `ocpn_plugin.h`.
 
 ## Build, startup and lifecycle
 

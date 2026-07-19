@@ -6,6 +6,15 @@ Use `.ocpnp` (**OpenCPN Portable Plugin**) as a deterministic ZIP container. A W
 
 Package format `1` is independent of OpenCPN version, portable API version, component encoding and plugin version.
 
+Prototype implementation note: the current deterministic producer uses
+`format_version`, `component`, a complete `checksums.sha256` inventory and an
+Ed25519 `signature.json` which signs the exact checksum bytes. The installer
+requires a configured key id, keeps package files immutable, allows executable
+bits only below `helpers/`, and supports verified atomic `--replace` with a
+retained rollback directory. This deliberately small development profile is
+implemented and tested; the richer canonical-manifest/TUF/Sigstore catalogue
+profile below remains the production proposal.
+
 ## Layout
 
 ```text
