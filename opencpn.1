@@ -1,0 +1,152 @@
+.\"
+.\" (C) Copyright 2018 Alec Leamas <leamas.alec@gmail.com>,
+.\"
+.TH Opencpn 1 "July 2018"
+
+.SH NAME
+opencpn \- Chartplotter and GPS Navigation Software
+.SH SYNOPSIS
+.B opencpn
+.RI [ options ]
+.SH DESCRIPTION
+OpenCPN is a chartplotter and navigation GUI program supporting navigation
+under way as well as planning. It supports a wide range of chart formats
+using a plugin system. Other plugins provides support for e. g. radar, AIS
+and weather maps. Program is localized in 20+ languages and ported to
+several OS including MacOS, Windows and Linux.
+
+.SH OPTIONS FOR STARTING OPENCPN
+.TP
+.B \-h, \-\-help
+Show help info.
+.TP
+.B \-p, \-\-portable
+Run in portable mode.
+.TP
+.B  \-l, \-\-loglevel=<level>
+Set amount of logged information. Level is any of \fItrace\fR,
+\fIdebug\fR, \fIinfo\fR, \fImessage\fR, \fIwarning\fR or \fIerror\fR,
+defaulting to \fIinfo\fR if not set in environment; see ENVIRONMENT.
+
+.TP
+.B  \-c, \-\-configdir=<directory>
+Use alternative configuration directory instead  of \fI~/.openpcn\fR on
+Linux or MacOS.
+.B  \-f, \-\-fullscreen
+Switch to full screen mode on start.
+.TP
+.B  \-G, \-\-no_opengl
+Disable OpenGL video acceleration. This setting will be remembered.
+.TP
+.B \-g,  \-\-rebuild_gl_raster_cache
+Rebuild OpenGL raster cache on start.
+.TP
+.B \-D, \-\-rebuild_chart_db
+Rescan chart directories and rebuild the chart database
+.TP
+.B  \-P, \-\-parse_all_enc
+Convert all S-57 charts to OpenCPN's internal format on start.
+.TP
+.B  \-u, \-\-unit_test_1:<num>
+Display a slideshow of <num> charts and then exit. Zero or negative <num>
+specifies no limit.
+
+.TP
+.B \-s, \-\-safe_mode
+Run without plugins, openGL and other possibly problematic features.
+It is still possible to unintall plugins in this mode.
+
+.SH OPTIONS FOR MANIPULATING RUNNING OPENCPN
+
+.TP
+.B \-r, \-\-remote
+Run commands on a running instance instead of starting opencpn. Exits with
+error code if no running opencpn instance is found.
+
+.TP
+.B \-R, \-\-raise
+Raise opencpn window to be on top of other windows, requires \-\-remote.
+This is the default behaviour if opencpn is invoked without options and
+arguments and there already is a running instance.
+
+.TP
+.B \-e, \-\-get_rest_endpoint
+Print the url for connecting to the local opencpn REST server e. g.
+http://localhost:8000. Requires \-\-remote.
+
+.TP
+.B \-q, \-\-quit
+Make the remote instance exit. Requires \-\-remote.
+
+.SH PLUGIN LOADING
+
+Plugin loading depends on that the opencpn main program can locate the
+plugin object file and that the plugin can locate it's own data.
+.P
+On Linux,  the main program searches for plugin .so-files  in two locatiosn.
+The first is \fI~/.local/lib/opencpn\fR.
+
+The second is \fI@install-dir@/../lib/opencpn\fR where \fI@install-dir@\fR
+is the location where opencpn is installed.
+If for example opencpn is installed in \fI/usr/bin\fR plugins will be loaded
+from \fI/usr/lib/opencpn\fR.
+.P
+On other platforms plugins are also loaded from two different locations,
+one of which used primarely for system plugins and requiring administrative
+privileges.
+The other is a user-writable locations used by the plugin manager.
+.P
+A plugin's data directory is a path ending with
+\fIopencpn/plugins/<plugin_name>\fR.
+On Linux, this is by default searched in
+~/.local/share:/usr/local/share:/usr/share.
+This search path is overridden by XDG_DATA_DIRS as defined by the freedesktop
+spec.
+Only plugins adapted for this (i. e., using GetPluginDataDir()) handles this
+properly.
+.P
+On other platforms plugin data directories are located in similar locations
+which also must be retrieved in runtime using GetPluginDataDir().
+
+.SH LIBRARY LOADING AND LD_LIBRARY_PATH
+
+If \fILD_LIBRARY_PATH\fR exists in the environment \fBopencpn\fR uses it
+without modifications.
+.P
+Otherwise \fILD_LIBRARY_PATH\fR is set to the same path as from which plugins are
+loaded, see above. This ensures that helper binaries can load possible libraries
+installed in the same directories as the plugin.
+
+.SH ENVIRONMENT
+.TP
+.B OPENCPN_PLUGIN_DIRS
+Plugin load path, see PLUGIN LOADING. If existing, overrides all default entries.
+The path is ';'-separated on Windows but uses ':' on other platforms.
+.TP
+.B OPENCPN_LOGLEVEL
+Default loglevel if not defined on command line using -l/--loglevel. See
+the --loglevel option for allowed values.
+.TP
+.B OPENCPN_FATAL_ERROR
+If defined, displays the message and exits on startup.
+.TP
+.B OPENCPN_COMPAT_TARGET
+Opencpn normally only loads plugins with a specific ABI.
+\fIOPENCPN_COMPAT_TARGET\fR overrides the built-in default and makes it
+possible to load plugins with another ABI.
+The format is platform:version , for example \fIdebian:13\fR. 
+Note that attempts to load plugins this way may crash opencpn on start.
+
+.SH FILES
+.TP
+.B ~/.opencpn/opencpn.log
+System log file, a useful tool to solve problems.
+
+
+.SH SEE ALSO
+.br
+https://www.opencpn.org
+.br
+https://www.freedesktop.org
+.br
+https://opencpn-manuals.github.io/main

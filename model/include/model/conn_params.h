@@ -1,0 +1,143 @@
+/***************************************************************************
+ *   Copyright (C) 2013 by David S. Register                               *
+ *                                                                         *
+ *   This program is free software; you can redistribute it and/or modify  *
+ *   it under the terms of the GNU General Public License as published by  *
+ *   the Free Software Foundation; either version 2 of the License, or     *
+ *   (at your option) any later version.                                   *
+ *                                                                         *
+ *   This program is distributed in the hope that it will be useful,       *
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
+ *   GNU General Public License for more details.                          *
+ *                                                                         *
+ *   You should have received a copy of the GNU General Public License     *
+ *   along with this program; if not, see <https://www.gnu.org/licenses/>. *
+ **************************************************************************/
+
+/**
+ * \file
+ *
+ * Connection parameters
+ */
+
+#ifndef CONNECTIONPARAMS_H_
+#define CONNECTIONPARAMS_H_
+
+#include <wx/wxprec.h>
+
+#ifndef WX_PRECOMP
+#include <wx/arrstr.h>
+#include <wx/dynarray.h>
+#include <wx/string.h>
+#endif
+
+#include "model/comm_navmsg.h"
+
+#ifndef __DSPORTTYPE_H__
+#include "model/ds_porttype.h"
+#endif
+
+#define CONN_ENABLE_ID 47621
+
+class ConnectionParams;   // forward
+class ConnectionsDialog;  // Indirectly unused FIXME  (leamas) remove
+
+typedef enum {
+  SERIAL = 0,
+  NETWORK = 1,
+  INTERNAL_GPS = 2,
+  INTERNAL_BT = 3,
+  SOCKETCAN = 4,
+  UNKNOWN = 5
+} ConnectionType;
+
+typedef enum {
+  TCP = 0,
+  UDP = 1,
+  GPSD = 2,
+  SIGNALK = 3,
+  PROTO_UNDEFINED = 4
+} NetworkProtocol;
+
+typedef enum { WHITELIST = 0, BLACKLIST = 1 } ListType;
+
+typedef enum { FILTER_INPUT = 0, FILTER_OUTPUT = 1 } FilterDirection;
+
+typedef enum {
+  PROTO_NMEA0183 = 0,
+  PROTO_NMEA2000 = 1,
+  PROTO_SIGNALK = 2
+} DataProtocol;
+
+class ConnectionParamsPanel;
+
+class ConnectionParams {
+public:
+  ConnectionParams();
+  ~ConnectionParams();
+  ConnectionParams(const wxString &configStr);
+
+  ConnectionType Type;
+  NetworkProtocol NetProtocol;
+  wxString NetworkAddress;
+  int NetworkPort;
+
+  wxString LastNetworkAddress;
+  int LastNetworkPort;
+  NetworkProtocol LastNetProtocol;
+  DataProtocol LastDataProtocol;
+
+  DataProtocol Protocol;
+  wxString Port;
+  wxString socketCAN_port;
+  int Baudrate;
+  bool NoDataReconnect;
+  bool DisableEcho;
+  bool ChecksumCheck;
+  bool Garmin;
+  bool GarminUpload;
+  bool FurunoGP3X;
+  bool AutoSKDiscover;
+  dsPortType IOSelect;
+  ListType InputSentenceListType;
+  wxArrayString InputSentenceList;
+  ListType OutputSentenceListType;
+  wxArrayString OutputSentenceList;
+  bool bEnabled;
+  wxString UserComment;
+  wxString AuthToken;
+
+  /** Return string unique for each instance. */
+  std::string GetKey() const;
+
+  wxString Serialize() const;
+  void Deserialize(const wxString &configStr);
+
+  wxString GetSourceTypeStr() const;
+  wxString GetAddressStr() const;
+  wxString GetParametersStr() const;
+  wxString GetIOTypeValueStr() const;
+  wxString GetFiltersStr() const;
+  wxString GetDSPort() const;
+  bool GetValidPort() const;
+  std::string GetLastDSPort() const;
+  NavAddr::Bus GetLastCommProtocol();
+  wxString GetPortStr() const { return Port; }
+  void SetPortStr(wxString str) { Port = str; }
+  std::string GetStrippedDSPort() const;
+  NavAddr::Bus GetCommProtocol() const;
+
+  bool SentencePassesFilter(const wxString &sentence,
+                            FilterDirection direction) const;
+  bool Valid;
+  bool b_IsSetup;
+  ConnectionParamsPanel *m_optionsPanel;
+
+private:
+  wxString FilterTypeToStr(ListType type, FilterDirection dir) const;
+};
+
+std::vector<ConnectionParams *> &TheConnectionParams();
+
+#endif
