@@ -96,6 +96,16 @@ def main():
             raise RuntimeError("fresh conformance install unexpectedly created rollback")
         report["checks"]["signed_package_install"] = "passed"
 
+        action_resources = [
+            destination / "resources" / "grib.svg",
+            destination / "resources" / "fault-test.svg",
+            destination / "resources" / "http-download.svg",
+        ]
+        if not all(path.is_file() and path.stat().st_size > 0
+                   for path in action_resources):
+            raise RuntimeError("one or more portable toolbar icons are absent")
+        report["checks"]["toolbar_action_resources"] = "passed"
+
         suffix = ".exe" if sys.platform == "win32" else ""
         helper_root = destination / "helpers" / target
         decoder = helper_root / f"igrib-environment-helper{suffix}"

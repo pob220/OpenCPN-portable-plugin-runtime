@@ -127,7 +127,11 @@ portable-runtime/beta/launch-linux.sh -- --fullscreen
 ```
 
 iGRIB should load and open automatically. A separate toolbar action remains
-available if the window is closed.
+available if the window is closed. The three portable actions use distinct
+icons: the xGRIB-style weather icon opens iGRIB, the warning icon deliberately
+tests Wasm trap containment, and the download icon tests the permission-gated
+host HTTP client. The latter two are diagnostic actions, not normal forecast
+controls.
 
 ## 5. Suggested beta exercise
 
@@ -139,8 +143,11 @@ Use non-critical sample data and record each result:
 4. Step forward/backward and run timeline playback.
 5. Open **Generate GRIB**, request a very small GFS area and one or two time
    steps, select **Copernicus Marine North-West Shelf** currents, and enter a
-   free Copernicus Marine account login. Verify the resulting GRIB opens
-   automatically and contains current vectors.
+   free Copernicus Marine account login. Set **Output GRIB** directly in the
+   form, or use **Browse…** to choose it, then press **Generate GRIB**. This
+   button starts the supervised job immediately; no second save dialog should
+   appear. Verify the resulting GRIB opens automatically and contains current
+   vectors.
 6. Start a larger operation and press **Cancel**; the UI must remain usable.
 7. Try a small text file renamed to `.grb`; the error must be contained and
    OpenCPN must remain operational.

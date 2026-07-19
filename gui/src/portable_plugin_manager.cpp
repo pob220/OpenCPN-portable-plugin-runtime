@@ -40,6 +40,7 @@
 #include "portable_grib_host.h"
 
 #include "model/base_platform.h"
+#include "model/svg_utils.h"
 #include "model/own_ship.h"
 #include "chartdb.h"
 #include "navutil.h"
@@ -298,10 +299,24 @@ int32_t PortablePluginManager::Impl::RegisterAction(
     if (!wxFileExists(icon)) return -4;
   }
 
-  const int tool_id = instance->owner->plugin_manager->AddToolbarTool(
-      FromUtf8(label, label_len), icon, icon, icon, wxITEM_NORMAL,
-      FromUtf8(tooltip, tooltip_len), FromUtf8(tooltip, tooltip_len), nullptr,
-      -1, 0, nullptr);
+  const wxString action_label = FromUtf8(label, label_len);
+  const wxString action_tooltip = FromUtf8(tooltip, tooltip_len);
+  int tool_id = -1;
+  if (!icon.empty()) {
+    // Portable actions deliberately have no native opencpn_plugin owner. The
+    // legacy toolbar consequently does not classify them as plugin tools and
+    // would ignore their SVG paths, displaying the default jigsaw instead.
+    // Decode the package-owned SVG here and use the value-based bitmap API.
+    wxBitmap bitmap = LoadSVG(icon, 32, 32);
+    if (!bitmap.IsOk()) return -6;
+    tool_id = instance->owner->plugin_manager->AddToolbarTool(
+        action_label, &bitmap, &bitmap, wxITEM_NORMAL, action_tooltip,
+        action_tooltip, nullptr, -1, 0, nullptr);
+  } else {
+    tool_id = instance->owner->plugin_manager->AddToolbarTool(
+        action_label, icon, icon, icon, wxITEM_NORMAL, action_tooltip,
+        action_tooltip, nullptr, -1, 0, nullptr);
+  }
   instance->owner->actions.emplace(tool_id, Action{instance, action});
   *host_action_id = static_cast<uint32_t>(tool_id);
   return 0;

@@ -28,6 +28,7 @@
 #include <wx/log.h>
 #include <wx/msgdlg.h>
 #include <wx/process.h>
+#include <wx/scrolwin.h>
 #include <wx/secretstore.h>
 #include <wx/sizer.h>
 #include <wx/spinctrl.h>
@@ -786,60 +787,62 @@ void PortableGribHost::Impl::ShowGenerator() {
                   wxDefaultPosition, wxSize(820, 760),
                   wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
   auto* root = new wxBoxSizer(wxVERTICAL);
+  auto* form = new wxScrolledWindow(&dialog, wxID_ANY, wxDefaultPosition,
+                                    wxDefaultSize, wxVSCROLL);
   auto* grid = new wxFlexGridSizer(2, 6, 8);
   grid->AddGrowableCol(1, 1);
   auto* executable =
-      new wxTextCtrl(&dialog, wxID_ANY, GeneratorHelper(), wxDefaultPosition,
+      new wxTextCtrl(form, wxID_ANY, GeneratorHelper(), wxDefaultPosition,
                      wxDefaultSize, wxTE_READONLY);
-  auto* west = new wxTextCtrl(&dialog, wxID_ANY, "-8.5");
-  auto* south = new wxTextCtrl(&dialog, wxID_ANY, "50.5");
-  auto* east = new wxTextCtrl(&dialog, wxID_ANY, "-2.5");
-  auto* north = new wxTextCtrl(&dialog, wxID_ANY, "56.5");
+  auto* west = new wxTextCtrl(form, wxID_ANY, "-8.5");
+  auto* south = new wxTextCtrl(form, wxID_ANY, "50.5");
+  auto* east = new wxTextCtrl(form, wxID_ANY, "-2.5");
+  auto* north = new wxTextCtrl(form, wxID_ANY, "56.5");
   auto* start =
-      new wxTextCtrl(&dialog, wxID_ANY,
+      new wxTextCtrl(form, wxID_ANY,
                      wxDateTime::Now().ToUTC().Format("%Y-%m-%dT%H:00:00Z"));
-  auto* hours = new wxSpinCtrl(&dialog, wxID_ANY, "72", wxDefaultPosition,
+  auto* hours = new wxSpinCtrl(form, wxID_ANY, "72", wxDefaultPosition,
                                wxDefaultSize, wxSP_ARROW_KEYS, 1, 360, 72);
-  auto* step = new wxSpinCtrl(&dialog, wxID_ANY, "3", wxDefaultPosition,
+  auto* step = new wxSpinCtrl(form, wxID_ANY, "3", wxDefaultPosition,
                               wxDefaultSize, wxSP_ARROW_KEYS, 1, 24, 3);
   wxArrayString weather_providers;
   weather_providers.Add("NOAA GFS forecast");
   weather_providers.Add("UK Met Office UKV");
-  auto* provider = new wxChoice(&dialog, wxID_ANY, wxDefaultPosition,
+  auto* provider = new wxChoice(form, wxID_ANY, wxDefaultPosition,
                                 wxDefaultSize, weather_providers);
   provider->SetSelection(0);
   wxArrayString presets;
   presets.Add("Routing");
   presets.Add("Viewer");
-  auto* preset = new wxChoice(&dialog, wxID_ANY, wxDefaultPosition,
+  auto* preset = new wxChoice(form, wxID_ANY, wxDefaultPosition,
                               wxDefaultSize, presets);
   preset->SetSelection(0);
-  auto* waves = new wxCheckBox(&dialog, wxID_ANY, "Include wave fields");
+  auto* waves = new wxCheckBox(form, wxID_ANY, "Include wave fields");
   wxArrayString current_sources;
   current_sources.Add("None");
   if (credential_access) {
     current_sources.Add("Copernicus Marine North-West Shelf (hourly, ~1.5 km)");
     current_sources.Add("Copernicus Marine Global (hourly, ~1/12 degree)");
   }
-  auto* current_source = new wxChoice(&dialog, wxID_ANY, wxDefaultPosition,
+  auto* current_source = new wxChoice(form, wxID_ANY, wxDefaultPosition,
                                       wxDefaultSize, current_sources);
   current_source->SetSelection(credential_access ? 1 : 0);
   auto* current_note =
-      new wxStaticText(&dialog, wxID_ANY,
+      new wxStaticText(form, wxID_ANY,
                        "North-West Shelf coverage: 20 W to 13 E, 40 N to 65 N. "
                        "Use Global outside this area.");
   current_note->Wrap(520);
   auto* account = new wxHyperlinkCtrl(
-      &dialog, wxID_ANY, "Create or manage a free Copernicus Marine account",
+      form, wxID_ANY, "Create or manage a free Copernicus Marine account",
       "https://data.marine.copernicus.eu/register");
-  auto* username = new wxTextCtrl(&dialog, wxID_ANY, stored_username);
+  auto* username = new wxTextCtrl(form, wxID_ANY, stored_username);
   wxSecretString initial_password;
   if (have_stored_credentials)
     initial_password.assign(stored_password.GetAsString());
   auto* password =
-      new wxTextCtrl(&dialog, wxID_ANY, initial_password, wxDefaultPosition,
+      new wxTextCtrl(form, wxID_ANY, initial_password, wxDefaultPosition,
                      wxDefaultSize, wxTE_PASSWORD);
-  auto* remember = new wxCheckBox(&dialog, wxID_ANY,
+  auto* remember = new wxCheckBox(form, wxID_ANY,
                                   "Save in operating-system credential store");
   remember->SetValue(secret_store_available);
   remember->Enable(secret_store_available);
@@ -847,27 +850,44 @@ void PortableGribHost::Impl::ShowGenerator() {
     remember->SetToolTip("Credential storage unavailable: " +
                          secret_store_error);
   }
-  auto* forget = new wxButton(&dialog, wxID_ANY, "Forget saved login");
+  auto* forget = new wxButton(form, wxID_ANY, "Forget saved login");
   forget->Enable(have_stored_credentials);
-  AddRow(grid, &dialog, "Generator executable", executable);
-  AddRow(grid, &dialog, "West longitude", west);
-  AddRow(grid, &dialog, "South latitude", south);
-  AddRow(grid, &dialog, "East longitude", east);
-  AddRow(grid, &dialog, "North latitude", north);
-  AddRow(grid, &dialog, "Start UTC", start);
-  AddRow(grid, &dialog, "Forecast duration hours (maximum 15 days)", hours);
-  AddRow(grid, &dialog, "Step hours", step);
-  AddRow(grid, &dialog, "Weather provider", provider);
-  AddRow(grid, &dialog, "Weather preset", preset);
-  AddRow(grid, &dialog, "Waves", waves);
-  AddRow(grid, &dialog, "Current source", current_source);
-  AddRow(grid, &dialog, "Current-source details", current_note);
-  AddRow(grid, &dialog, "Copernicus account", account);
-  AddRow(grid, &dialog, "Copernicus username or email", username);
-  AddRow(grid, &dialog, "Copernicus password", password);
-  AddRow(grid, &dialog, "Credential storage", remember);
-  AddRow(grid, &dialog, "Saved credentials", forget);
-  root->Add(grid, 1, wxEXPAND | wxALL, 10);
+  wxString default_output_directory = wxStandardPaths::Get().GetDocumentsDir();
+  if (!wxDirExists(default_output_directory))
+    default_output_directory = wxGetHomeDir();
+  const wxString default_output_name =
+      wxDateTime::Now().ToUTC().Format("environment_igrib_%Y%m%d_%H%M.grb");
+  auto* output_panel = new wxPanel(form);
+  auto* output_sizer = new wxBoxSizer(wxHORIZONTAL);
+  auto* output_path = new wxTextCtrl(
+      output_panel, wxID_ANY,
+      wxFileName(default_output_directory, default_output_name).GetFullPath());
+  auto* browse_output = new wxButton(output_panel, wxID_ANY, "Browse…");
+  output_sizer->Add(output_path, 1, wxEXPAND | wxRIGHT, 6);
+  output_sizer->Add(browse_output, 0, wxEXPAND);
+  output_panel->SetSizer(output_sizer);
+  AddRow(grid, form, "Generator executable", executable);
+  AddRow(grid, form, "West longitude", west);
+  AddRow(grid, form, "South latitude", south);
+  AddRow(grid, form, "East longitude", east);
+  AddRow(grid, form, "North latitude", north);
+  AddRow(grid, form, "Start UTC", start);
+  AddRow(grid, form, "Forecast duration hours (maximum 15 days)", hours);
+  AddRow(grid, form, "Step hours", step);
+  AddRow(grid, form, "Weather provider", provider);
+  AddRow(grid, form, "Weather preset", preset);
+  AddRow(grid, form, "Waves", waves);
+  AddRow(grid, form, "Current source", current_source);
+  AddRow(grid, form, "Current-source details", current_note);
+  AddRow(grid, form, "Copernicus account", account);
+  AddRow(grid, form, "Copernicus username or email", username);
+  AddRow(grid, form, "Copernicus password", password);
+  AddRow(grid, form, "Credential storage", remember);
+  AddRow(grid, form, "Saved credentials", forget);
+  AddRow(grid, form, "Output GRIB", output_panel);
+  form->SetSizer(grid);
+  form->SetScrollRate(0, 12);
+  root->Add(form, 1, wxEXPAND | wxALL, 10);
   root->Add(new wxStaticText(
                 &dialog, wxID_ANY,
                 "Generated environmental data is model output for planning "
@@ -875,6 +895,8 @@ void PortableGribHost::Impl::ShowGenerator() {
                 "product."),
             0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10);
   auto* buttons = dialog.CreateSeparatedButtonSizer(wxOK | wxCANCEL);
+  if (auto* generate = wxDynamicCast(dialog.FindWindow(wxID_OK), wxButton))
+    generate->SetLabel("Generate GRIB");
   root->Add(buttons, 0, wxEXPAND | wxALL, 10);
   dialog.SetSizer(root);
 
@@ -908,6 +930,18 @@ void PortableGribHost::Impl::ShowGenerator() {
       forget->Enable(false);
     }
   });
+  browse_output->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
+    wxFileName selected(output_path->GetValue());
+    wxString directory = selected.GetPath();
+    if (!wxDirExists(directory)) directory = wxGetHomeDir();
+    wxFileDialog output_dialog(
+        &dialog, "Choose where to save the generated environmental GRIB",
+        directory, selected.GetFullName(),
+        "GRIB files (*.grb)|*.grb|All files (*.*)|*.*",
+        wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+    if (output_dialog.ShowModal() == wxID_OK)
+      output_path->SetValue(output_dialog.GetPath());
+  });
   update_current_controls();
   if (dialog.ShowModal() != wxID_OK) return;
 
@@ -919,6 +953,31 @@ void PortableGribHost::Impl::ShowGenerator() {
         "iGRIB", wxOK | wxICON_ERROR, frame);
     return;
   }
+
+  wxString requested_output = output_path->GetValue();
+  requested_output.Trim(true).Trim(false);
+  wxFileName output_filename(requested_output);
+  if (requested_output.empty() || !output_filename.IsAbsolute()) {
+    wxMessageBox("Choose an absolute output path for the generated GRIB",
+                 "iGRIB", wxOK | wxICON_ERROR, frame);
+    return;
+  }
+  if (output_filename.GetExt().empty()) output_filename.SetExt("grb");
+  output_filename.Normalize(wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE);
+  const wxString output_directory = output_filename.GetPath();
+  if (!wxDirExists(output_directory) ||
+      !wxFileName::IsDirWritable(output_directory)) {
+    wxMessageBox("The selected output directory does not exist or is not "
+                 "writable",
+                 "iGRIB", wxOK | wxICON_ERROR, frame);
+    return;
+  }
+  if (output_filename.FileExists() &&
+      wxMessageBox("Replace the existing GRIB file?\n" +
+                       output_filename.GetFullPath(),
+                   "iGRIB", wxYES_NO | wxNO_DEFAULT | wxICON_WARNING,
+                   frame) != wxYES)
+    return;
 
   const bool use_copernicus = current_source->GetSelection() > 0;
   wxString copernicus_username = username->GetValue();
@@ -944,12 +1003,6 @@ void PortableGribHost::Impl::ShowGenerator() {
     }
   }
   password->Clear();
-
-  wxFileDialog output_dialog(frame, "Save generated environmental GRIB",
-                             wxEmptyString, "environment_igrib.grb",
-                             "GRIB files (*.grb)|*.grb|All files (*.*)|*.*",
-                             wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
-  if (output_dialog.ShowModal() != wxID_OK) return;
 
   double west_value = 0, south_value = 0, east_value = 0, north_value = 0;
   if (!west->GetValue().ToDouble(&west_value) ||
@@ -991,8 +1044,8 @@ void PortableGribHost::Impl::ShowGenerator() {
   }
   const bool sandboxed_generator = HelperSupervisionAvailable();
   request["output"] = sandboxed_generator
-                          ? "/output/" + output_dialog.GetFilename()
-                          : output_dialog.GetPath();
+                          ? "/output/" + output_filename.GetFullName()
+                          : output_filename.GetFullPath();
   request["overwrite"] = true;
 
   const wxString job_path = MakeResultPath(private_directory, "generate-job");
@@ -1006,7 +1059,7 @@ void PortableGribHost::Impl::ShowGenerator() {
   wxJSONWriter writer(wxJSONWRITER_STYLED);
   writer.Write(job, job_output);
   job_output.Close();
-  generated_output_path = output_dialog.GetPath();
+  generated_output_path = output_filename.GetFullPath();
   Launch(GeneratorCommand(job_path, result, generated_output_path),
          Operation::Generate, result,
          "Generating environmental GRIB in supervised helper…",

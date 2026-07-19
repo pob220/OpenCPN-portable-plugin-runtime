@@ -156,6 +156,12 @@ add_custom_command(
           "${CMAKE_SOURCE_DIR}/plugins/grib_pi/data/grib.svg"
           "${_igrib_package}/resources/grib.svg"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${CMAKE_SOURCE_DIR}/data/svg/markicons/Hazard-Warning.svg"
+          "${_igrib_package}/resources/fault-test.svg"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${CMAKE_SOURCE_DIR}/data/svg/traditional/emblem-download.svg"
+          "${_igrib_package}/resources/http-download.svg"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
           "${_igrib_source}/package/igrib-viewer.ui.json"
           "${_igrib_package}/ui/igrib-viewer.ui.json"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -174,6 +180,8 @@ add_custom_command(
           "${_igrib_source}/package/manifest.json"
           "${_igrib_source}/package/igrib-viewer.ui.json"
           "${CMAKE_SOURCE_DIR}/plugins/grib_pi/data/grib.svg"
+          "${CMAKE_SOURCE_DIR}/data/svg/markicons/Hazard-Warning.svg"
+          "${CMAKE_SOURCE_DIR}/data/svg/traditional/emblem-download.svg"
           "${CMAKE_SOURCE_DIR}/COPYING.gplv2"
           "${_igrib_source}/README.md"
           "${CMAKE_CURRENT_SOURCE_DIR}/wit/opencpn-portable.wit"

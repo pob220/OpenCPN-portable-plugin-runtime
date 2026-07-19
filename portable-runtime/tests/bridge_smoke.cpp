@@ -11,6 +11,7 @@ namespace {
 
 struct HostState {
   std::vector<std::string> actions;
+  std::vector<std::string> action_icons;
   std::vector<std::string> logs;
   std::map<std::string, std::string> settings;
   std::string scene_id;
@@ -36,10 +37,12 @@ void Log(void* data, uint32_t, const char* message, size_t length) {
 }
 
 int32_t RegisterAction(void* data, const char* action_id, size_t action_id_len,
-                       const char*, size_t, const char*, size_t, const char*,
-                       size_t, uint32_t* host_action_id) {
+                       const char*, size_t, const char*, size_t,
+                       const char* icon_resource, size_t icon_resource_len,
+                       uint32_t* host_action_id) {
   auto& state = *static_cast<HostState*>(data);
   state.actions.push_back(Text(action_id, action_id_len));
+  state.action_icons.push_back(Text(icon_resource, icon_resource_len));
   *host_action_id = static_cast<uint32_t>(1000 + state.actions.size());
   return 0;
 }
@@ -204,6 +207,10 @@ bool NormalLifecycle(const char* component_path) {
   ok = ok && state.actions[0] == "igrib.toggle";
   ok = ok && state.actions[1] == "igrib.failure-test";
   ok = ok && state.actions[2] == "igrib.http-test";
+  ok = ok && state.action_icons.size() == 3;
+  ok = ok && state.action_icons[0] == "resources/grib.svg";
+  ok = ok && state.action_icons[1] == "resources/fault-test.svg";
+  ok = ok && state.action_icons[2] == "resources/http-download.svg";
   ok = ok && state.settings["activation-count"] == "1";
   ok = ok && state.scene_id == "igrib.weather-window";
   ok = ok && state.points.size() == 5;

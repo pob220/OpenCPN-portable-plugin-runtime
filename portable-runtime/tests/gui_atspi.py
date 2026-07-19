@@ -71,6 +71,11 @@ def main():
         help="limit inspection/activation to this exact top-level frame",
     )
     parser.add_argument("--application", default="opencpn")
+    parser.add_argument(
+        "--process-id",
+        type=int,
+        help="limit inspection to one application process",
+    )
     args = parser.parse_args()
     replacement_text = sys.stdin.read() if args.set_text_stdin else args.set_text
 
@@ -80,6 +85,7 @@ def main():
         item
         for item in children(desktop)
         if (item.get_name() or "").casefold() == args.application.casefold()
+        and (args.process_id is None or item.get_process_id() == args.process_id)
     ]
     if not applications:
         print(f"application not found: {args.application}", file=sys.stderr)

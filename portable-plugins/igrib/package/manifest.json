@@ -42,7 +42,12 @@
       "targets": ["linux-gnu-x86_64", "linux-gnu-aarch64", "macos-x86_64", "macos-aarch64", "windows-x86_64"]
     }
   },
-  "resources": ["resources/grib.svg", "ui/igrib-viewer.ui.json"],
+  "resources": [
+    "resources/grib.svg",
+    "resources/fault-test.svg",
+    "resources/http-download.svg",
+    "ui/igrib-viewer.ui.json"
+  ],
   "licenses": ["GPL-2.0-or-later"],
   "development": true
 }

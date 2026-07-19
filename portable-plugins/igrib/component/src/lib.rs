@@ -67,13 +67,13 @@ impl exports::opencpn::portable::plugin::Guest for IGrib {
             ACTION_FAILURE_TEST,
             "iGRIB fault test",
             "Deliberately trap the portable component (developer test)",
-            None,
+            Some("resources/fault-test.svg"),
         )?;
         host::register_action(
             ACTION_HTTP_TEST,
             "iGRIB host HTTP test",
             "Download a small OpenCPN page through the capability-controlled host client",
-            None,
+            Some("resources/http-download.svg"),
         )?;
         host::log(LogLevel::Info, "iGRIB portable component initialised");
         Ok(exports::opencpn::portable::plugin::PluginInfo {

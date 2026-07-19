@@ -17,6 +17,8 @@ The current proof implements:
   permission-controlled host HTTP client;
 - retained geographic overlays, batched chart-coverage queries, settings,
   cancellable jobs and deliberate-trap containment;
+- package-owned weather, fault-containment and HTTP-download toolbar icons,
+  decoded by the host without exposing a native toolbar or graphics object;
 - deterministic `.ocpnp` packaging, Ed25519 developer signing, strict archive
   verification, atomic update and retained rollback copies.
 
