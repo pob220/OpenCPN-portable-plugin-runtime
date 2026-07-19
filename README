@@ -1,4 +1,13 @@
 ----------------------------------------------------------------------
+OpenCPN portable-plugin runtime Linux beta
+----------------------------------------------------------------------
+
+This branch contains the experimental OpenCPN 5.14 portable-plugin runtime
+and the standalone iGRIB demonstration plugin. Linux beta testers should start
+with BETA_TESTING.md. The documented workflow builds, installs and runs an
+isolated Test-OpenCPN profile without changing a normal OpenCPN installation.
+
+----------------------------------------------------------------------
 1.  Overview
 ----------------------------------------------------------------------
 
