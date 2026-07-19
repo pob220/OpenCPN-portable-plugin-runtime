@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Validate and install an unsigned development .ocpnp package."""
+"""Validate and atomically install a trusted .ocpnp package."""
 
 import argparse
+import base64
+import datetime
 import hashlib
 import json
 import pathlib
@@ -91,6 +93,10 @@ def regular_entries(archive):
                 raise PackageError("archive-policy-violation: invalid compression size")
         elif info.file_size / info.compress_size > MAX_RATIO:
             raise PackageError(f"archive-policy-violation: compression ratio for {path}")
+        if mode & 0o111 and not path.parts[0] == "helpers":
+            raise PackageError(
+                f"archive-policy-violation: executable outside helpers {path}"
+            )
         result[path.as_posix()] = info
     return result
 
@@ -112,7 +118,38 @@ def parse_checksums(data):
     return expected
 
 
-def validate(archive_path):
+def verify_signature(archive, entries, checksums, trusted_keys):
+    if "signature.json" not in entries:
+        return False
+    try:
+        document = json.loads(
+            archive.read(entries["signature.json"]),
+            object_pairs_hook=unique_json_object,
+        )
+        if (
+            document.get("algorithm") != "Ed25519"
+            or document.get("signed") != "checksums.sha256"
+            or not isinstance(document.get("key_id"), str)
+            or not isinstance(document.get("signature"), str)
+        ):
+            raise PackageError("signature-invalid: unsupported signature document")
+        public_key_path = (trusted_keys or {}).get(document["key_id"])
+        if public_key_path is None:
+            raise PackageError(f"signature-untrusted: {document['key_id']}")
+        from cryptography.hazmat.primitives import serialization
+
+        public_key = serialization.load_pem_public_key(
+            pathlib.Path(public_key_path).read_bytes()
+        )
+        public_key.verify(base64.b64decode(document["signature"], validate=True), checksums)
+        return True
+    except PackageError:
+        raise
+    except Exception as error:
+        raise PackageError("signature-invalid: Ed25519 verification failed") from error
+
+
+def validate(archive_path, trusted_keys=None, developer=False):
     if archive_path.stat().st_size > MAX_ARCHIVE_BYTES:
         raise PackageError("archive-policy-violation: archive is too large")
     with zipfile.ZipFile(archive_path, "r") as archive:
@@ -138,8 +175,9 @@ def validate(archive_path):
             or not SAFE_ID.fullmatch(plugin_id)
         ):
             raise PackageError("manifest-invalid: unsupported format or plugin id")
-        if not manifest.get("development"):
-            raise PackageError("signature-untrusted: only development packages are supported")
+        is_development = manifest.get("development") is True
+        if is_development and not developer:
+            raise PackageError("signature-untrusted: development mode is disabled")
         component_value = manifest.get("component", "")
         if not isinstance(component_value, str):
             raise PackageError("manifest-invalid: component must be a path string")
@@ -150,38 +188,61 @@ def validate(archive_path):
             raise PackageError("component-invalid: entry is not WebAssembly")
 
         expected = parse_checksums(archive.read(entries["checksums.sha256"]))
-        actual_names = set(entries) - {"checksums.sha256"}
+        actual_names = set(entries) - {"checksums.sha256", "signature.json"}
         if set(expected) != actual_names:
             raise PackageError("digest-mismatch: checksum file list differs from archive")
         for name, digest in expected.items():
             actual = hashlib.sha256(archive.read(entries[name])).hexdigest()
             if actual != digest:
                 raise PackageError(f"digest-mismatch: {name}")
+        signed = verify_signature(
+            archive, entries, archive.read(entries["checksums.sha256"]), trusted_keys
+        )
+        if not is_development and not signed:
+            raise PackageError("signature-untrusted: production package is unsigned")
         return manifest, entries
 
 
-def install(archive_path, root):
-    manifest, entries = validate(archive_path)
+def install(archive_path, root, trusted_keys=None, developer=False, replace=False):
+    manifest, entries = validate(archive_path, trusted_keys, developer)
     destination = root / manifest["id"]
-    if destination.exists():
+    if destination.exists() and not replace:
         raise PackageError(f"already-installed: {destination}")
     root.mkdir(parents=True, exist_ok=True)
     staging = pathlib.Path(tempfile.mkdtemp(prefix=".ocpnp-install-", dir=root))
+    rollback = None
     try:
         with zipfile.ZipFile(archive_path, "r") as archive:
             for name, info in entries.items():
-                if name == "checksums.sha256":
+                if name in {"checksums.sha256", "signature.json"}:
                     continue
                 output = staging.joinpath(*pathlib.PurePosixPath(name).parts)
                 output.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(info, "r") as source, output.open("xb") as target:
                     shutil.copyfileobj(source, target, length=1024 * 1024)
-                output.chmod(0o444)
+                mode = info.external_attr >> 16
+                output.chmod(0o555 if mode & 0o111 else 0o444)
+        if destination.exists():
+            old_version = "unknown"
+            try:
+                old_manifest = json.loads((destination / "manifest.json").read_text())
+                if isinstance(old_manifest.get("version"), str):
+                    old_version = old_manifest["version"]
+            except (OSError, json.JSONDecodeError, AttributeError):
+                pass
+            stamp = datetime.datetime.now(datetime.timezone.utc).strftime(
+                "%Y%m%dT%H%M%S%fZ"
+            )
+            rollback = root / ".rollback" / manifest["id"] / f"{stamp}-{old_version}"
+            rollback.parent.mkdir(parents=True, exist_ok=True)
+            destination.replace(rollback)
         staging.replace(destination)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
+        if rollback is not None and rollback.exists() and not destination.exists():
+            rollback.replace(destination)
         raise
-    return destination
+    return destination, rollback
 
 
 def main():
@@ -189,14 +250,34 @@ def main():
     parser.add_argument("package", type=pathlib.Path)
     parser.add_argument("--root", required=True, type=pathlib.Path)
     parser.add_argument("--developer", action="store_true")
+    parser.add_argument(
+        "--replace",
+        action="store_true",
+        help="atomically update an installed package and retain a rollback copy",
+    )
+    parser.add_argument(
+        "--trusted-key", action="append", default=[], metavar="KEY_ID=PUBLIC_KEY_PEM"
+    )
     args = parser.parse_args()
-    if not args.developer:
-        parser.error("unsigned development packages require --developer")
+    trusted_keys = {}
+    for item in args.trusted_key:
+        if "=" not in item:
+            parser.error("--trusted-key must be KEY_ID=PUBLIC_KEY_PEM")
+        key_id, path = item.split("=", 1)
+        trusted_keys[key_id] = pathlib.Path(path)
     try:
-        destination = install(args.package.resolve(strict=True), args.root.resolve())
+        destination, rollback = install(
+            args.package.resolve(strict=True),
+            args.root.resolve(),
+            trusted_keys,
+            args.developer,
+            args.replace,
+        )
     except (OSError, zipfile.BadZipFile, PackageError) as error:
         parser.exit(1, f"install failed: {error}\n")
     print(destination)
+    if rollback is not None:
+        print(f"rollback: {rollback}")
 
 
 if __name__ == "__main__":

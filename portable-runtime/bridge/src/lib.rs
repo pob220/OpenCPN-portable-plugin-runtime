@@ -1,11 +1,11 @@
-use std::ffi::{CStr, c_char, c_void};
+use std::ffi::{c_char, c_void, CStr};
 use std::fs;
 use std::path::Path;
 use std::ptr;
 use std::slice;
 use std::sync::{
-    Arc,
     atomic::{AtomicBool, Ordering},
+    Arc,
 };
 use std::thread;
 use std::time::Duration;
@@ -22,10 +22,12 @@ wasmtime::component::bindgen!({
     world: "plugin-world",
 });
 
-const HOST_ABI_VERSION: u32 = 2;
+const HOST_ABI_VERSION: u32 = 4;
 const ERROR_TEXT_LIMIT: usize = 4096;
 const SETTINGS_VALUE_LIMIT: usize = 64 * 1024;
 const OVERLAY_POINT_LIMIT: usize = 1_000_000;
+const CHART_SEGMENT_LIMIT: usize = 10_000;
+const PRIVATE_READ_LIMIT: usize = 8 * 1024 * 1024;
 const EPOCH_TICK: Duration = Duration::from_millis(100);
 const CALL_EPOCH_DEADLINE: u64 = 50;
 
@@ -44,6 +46,20 @@ pub struct OverlayStyle {
     blue: u8,
     alpha: u8,
     width_pixels: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GeoSegment {
+    start: GeoPoint,
+    end: GeoPoint,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct ChartSegmentResult {
+    state: u32,
+    charts_considered: u32,
 }
 
 #[repr(C)]
@@ -105,6 +121,30 @@ pub struct HostCallbacks {
     start_job: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize, u32) -> i32>,
     cancel_job: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> i32>,
     open_environmental_viewer: Option<unsafe extern "C" fn(*mut c_void) -> i32>,
+    charts_query_segments: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            *const GeoSegment,
+            usize,
+            *mut ChartSegmentResult,
+            usize,
+        ) -> i32,
+    >,
+    network_get_to_private: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            *const c_char,
+            usize,
+            *const c_char,
+            usize,
+            *const c_char,
+            usize,
+            u64,
+        ) -> i32,
+    >,
+    storage_private_read: Option<
+        unsafe extern "C" fn(*mut c_void, *const c_char, usize, *mut u8, usize, *mut usize) -> i32,
+    >,
 }
 
 unsafe impl Send for HostCallbacks {}
@@ -399,6 +439,121 @@ impl opencpn::portable::host::Host for HostState {
         (code == 0)
             .then_some(())
             .ok_or_else(|| callback_error("open-environmental-viewer", code))
+    }
+
+    fn charts_query_segments(
+        &mut self,
+        segments: Vec<opencpn::portable::host::GeoSegment>,
+    ) -> Result<Vec<opencpn::portable::host::ChartSegmentResult>, String> {
+        if segments.len() > CHART_SEGMENT_LIMIT {
+            return Err("chart segment batch limit exceeded".to_string());
+        }
+        let callback = self
+            .callbacks
+            .charts_query_segments
+            .ok_or_else(|| "charts-query-segments service unavailable".to_string())?;
+        let input: Vec<GeoSegment> = segments
+            .into_iter()
+            .map(|segment| GeoSegment {
+                start: GeoPoint {
+                    latitude: segment.start.latitude,
+                    longitude: segment.start.longitude,
+                },
+                end: GeoPoint {
+                    latitude: segment.end.latitude,
+                    longitude: segment.end.longitude,
+                },
+            })
+            .collect();
+        let mut output = vec![ChartSegmentResult::default(); input.len()];
+        let code = unsafe {
+            callback(
+                self.callbacks.user_data,
+                input.as_ptr(),
+                input.len(),
+                output.as_mut_ptr(),
+                output.len(),
+            )
+        };
+        if code != 0 {
+            return Err(callback_error("charts-query-segments", code));
+        }
+        output
+            .into_iter()
+            .map(|result| {
+                let (state, diagnostic) = match result.state {
+                    0 => (
+                        opencpn::portable::host::ChartCoverageState::Covered,
+                        "chart coverage exists at sampled segment points",
+                    ),
+                    1 => (
+                        opencpn::portable::host::ChartCoverageState::MissingCoverage,
+                        "one or more sampled points lack chart coverage",
+                    ),
+                    _ => (
+                        opencpn::portable::host::ChartCoverageState::Unknown,
+                        "chart coverage could not be determined",
+                    ),
+                };
+                Ok(opencpn::portable::host::ChartSegmentResult {
+                    state,
+                    charts_considered: result.charts_considered,
+                    diagnostic: diagnostic.to_string(),
+                })
+            })
+            .collect()
+    }
+
+    fn network_get_to_private(
+        &mut self,
+        request_id: String,
+        url: String,
+        private_name: String,
+        max_bytes: u64,
+    ) -> Result<(), String> {
+        let callback = self
+            .callbacks
+            .network_get_to_private
+            .ok_or_else(|| "network-get-to-private service unavailable".to_string())?;
+        let code = unsafe {
+            callback(
+                self.callbacks.user_data,
+                request_id.as_ptr().cast(),
+                request_id.len(),
+                url.as_ptr().cast(),
+                url.len(),
+                private_name.as_ptr().cast(),
+                private_name.len(),
+                max_bytes,
+            )
+        };
+        (code == 0)
+            .then_some(())
+            .ok_or_else(|| callback_error("network-get-to-private", code))
+    }
+
+    fn storage_private_read(&mut self, private_name: String) -> Result<Vec<u8>, String> {
+        let callback = self
+            .callbacks
+            .storage_private_read
+            .ok_or_else(|| "storage-private-read service unavailable".to_string())?;
+        let mut value = vec![0_u8; PRIVATE_READ_LIMIT];
+        let mut value_len = 0_usize;
+        let code = unsafe {
+            callback(
+                self.callbacks.user_data,
+                private_name.as_ptr().cast(),
+                private_name.len(),
+                value.as_mut_ptr(),
+                value.len(),
+                &mut value_len,
+            )
+        };
+        if code != 0 || value_len > value.len() {
+            return Err(callback_error("storage-private-read", code));
+        }
+        value.truncate(value_len);
+        Ok(value)
     }
 }
 

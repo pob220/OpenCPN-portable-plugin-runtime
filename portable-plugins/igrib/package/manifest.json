@@ -7,11 +7,11 @@
   "component": "component/igrib.wasm",
   "runtime": ">=0.1.0 <0.2.0",
   "portable_api": ">=0.1.0 <0.2.0",
-  "optional_services": [
+  "services": [
     {
       "interface": "org.opencpn.environment.viewer",
       "range": ">=0.1.0 <0.2.0",
-      "provider": "xGRIB compatibility adapter"
+      "provider": "OpenCPN host environmental service"
     }
   ],
   "permissions": [
@@ -20,9 +20,28 @@
     "settings.read-write",
     "overlay.submit",
     "jobs.compute",
-    "environment.compat.xgrib-viewer"
+    "environment.datasets",
+    "storage.user-selected",
+    "network.providers",
+    "helpers.environment.decode",
+    "helpers.environment.generate",
+    "charts.coverage",
+    "network.http",
+    "storage.private"
   ],
-  "resources": ["resources/grib.svg"],
+  "helpers": {
+    "environment-decoder": {
+      "protocol": 1,
+      "required": true,
+      "targets": ["linux-gnu-x86_64", "linux-gnu-aarch64", "macos-x86_64", "macos-aarch64", "windows-x86_64"]
+    },
+    "environment-generator": {
+      "protocol": 1,
+      "required": false,
+      "targets": ["linux-gnu-x86_64", "linux-gnu-aarch64", "macos-x86_64", "macos-aarch64", "windows-x86_64"]
+    }
+  },
+  "resources": ["resources/grib.svg", "ui/igrib-viewer.ui.json"],
   "licenses": ["GPL-2.0-or-later"],
   "development": true
 }

@@ -3,14 +3,19 @@ wit_bindgen::generate!({
     world: "plugin-world",
 });
 
-use opencpn::portable::host::{self, GeoPoint, LogLevel, OverlayStyle, VesselPosition};
+use opencpn::portable::host::{
+    self, ChartCoverageState, GeoPoint, GeoSegment, LogLevel, OverlayStyle, VesselPosition,
+};
 
 struct IGrib;
 
 const ACTION_TOGGLE: &str = "igrib.toggle";
 const ACTION_FAILURE_TEST: &str = "igrib.failure-test";
+const ACTION_HTTP_TEST: &str = "igrib.http-test";
 const SCENE_WEATHER: &str = "igrib.weather-window";
 const JOB_PREPARE: &str = "igrib.prepare-weather";
+const JOB_HTTP_TEST: &str = "igrib.http-probe";
+const HTTP_TEST_FILE: &str = "http-probe.html";
 
 fn fallback_position() -> VesselPosition {
     VesselPosition {
@@ -64,6 +69,12 @@ impl exports::opencpn::portable::plugin::Guest for IGrib {
             "Deliberately trap the portable component (developer test)",
             None,
         )?;
+        host::register_action(
+            ACTION_HTTP_TEST,
+            "iGRIB host HTTP test",
+            "Download a small OpenCPN page through the capability-controlled host client",
+            None,
+        )?;
         host::log(LogLevel::Info, "iGRIB portable component initialised");
         Ok(exports::opencpn::portable::plugin::PluginInfo {
             id: "org.opencpn.igrib".into(),
@@ -89,7 +100,7 @@ impl exports::opencpn::portable::plugin::Guest for IGrib {
                 if let Err(message) = host::open_environmental_viewer() {
                     host::log(
                         LogLevel::Warning,
-                        &format!("Native xGRIB compatibility viewer unavailable: {message}"),
+                        &format!("Host environmental service unavailable: {message}"),
                     );
                 }
                 let position = host::get_vessel_position().unwrap_or_else(|message| {
@@ -115,6 +126,27 @@ impl exports::opencpn::portable::plugin::Guest for IGrib {
                         width_pixels: 4.0,
                     },
                 )?;
+                let window = weather_window(&position);
+                let segments: Vec<GeoSegment> = window
+                    .windows(2)
+                    .map(|pair| GeoSegment {
+                        start: pair[0],
+                        end: pair[1],
+                    })
+                    .collect();
+                let coverage = host::charts_query_segments(&segments)?;
+                let missing = coverage
+                    .iter()
+                    .filter(|result| result.state != ChartCoverageState::Covered)
+                    .count();
+                host::log(
+                    LogLevel::Info,
+                    &format!(
+                        "batched chart coverage query: {} segments, {} not covered",
+                        coverage.len(),
+                        missing
+                    ),
+                );
                 host::start_job(JOB_PREPARE, 40)?;
                 host::log(
                     LogLevel::Info,
@@ -123,6 +155,13 @@ impl exports::opencpn::portable::plugin::Guest for IGrib {
                 Ok(())
             }
             ACTION_FAILURE_TEST => panic!("intentional iGRIB component trap"),
+            ACTION_HTTP_TEST => {
+                let url = host::setting_get("http-test-url")?
+                    .unwrap_or_else(|| "https://opencpn.org/".into());
+                host::network_get_to_private(JOB_HTTP_TEST, &url, HTTP_TEST_FILE, 1024 * 1024)?;
+                host::log(LogLevel::Info, "iGRIB host HTTP request started");
+                Ok(())
+            }
             _ => Err(format!("unknown iGRIB action: {action_id}")),
         }
     }
@@ -133,6 +172,21 @@ impl exports::opencpn::portable::plugin::Guest for IGrib {
             JobEvent::Progress(percent) => {
                 if percent % 25 == 0 {
                     host::log(LogLevel::Debug, &format!("{job_id}: {percent}%"));
+                }
+            }
+            JobEvent::Completed if job_id == JOB_HTTP_TEST => {
+                match host::storage_private_read(HTTP_TEST_FILE) {
+                    Ok(bytes) => host::log(
+                        LogLevel::Info,
+                        &format!(
+                            "{job_id} completed; {} bytes read from private storage",
+                            bytes.len()
+                        ),
+                    ),
+                    Err(message) => host::log(
+                        LogLevel::Error,
+                        &format!("{job_id} completed but private storage read failed: {message}"),
+                    ),
                 }
             }
             JobEvent::Completed => host::log(LogLevel::Info, &format!("{job_id} completed")),

@@ -9,10 +9,14 @@
 #include "portable_plugin_manager.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <set>
@@ -20,6 +24,8 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+#include <curl/curl.h>
 
 #include <wx/app.h>
 #include <wx/dir.h>
@@ -31,10 +37,11 @@
 #include <wx/wfstream.h>
 
 #include "ocpn_portable_runtime.h"
+#include "portable_grib_host.h"
 
 #include "model/base_platform.h"
 #include "model/own_ship.h"
-#include "model/plugin_loader.h"
+#include "chartdb.h"
 #include "navutil.h"
 #include "ocpndc.h"
 #include "pluginmanager.h"
@@ -47,6 +54,9 @@ constexpr size_t kErrorBufferSize = 4096;
 constexpr size_t kSettingValueLimit = 64 * 1024;
 constexpr size_t kOverlayPointLimit = 1'000'000;
 constexpr unsigned kMaximumWorkUnits = 10'000;
+constexpr size_t kChartSegmentLimit = 10'000;
+constexpr uint64_t kNetworkDownloadLimit = 512ULL * 1024ULL * 1024ULL;
+constexpr size_t kPrivateReadLimit = 8U * 1024U * 1024U;
 
 wxString FromUtf8(const char* data, size_t length) {
   if (!data || length == 0) return wxString();
@@ -119,6 +129,31 @@ struct Job {
   std::thread worker;
 };
 
+struct DownloadSink {
+  FILE* file = nullptr;
+  std::shared_ptr<Job> job;
+  uint64_t maximum = 0;
+  uint64_t written = 0;
+};
+
+size_t WriteDownload(char* data, size_t size, size_t count, void* user_data) {
+  auto* sink = static_cast<DownloadSink*>(user_data);
+  const size_t bytes = size * count;
+  if (!sink || !sink->file || sink->job->cancel.load() ||
+      bytes > sink->maximum - std::min(sink->written, sink->maximum))
+    return 0;
+  const size_t written = std::fwrite(data, 1, bytes, sink->file);
+  sink->written += written;
+  return written;
+}
+
+int DownloadProgress(void* user_data, curl_off_t, curl_off_t now, curl_off_t,
+                     curl_off_t) {
+  auto* sink = static_cast<DownloadSink*>(user_data);
+  if (!sink || sink->job->cancel.load()) return 1;
+  return now >= 0 && static_cast<uint64_t>(now) > sink->maximum ? 1 : 0;
+}
+
 }  // namespace
 
 class PortablePluginManager::Impl {
@@ -129,12 +164,14 @@ public:
     wxString name;
     wxString version;
     wxString package_root;
+    wxString private_root;
     std::set<wxString> permissions;
     ocpn_portable_runtime* runtime = nullptr;
     bool enabled = false;
     bool failed = false;
     std::map<wxString, Scene> scenes;
     std::map<wxString, std::shared_ptr<Job>> jobs;
+    std::unique_ptr<PortableGribHost> environmental_host;
   };
 
   struct Action {
@@ -199,6 +236,18 @@ public:
   static int32_t CancelJob(void* user_data, const char* job_id,
                            size_t job_id_len);
   static int32_t OpenEnvironmentalViewer(void* user_data);
+  static int32_t ChartsQuerySegments(
+      void* user_data, const ocpn_portable_geo_segment* segments,
+      size_t segment_count, ocpn_portable_chart_segment_result* results,
+      size_t result_count);
+  static int32_t NetworkGetToPrivate(void* user_data, const char* request_id,
+                                     size_t request_id_len, const char* url,
+                                     size_t url_len, const char* private_name,
+                                     size_t private_name_len,
+                                     uint64_t max_bytes);
+  static int32_t StoragePrivateRead(void* user_data, const char* private_name,
+                                    size_t private_name_len, uint8_t* value,
+                                    size_t value_capacity, size_t* value_len);
 };
 
 void PortablePluginManager::Impl::Log(void* user_data, uint32_t level,
@@ -426,29 +475,178 @@ int32_t PortablePluginManager::Impl::CancelJob(void* user_data,
 int32_t PortablePluginManager::Impl::OpenEnvironmentalViewer(void* user_data) {
   auto* instance = static_cast<Instance*>(user_data);
   if (!instance || !instance->owner ||
-      !instance->owner->HasPermission(*instance,
-                                      "environment.compat.xgrib-viewer"))
+      !instance->owner->HasPermission(*instance, "environment.datasets"))
     return -1;
-
-  const auto* plugins = PluginLoader::GetInstance()->GetPlugInArray();
-  for (auto* plugin : *plugins) {
-    if (!plugin || !plugin->m_pplugin || !plugin->m_enabled ||
-        !plugin->m_init_state || plugin->m_common_name.CmpNoCase("xGRIB") != 0)
-      continue;
-    for (auto* tool :
-         instance->owner->plugin_manager->GetPluginToolbarToolArray()) {
-      if (tool && tool->m_pplugin == plugin->m_pplugin) {
-        wxLogMessage(
-            "Portable plugin %s opened typed native service "
-            "org.opencpn.xgrib.viewer",
-            instance->id);
-        plugin->m_pplugin->OnToolbarToolCallback(tool->id);
-        return 0;
-      }
-    }
-    return -3;
+  if (!instance->environmental_host) {
+    instance->environmental_host = std::make_unique<PortableGribHost>(
+        instance->owner->plugin_manager->GetParentFrame(),
+        instance->package_root);
   }
-  return -2;
+  wxString error;
+  if (!instance->environmental_host->Show(&error)) {
+    wxLogError("Portable plugin %s could not open environmental service: %s",
+               instance->id, error);
+    return -2;
+  }
+  wxLogMessage("Portable plugin %s opened host environmental service 0.1",
+               instance->id);
+  return 0;
+}
+
+int32_t PortablePluginManager::Impl::ChartsQuerySegments(
+    void* user_data, const ocpn_portable_geo_segment* segments,
+    size_t segment_count, ocpn_portable_chart_segment_result* results,
+    size_t result_count) {
+  auto* instance = static_cast<Instance*>(user_data);
+  if (!instance || !instance->owner ||
+      !instance->owner->HasPermission(*instance, "charts.coverage") ||
+      (!segments && segment_count) || (!results && result_count) ||
+      result_count != segment_count || segment_count > kChartSegmentLimit)
+    return -1;
+  auto valid_point = [](const ocpn_portable_geo_point& point) {
+    return std::isfinite(point.latitude) && std::isfinite(point.longitude) &&
+           point.latitude >= -90.0 && point.latitude <= 90.0 &&
+           point.longitude >= -180.0 && point.longitude <= 180.0;
+  };
+  for (size_t i = 0; i < segment_count; ++i) {
+    results[i] = {2, 0};
+    if (!valid_point(segments[i].start) || !valid_point(segments[i].end) ||
+        !ChartData)
+      continue;
+    const std::array<ocpn_portable_geo_point, 3> samples = {
+        segments[i].start,
+        ocpn_portable_geo_point{
+            (segments[i].start.latitude + segments[i].end.latitude) / 2.0,
+            (segments[i].start.longitude + segments[i].end.longitude) / 2.0},
+        segments[i].end};
+    bool covered = true;
+    uint32_t maximum_charts = 0;
+    for (const auto& sample : samples) {
+      ChartStack stack;
+      ChartData->BuildChartStack(&stack, static_cast<float>(sample.latitude),
+                                 static_cast<float>(sample.longitude), 0);
+      covered = covered && stack.nEntry > 0;
+      maximum_charts =
+          std::max(maximum_charts, static_cast<uint32_t>(stack.nEntry));
+    }
+    results[i].state = covered ? 0 : 1;
+    results[i].charts_considered = maximum_charts;
+  }
+  return 0;
+}
+
+int32_t PortablePluginManager::Impl::NetworkGetToPrivate(
+    void* user_data, const char* request_id, size_t request_id_len,
+    const char* url, size_t url_len, const char* private_name,
+    size_t private_name_len, uint64_t max_bytes) {
+  auto* instance = static_cast<Instance*>(user_data);
+  if (!instance || !instance->owner ||
+      !instance->owner->HasPermission(*instance, "network.http") ||
+      !instance->owner->HasPermission(*instance, "storage.private") ||
+      max_bytes == 0 || max_bytes > kNetworkDownloadLimit)
+    return -1;
+  const wxString id = FromUtf8(request_id, request_id_len);
+  const wxString address = FromUtf8(url, url_len);
+  const wxString name = FromUtf8(private_name, private_name_len);
+  if (!IsSafeName(id) || !IsSafeName(name) || address.length() > 4096 ||
+      !(address.StartsWith("https://") || address.StartsWith("http://")) ||
+      instance->jobs.count(id))
+    return -2;
+
+  auto job = std::make_shared<Job>();
+  instance->jobs[id] = job;
+  const std::string target =
+      (instance->private_root + wxFILE_SEP_PATH + name).ToStdString();
+  const std::string temporary = target + ".part-" + id.ToStdString();
+  const std::string request_url = address.ToStdString();
+  auto* owner = instance->owner;
+  const wxString plugin_id = instance->id;
+  auto alive_token = owner->alive;
+  job->worker = std::thread([owner, alive_token, job, id, plugin_id, target,
+                             temporary, request_url, max_bytes] {
+    wxString failure;
+    FILE* file = std::fopen(temporary.c_str(), "wb");
+    if (!file) {
+      failure = "could not create private download file";
+    } else {
+      DownloadSink sink{file, job, max_bytes, 0};
+      CURL* curl = curl_easy_init();
+      if (!curl) {
+        failure = "could not initialize host HTTP client";
+      } else {
+        curl_easy_setopt(curl, CURLOPT_URL, request_url.c_str());
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+        curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
+        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 128L);
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
+        curl_easy_setopt(curl, CURLOPT_USERAGENT,
+                         "OpenCPN-portable-runtime/0.1");
+#if LIBCURL_VERSION_NUM >= 0x075500
+        curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
+        curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
+#else
+        curl_easy_setopt(curl, CURLOPT_PROTOCOLS,
+                         CURLPROTO_HTTP | CURLPROTO_HTTPS);
+        curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS,
+                         CURLPROTO_HTTP | CURLPROTO_HTTPS);
+#endif
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteDownload);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sink);
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, DownloadProgress);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &sink);
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+        const CURLcode code = curl_easy_perform(curl);
+        if (code != CURLE_OK)
+          failure = job->cancel.load()
+                        ? "HTTP request cancelled"
+                        : wxString::FromUTF8(curl_easy_strerror(code));
+        curl_easy_cleanup(curl);
+      }
+      if (std::fclose(file) != 0 && failure.empty())
+        failure = "could not flush private download file";
+    }
+    if (failure.empty()) {
+      std::remove(target.c_str());
+      if (std::rename(temporary.c_str(), target.c_str()) != 0)
+        failure = "could not publish private download file";
+    }
+    if (!failure.empty()) std::remove(temporary.c_str());
+    wxTheApp->CallAfter([owner, alive_token, plugin_id, id, failure] {
+      if (!alive_token->load()) return;
+      owner->DeliverJobEvent(plugin_id, id, failure.empty() ? 1 : 3,
+                             failure.empty() ? 100 : 0, failure);
+    });
+  });
+  return 0;
+}
+
+int32_t PortablePluginManager::Impl::StoragePrivateRead(
+    void* user_data, const char* private_name, size_t private_name_len,
+    uint8_t* value, size_t value_capacity, size_t* value_len) {
+  auto* instance = static_cast<Instance*>(user_data);
+  if (!instance || !instance->owner || !value_len ||
+      !instance->owner->HasPermission(*instance, "storage.private"))
+    return -1;
+  const wxString name = FromUtf8(private_name, private_name_len);
+  if (!IsSafeName(name)) return -2;
+  const std::filesystem::path path =
+      (instance->private_root + wxFILE_SEP_PATH + name).ToStdString();
+  std::error_code error;
+  if (!std::filesystem::is_regular_file(path, error)) return -3;
+  const auto bytes = std::filesystem::file_size(path, error);
+  if (error || bytes > kPrivateReadLimit || bytes > value_capacity ||
+      (bytes && !value))
+    return -4;
+  std::ifstream input(path, std::ios::binary);
+  if (!input) return -5;
+  input.read(reinterpret_cast<char*>(value),
+             static_cast<std::streamsize>(bytes));
+  if (!input) return -5;
+  *value_len = static_cast<size_t>(bytes);
+  return 0;
 }
 
 void PortablePluginManager::Impl::DeliverJobEvent(const wxString& plugin_id,
@@ -491,6 +689,7 @@ void PortablePluginManager::Impl::Fail(Instance& instance,
   instance.failed = true;
   instance.enabled = false;
   instance.scenes.clear();
+  if (instance.environmental_host) instance.environmental_host->Shutdown();
   for (auto& [id, job] : instance.jobs) job->cancel.store(true);
   wxLogError("Portable plugin %s failed during %s; failure contained: %s",
              instance.id, operation, error);
@@ -522,10 +721,19 @@ bool PortablePluginManager::Impl::Load() {
     return true;
   }
 
-  const std::set<wxString> known_permissions = {
-      "ui.commands",         "navigation.position.read",
-      "settings.read-write", "overlay.submit",
-      "jobs.compute",        "environment.compat.xgrib-viewer"};
+  const std::set<wxString> known_permissions = {"ui.commands",
+                                                "navigation.position.read",
+                                                "settings.read-write",
+                                                "overlay.submit",
+                                                "jobs.compute",
+                                                "environment.datasets",
+                                                "storage.user-selected",
+                                                "network.providers",
+                                                "helpers.environment.decode",
+                                                "helpers.environment.generate",
+                                                "charts.coverage",
+                                                "network.http",
+                                                "storage.private"};
   wxString entry;
   bool more = directory.GetFirst(&entry, wxEmptyString, wxDIR_DIRS);
   while (more) {
@@ -575,6 +783,15 @@ bool PortablePluginManager::Impl::Load() {
     instance->name = name;
     instance->version = version;
     instance->package_root = root_path;
+    instance->private_root = g_BasePlatform->GetPrivateDataDir() +
+                             wxFILE_SEP_PATH + "portable-plugin-data" +
+                             wxFILE_SEP_PATH + id;
+    if (!wxDirExists(instance->private_root) &&
+        !wxFileName::Mkdir(instance->private_root, 0700, wxPATH_MKDIR_FULL)) {
+      wxLogError("Portable plugin %s private storage could not be created", id);
+      more = directory.GetNext(&entry);
+      continue;
+    }
     bool permission_error = false;
     wxJSONValue requested = manifest["permissions"];
     for (int i = 0; i < requested.Size(); ++i) {
@@ -616,6 +833,9 @@ bool PortablePluginManager::Impl::Load() {
     callbacks.start_job = StartJob;
     callbacks.cancel_job = CancelJob;
     callbacks.open_environmental_viewer = OpenEnvironmentalViewer;
+    callbacks.charts_query_segments = ChartsQuerySegments;
+    callbacks.network_get_to_private = NetworkGetToPrivate;
+    callbacks.storage_private_read = StoragePrivateRead;
     char error[kErrorBufferSize] = {};
     const auto native_path = component_path.utf8_str();
     instance->runtime = ocpn_portable_runtime_create(
@@ -681,6 +901,7 @@ void PortablePluginManager::Impl::Shutdown() {
   alive->store(false);
   for (auto& instance : instances) {
     StopJobs(*instance);
+    if (instance->environmental_host) instance->environmental_host->Shutdown();
     if (instance->runtime && instance->enabled && !instance->failed) {
       char error[kErrorBufferSize] = {};
       if (ocpn_portable_runtime_disable(instance->runtime, error,
@@ -739,6 +960,9 @@ bool PortablePluginManager::Impl::Render(ocpnDC& dc, const ViewPort& viewport,
       dc.DrawLines(static_cast<int>(points.size()), points.data());
       rendered = true;
     }
+    if (instance->environmental_host &&
+        instance->environmental_host->Render(dc, viewport))
+      rendered = true;
   }
   return rendered;
 }

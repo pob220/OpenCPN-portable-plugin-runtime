@@ -20,6 +20,11 @@ struct HostState {
   bool scene_cleared = false;
   bool job_cancelled = false;
   bool environmental_viewer_opened = false;
+  size_t chart_segments_queried = 0;
+  std::string network_request_id;
+  std::string network_url;
+  std::string network_private_name;
+  uint64_t network_max_bytes = 0;
 };
 
 std::string Text(const char* value, size_t length) {
@@ -108,6 +113,37 @@ int32_t OpenEnvironmentalViewer(void* data) {
   return 0;
 }
 
+int32_t ChartsQuerySegments(void* data, const ocpn_portable_geo_segment*,
+                            size_t segment_count,
+                            ocpn_portable_chart_segment_result* results,
+                            size_t result_count) {
+  if (segment_count != result_count) return -1;
+  static_cast<HostState*>(data)->chart_segments_queried = segment_count;
+  for (size_t i = 0; i < result_count; ++i) results[i] = {0, 3};
+  return 0;
+}
+
+int32_t NetworkGetToPrivate(void* data, const char* request_id,
+                            size_t request_id_len, const char* url,
+                            size_t url_len, const char* private_name,
+                            size_t private_name_len, uint64_t max_bytes) {
+  auto& state = *static_cast<HostState*>(data);
+  state.network_request_id = Text(request_id, request_id_len);
+  state.network_url = Text(url, url_len);
+  state.network_private_name = Text(private_name, private_name_len);
+  state.network_max_bytes = max_bytes;
+  return 0;
+}
+
+int32_t StoragePrivateRead(void*, const char*, size_t, uint8_t* value,
+                           size_t value_capacity, size_t* value_len) {
+  constexpr char kPayload[] = "portable-host-http-ok";
+  *value_len = sizeof(kPayload) - 1;
+  if (value_capacity < *value_len) return -2;
+  std::memcpy(value, kPayload, *value_len);
+  return 0;
+}
+
 ocpn_portable_host_callbacks Callbacks(HostState* state) {
   return {OCPN_PORTABLE_HOST_ABI_VERSION,
           state,
@@ -120,7 +156,10 @@ ocpn_portable_host_callbacks Callbacks(HostState* state) {
           ClearScene,
           StartJob,
           CancelJob,
-          OpenEnvironmentalViewer};
+          OpenEnvironmentalViewer,
+          ChartsQuerySegments,
+          NetworkGetToPrivate,
+          StoragePrivateRead};
 }
 
 bool CallSucceeded(int32_t result, const char* operation, const char* error) {
@@ -161,12 +200,14 @@ bool NormalLifecycle(const char* component_path) {
                                sizeof(error)),
                            "on-action", error);
 
-  ok = ok && state.actions.size() == 2;
+  ok = ok && state.actions.size() == 3;
   ok = ok && state.actions[0] == "igrib.toggle";
   ok = ok && state.actions[1] == "igrib.failure-test";
+  ok = ok && state.actions[2] == "igrib.http-test";
   ok = ok && state.settings["activation-count"] == "1";
   ok = ok && state.scene_id == "igrib.weather-window";
   ok = ok && state.points.size() == 5;
+  ok = ok && state.chart_segments_queried == 4;
   ok = ok && std::abs(state.points[0].latitude - 50.35) < 0.000001;
   ok = ok && std::abs(state.points[0].longitude + 4.55) < 0.000001;
   ok = ok && state.job_id == "igrib.prepare-weather";
@@ -174,6 +215,20 @@ bool NormalLifecycle(const char* component_path) {
   ok = ok && state.environmental_viewer_opened;
 
   const char* empty = "";
+  const std::string http_action = "igrib.http-test";
+  ok = ok && CallSucceeded(ocpn_portable_runtime_on_action(
+                               runtime, http_action.data(), http_action.size(),
+                               error, sizeof(error)),
+                           "http-action", error);
+  ok = ok && state.network_request_id == "igrib.http-probe";
+  ok = ok && state.network_url == "https://opencpn.org/";
+  ok = ok && state.network_private_name == "http-probe.html";
+  ok = ok && state.network_max_bytes == 1024 * 1024;
+  ok = ok && CallSucceeded(ocpn_portable_runtime_on_job_event(
+                               runtime, state.network_request_id.data(),
+                               state.network_request_id.size(), 1, 100, empty,
+                               0, error, sizeof(error)),
+                           "http-completed", error);
   ok =
       ok && CallSucceeded(ocpn_portable_runtime_on_job_event(
                               runtime, state.job_id.data(), state.job_id.size(),

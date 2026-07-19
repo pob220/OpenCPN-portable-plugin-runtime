@@ -11,6 +11,9 @@ import tempfile
 import unittest
 import zipfile
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
 
 TOOLS = pathlib.Path(__file__).resolve().parents[1] / "tools"
 
@@ -71,12 +74,92 @@ class PackageToolsTest(unittest.TestCase):
         first = self.build("first.ocpnp")
         second = self.build("second.ocpnp")
         self.assertEqual(first.read_bytes(), second.read_bytes())
-        destination = installer.install(first, self.base / "installed")
+        destination, rollback = installer.install(
+            first, self.base / "installed", developer=True
+        )
+        self.assertIsNone(rollback)
         self.assertEqual(destination.name, "org.opencpn.test-plugin")
         self.assertEqual(
             (destination / "component" / "plugin.wasm").read_bytes(),
             b"\0asmcomponent",
         )
+
+    def test_helper_execute_mode_is_preserved(self):
+        helper = self.source / "helpers" / "linux-gnu-x86_64" / "helper"
+        helper.parent.mkdir(parents=True)
+        helper.write_bytes(b"helper")
+        helper.chmod(0o755)
+        package = self.build("helper.ocpnp")
+        destination, _ = installer.install(
+            package, self.base / "installed", developer=True
+        )
+        installed = destination / "helpers" / "linux-gnu-x86_64" / "helper"
+        self.assertTrue(installed.stat().st_mode & stat.S_IXUSR)
+
+    def test_replace_is_atomic_and_retains_rollback(self):
+        package = self.build("first.ocpnp")
+        destination, _ = installer.install(
+            package, self.base / "installed", developer=True
+        )
+        (self.source / "resources" / "icon.svg").write_text("<svg>new</svg>")
+        replacement = self.build("replacement.ocpnp")
+        replaced, rollback = installer.install(
+            replacement, self.base / "installed", developer=True, replace=True
+        )
+        self.assertEqual(replaced, destination)
+        self.assertIsNotNone(rollback)
+        self.assertEqual((replaced / "resources" / "icon.svg").read_text(), "<svg>new</svg>")
+        self.assertEqual((rollback / "resources" / "icon.svg").read_text(), "<svg/>")
+
+    def test_executable_outside_helpers_is_rejected(self):
+        (self.source / "resources" / "icon.svg").chmod(0o755)
+        package = self.build("bad-executable.ocpnp")
+        with self.assertRaisesRegex(installer.PackageError, "executable outside"):
+            installer.validate(package, developer=True)
+
+    def test_development_package_is_rejected_by_default(self):
+        package = self.build("development.ocpnp")
+        with self.assertRaisesRegex(installer.PackageError, "development mode"):
+            installer.validate(package)
+
+    def test_ed25519_signature_is_verified_and_tampering_rejected(self):
+        private_key = Ed25519PrivateKey.generate()
+        private_path = self.base / "private.pem"
+        public_path = self.base / "public.pem"
+        private_path.write_bytes(
+            private_key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        )
+        public_path.write_bytes(
+            private_key.public_key().public_bytes(
+                serialization.Encoding.PEM,
+                serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+        )
+        package = self.base / "signed.ocpnp"
+        subprocess.run(
+            [
+                sys.executable,
+                str(TOOLS / "build_package.py"),
+                "--root",
+                str(self.source),
+                "--output",
+                str(package),
+                "--signing-key",
+                str(private_path),
+                "--key-id",
+                "test-key",
+            ],
+            check=True,
+        )
+        installer.validate(
+            package, {"test-key": public_path}, developer=True
+        )
+        with self.assertRaisesRegex(installer.PackageError, "signature-untrusted"):
+            installer.validate(package, {}, developer=True)
 
     def test_checksum_tamper_is_rejected(self):
         original = self.build("original.ocpnp")
@@ -88,14 +171,14 @@ class PackageToolsTest(unittest.TestCase):
                     data += b"tampered"
                 target.writestr(info, data)
         with self.assertRaisesRegex(installer.PackageError, "digest-mismatch"):
-            installer.validate(tampered)
+            installer.validate(tampered, developer=True)
 
     def test_traversal_is_rejected(self):
         package = self.base / "traversal.ocpnp"
         with zipfile.ZipFile(package, "w") as archive:
             archive.writestr("../outside", b"bad")
         with self.assertRaisesRegex(installer.PackageError, "archive-policy"):
-            installer.validate(package)
+            installer.validate(package, developer=True)
 
     def test_symlink_is_rejected(self):
         package = self.base / "symlink.ocpnp"
@@ -105,7 +188,7 @@ class PackageToolsTest(unittest.TestCase):
         with zipfile.ZipFile(package, "w") as archive:
             archive.writestr(info, b"target")
         with self.assertRaisesRegex(installer.PackageError, "non-regular"):
-            installer.validate(package)
+            installer.validate(package, developer=True)
 
     def test_builder_rejects_symlink(self):
         (self.source / "resources" / "linked.svg").symlink_to("icon.svg")
@@ -137,7 +220,7 @@ class PackageToolsTest(unittest.TestCase):
         )
         package = self.build("numeric-id.ocpnp")
         with self.assertRaisesRegex(installer.PackageError, "manifest-invalid"):
-            installer.validate(package)
+            installer.validate(package, developer=True)
 
     def test_case_colliding_names_are_rejected(self):
         package = self.base / "duplicate.ocpnp"
@@ -145,21 +228,21 @@ class PackageToolsTest(unittest.TestCase):
             archive.writestr("manifest.json", b"{}")
             archive.writestr("MANIFEST.JSON", b"{}")
         with self.assertRaisesRegex(installer.PackageError, "duplicate"):
-            installer.validate(package)
+            installer.validate(package, developer=True)
 
     def test_control_character_path_is_rejected(self):
         package = self.base / "control.ocpnp"
         with zipfile.ZipFile(package, "w") as archive:
             archive.writestr("resources/bad\x01name", b"bad")
         with self.assertRaisesRegex(installer.PackageError, "archive-policy"):
-            installer.validate(package)
+            installer.validate(package, developer=True)
 
     def test_cross_platform_reserved_path_is_rejected(self):
         package = self.base / "reserved.ocpnp"
         with zipfile.ZipFile(package, "w") as archive:
             archive.writestr("resources/CON.txt", b"bad")
         with self.assertRaisesRegex(installer.PackageError, "archive-policy"):
-            installer.validate(package)
+            installer.validate(package, developer=True)
 
     def test_duplicate_manifest_key_is_rejected(self):
         package = self.base / "duplicate-key.ocpnp"
@@ -180,7 +263,7 @@ class PackageToolsTest(unittest.TestCase):
             archive.writestr("manifest.json", manifest)
             archive.writestr("checksums.sha256", checksums)
         with self.assertRaisesRegex(installer.PackageError, "duplicate JSON key"):
-            installer.validate(package)
+            installer.validate(package, developer=True)
 
 
 if __name__ == "__main__":

@@ -28,6 +28,23 @@ interface host {
     width-pixels: f32,
   }
 
+  record geo-segment {
+    start: geo-point,
+    end: geo-point,
+  }
+
+  enum chart-coverage-state {
+    covered,
+    missing-coverage,
+    unknown,
+  }
+
+  record chart-segment-result {
+    state: chart-coverage-state,
+    charts-considered: u32,
+    diagnostic: string,
+  }
+
   log: func(level: log-level, message: string);
   register-action: func(action-id: string, label: string, tooltip: string,
                         icon-resource: option<string>) -> result<u32, string>;
@@ -40,6 +57,10 @@ interface host {
   start-job: func(job-id: string, work-units: u32) -> result<_, string>;
   cancel-job: func(job-id: string) -> result<_, string>;
   open-environmental-viewer: func() -> result<_, string>;
+  charts-query-segments: func(segments: list<geo-segment>) -> result<list<chart-segment-result>, string>;
+  network-get-to-private: func(request-id: string, url: string,
+                               private-name: string, max-bytes: u64) -> result<_, string>;
+  storage-private-read: func(private-name: string) -> result<list<u8>, string>;
 }
 
 interface plugin {

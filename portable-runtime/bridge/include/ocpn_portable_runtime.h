@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define OCPN_PORTABLE_HOST_ABI_VERSION 2u
+#define OCPN_PORTABLE_HOST_ABI_VERSION 4u
 
 typedef struct ocpn_portable_runtime ocpn_portable_runtime;
 
@@ -24,6 +24,17 @@ typedef struct ocpn_portable_overlay_style {
   uint8_t alpha;
   float width_pixels;
 } ocpn_portable_overlay_style;
+
+typedef struct ocpn_portable_geo_segment {
+  ocpn_portable_geo_point start;
+  ocpn_portable_geo_point end;
+} ocpn_portable_geo_segment;
+
+typedef struct ocpn_portable_chart_segment_result {
+  /* 0 covered, 1 missing coverage, 2 unknown. */
+  uint32_t state;
+  uint32_t charts_considered;
+} ocpn_portable_chart_segment_result;
 
 typedef struct ocpn_portable_host_callbacks {
   uint32_t abi_version;
@@ -57,6 +68,19 @@ typedef struct ocpn_portable_host_callbacks {
                        uint32_t work_units);
   int32_t (*cancel_job)(void* user_data, const char* job_id, size_t job_id_len);
   int32_t (*open_environmental_viewer)(void* user_data);
+  int32_t (*charts_query_segments)(void* user_data,
+                                   const ocpn_portable_geo_segment* segments,
+                                   size_t segment_count,
+                                   ocpn_portable_chart_segment_result* results,
+                                   size_t result_count);
+  int32_t (*network_get_to_private)(void* user_data, const char* request_id,
+                                    size_t request_id_len, const char* url,
+                                    size_t url_len, const char* private_name,
+                                    size_t private_name_len,
+                                    uint64_t max_bytes);
+  int32_t (*storage_private_read)(void* user_data, const char* private_name,
+                                  size_t private_name_len, uint8_t* value,
+                                  size_t value_capacity, size_t* value_len);
 } ocpn_portable_host_callbacks;
 
 ocpn_portable_runtime* ocpn_portable_runtime_create(

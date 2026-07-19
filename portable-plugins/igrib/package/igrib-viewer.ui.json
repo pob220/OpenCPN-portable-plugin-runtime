@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "surface_id": "igrib.viewer",
+  "kind": "floating-panel",
+  "title": "iGRIB — Portable Environmental Data",
+  "controls": [
+    {"id": "file", "type": "status", "label": "File"},
+    {"id": "timeline", "type": "choice", "label": "Forecast time"},
+    {"id": "previous", "type": "button", "label": "Previous"},
+    {"id": "next", "type": "button", "label": "Next"},
+    {"id": "play", "type": "button", "label": "Play"},
+    {"id": "now", "type": "button", "label": "Now"},
+    {"id": "wind", "type": "toggle", "label": "Wind", "default": true},
+    {"id": "pressure", "type": "toggle", "label": "Pressure", "default": true},
+    {"id": "waves", "type": "toggle", "label": "Waves", "default": true},
+    {"id": "current", "type": "toggle", "label": "Current", "default": true},
+    {"id": "air-temperature", "type": "toggle", "label": "Air Temp", "default": false},
+    {"id": "open", "type": "file-open", "label": "Open GRIB"},
+    {"id": "settings", "type": "button", "label": "Settings"},
+    {"id": "download", "type": "button", "label": "Download GRIB"},
+    {"id": "generate", "type": "button", "label": "Generate GRIB"},
+    {"id": "cancel", "type": "cancel", "label": "Cancel"},
+    {"id": "progress", "type": "progress", "label": "Progress"}
+  ]
+}
