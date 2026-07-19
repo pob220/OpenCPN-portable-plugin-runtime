@@ -19,7 +19,8 @@ class wxWindow;
 
 class PortableGribHost {
 public:
-  explicit PortableGribHost(wxWindow* parent, const wxString& package_root);
+  explicit PortableGribHost(wxWindow* parent, const wxString& package_root,
+                            bool credential_access);
   ~PortableGribHost();
 
   PortableGribHost(const PortableGribHost&) = delete;

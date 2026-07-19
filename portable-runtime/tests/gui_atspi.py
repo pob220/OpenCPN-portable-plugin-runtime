@@ -46,7 +46,15 @@ def actions(accessible):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--activate", help="exact accessible control name")
-    parser.add_argument("--set-text", help="replace text in an editable control")
+    text_source = parser.add_mutually_exclusive_group()
+    text_source.add_argument(
+        "--set-text", help="replace text in an editable control"
+    )
+    text_source.add_argument(
+        "--set-text-stdin",
+        action="store_true",
+        help="read replacement text from stdin (keeps secrets out of argv)",
+    )
     parser.add_argument(
         "--set-text-role",
         help="accessible role of the editable control (for example, text)",
@@ -64,6 +72,7 @@ def main():
     )
     parser.add_argument("--application", default="opencpn")
     args = parser.parse_args()
+    replacement_text = sys.stdin.read() if args.set_text_stdin else args.set_text
 
     Atspi.init()
     desktop = Atspi.get_desktop(0)
@@ -92,7 +101,7 @@ def main():
                 if args.focus_title:
                     if name == args.focus_title:
                         matches.append((item, path, []))
-                elif args.set_text is not None:
+                elif replacement_text is not None:
                     if item.get_role_name() == args.set_text_role:
                         try:
                             editable = item.get_editable_text_iface()
@@ -109,12 +118,12 @@ def main():
                         f"actions={action_names!r}"
                     )
 
-    if not args.activate and not args.focus_title and args.set_text is None:
+    if not args.activate and not args.focus_title and replacement_text is None:
         return 0
     target = args.activate or args.focus_title or args.set_text_role
-    required_matches = 1 if args.set_text is None else args.match_index + 1
+    required_matches = 1 if replacement_text is None else args.match_index + 1
     if len(matches) < required_matches or (
-        args.set_text is None and len(matches) != 1
+        replacement_text is None and len(matches) != 1
     ):
         print(
             f"expected one control named {target!r}, "
@@ -123,11 +132,11 @@ def main():
         )
         return 3
     item, path, action_names = matches[
-        args.match_index if args.set_text is not None else 0
+        args.match_index if replacement_text is not None else 0
     ]
-    if args.set_text is not None:
+    if replacement_text is not None:
         editable = item.get_editable_text_iface()
-        if editable is None or not editable.set_text_contents(args.set_text):
+        if editable is None or not editable.set_text_contents(replacement_text):
             print(f"AT-SPI text edit failed at {path}", file=sys.stderr)
             return 4
         print(f"set text at {path}")

@@ -21,12 +21,14 @@
 #include <wx/filename.h>
 #include <wx/frame.h>
 #include <wx/gauge.h>
+#include <wx/hyperlink.h>
 #include <wx/jsonreader.h>
 #include <wx/jsonval.h>
 #include <wx/jsonwriter.h>
 #include <wx/log.h>
 #include <wx/msgdlg.h>
 #include <wx/process.h>
+#include <wx/secretstore.h>
 #include <wx/sizer.h>
 #include <wx/spinctrl.h>
 #include <wx/statline.h>
@@ -47,6 +49,10 @@ constexpr int kHelperProcessId = wxID_HIGHEST + 711;
 constexpr int kProgressTimerId = wxID_HIGHEST + 712;
 constexpr int kPlaybackTimerId = wxID_HIGHEST + 713;
 constexpr size_t kMaximumResultBytes = 32U * 1024U * 1024U;
+constexpr const char* kCopernicusCredentialService =
+    "OpenCPN iGRIB Copernicus Marine";
+constexpr const char* kCopernicusPasswordEnvironment =
+    "OCPN_IGRIB_COPERNICUS_PASSWORD";
 
 struct Sample {
   double latitude = 0.0;
@@ -165,9 +171,11 @@ class PortableGribHost::Impl : public wxEvtHandler {
 public:
   enum class Operation { None, Inspect, DecodeFrame, Generate };
 
-  Impl(wxWindow* parent_value, wxString package_root_value)
+  Impl(wxWindow* parent_value, wxString package_root_value,
+       bool credential_access_value)
       : parent(parent_value),
         package_root(std::move(package_root_value)),
+        credential_access(credential_access_value),
         progress_timer(this, kProgressTimerId),
         playback_timer(this, kPlaybackTimerId) {
     Bind(wxEVT_END_PROCESS, &Impl::OnProcessEnded, this, kHelperProcessId);
@@ -189,16 +197,15 @@ private:
   void ShowGenerator();
   void Cancel();
   bool Launch(const std::vector<wxString>& arguments, Operation next_operation,
-              const wxString& result, const wxString& status);
+              const wxString& result, const wxString& status,
+              const wxSecretValue* secret = nullptr);
   std::vector<wxString> DecoderCommand(const wxString& verb,
                                        const wxString& input,
                                        const wxString& time,
                                        const wxString& result) const;
   std::vector<wxString> GeneratorCommand(const wxString& job,
                                          const wxString& result,
-                                         const wxString& output,
-                                         const wxString& input_cache,
-                                         const wxString& model_directory) const;
+                                         const wxString& output) const;
   void OnProcessEnded(wxProcessEvent& event);
   void OnProgressTimer(wxTimerEvent& event);
   void OnPlaybackTimer(wxTimerEvent& event);
@@ -211,6 +218,7 @@ private:
 
   wxWindow* parent = nullptr;
   wxString package_root;
+  bool credential_access = false;
   wxString surface_title;
   wxString private_directory;
   wxFrame* frame = nullptr;
@@ -472,8 +480,7 @@ std::vector<wxString> PortableGribHost::Impl::DecoderCommand(
 }
 
 std::vector<wxString> PortableGribHost::Impl::GeneratorCommand(
-    const wxString& job, const wxString& result, const wxString& output,
-    const wxString& input_cache, const wxString& model_directory) const {
+    const wxString& job, const wxString& result, const wxString& output) const {
 #if defined(__linux__)
   if (HelperSupervisionAvailable()) {
     std::vector<wxString> command = {"/usr/bin/prlimit", "--as=4294967296",
@@ -518,13 +525,6 @@ std::vector<wxString> PortableGribHost::Impl::GeneratorCommand(
       command.insert(command.end(), {"--ro-bind", "/etc/ca-certificates",
                                      "/etc/ca-certificates"});
     }
-    if (!input_cache.empty()) {
-      command.insert(command.end(), {"--ro-bind", input_cache, "/input-cache"});
-    }
-    if (!model_directory.empty()) {
-      command.insert(command.end(),
-                     {"--ro-bind", model_directory, "/tpxo-model"});
-    }
     command.insert(command.end(),
                    {"/environmental-grib", "run-job", "--job",
                     "/job/" + wxFileName(job).GetFullName(), "--result",
@@ -535,15 +535,14 @@ std::vector<wxString> PortableGribHost::Impl::GeneratorCommand(
   static_cast<void>(job);
   static_cast<void>(result);
   static_cast<void>(output);
-  static_cast<void>(input_cache);
-  static_cast<void>(model_directory);
   return {};
 }
 
 bool PortableGribHost::Impl::Launch(const std::vector<wxString>& arguments,
                                     Operation next_operation,
                                     const wxString& result,
-                                    const wxString& status) {
+                                    const wxString& status,
+                                    const wxSecretValue* secret) {
   if (process) return false;
   if (arguments.empty()) {
     wxString error;
@@ -557,8 +556,39 @@ bool PortableGribHost::Impl::Launch(const std::vector<wxString>& arguments,
   for (const auto& argument : arguments) argv.push_back(argument.wc_str());
   argv.push_back(nullptr);
   process = new wxProcess(this, kHelperProcessId);
-  process_id =
-      wxExecute(argv.data(), wxEXEC_ASYNC | wxEXEC_HIDE_CONSOLE, process);
+  wxExecuteEnv environment;
+  wxExecuteEnv* environment_pointer = nullptr;
+  wxSecretString transient_secret;
+  if (next_operation == Operation::Generate) {
+#if defined(_WIN32)
+    for (const auto* name : {"SystemRoot", "SystemDrive", "COMSPEC", "PATH",
+                             "PATHEXT", "TEMP", "TMP", "USERPROFILE"}) {
+      wxString value;
+      if (wxGetEnv(name, &value)) environment.env[name] = value;
+    }
+#else
+    environment.env["HOME"] = "/tmp";
+    environment.env["PATH"] = "/usr/bin:/bin";
+#endif
+    for (const auto* name :
+         {"LANG", "LC_ALL", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+          "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"}) {
+      wxString value;
+      if (wxGetEnv(name, &value)) environment.env[name] = value;
+    }
+    if (secret && secret->IsOk()) {
+      transient_secret = wxSecretString(*secret);
+      environment.env[kCopernicusPasswordEnvironment] = transient_secret;
+    }
+    environment_pointer = &environment;
+  }
+  process_id = wxExecute(argv.data(), wxEXEC_ASYNC | wxEXEC_HIDE_CONSOLE,
+                         process, environment_pointer);
+  auto secret_entry = environment.env.find(kCopernicusPasswordEnvironment);
+  if (secret_entry != environment.env.end()) {
+    wxSecretValue::WipeString(secret_entry->second);
+    environment.env.erase(secret_entry);
+  }
   if (process_id == 0) {
     delete process;
     process = nullptr;
@@ -741,8 +771,19 @@ void PortableGribHost::Impl::ShowGenerator() {
     return;
   }
 
+  wxSecretStore secret_store = wxSecretStore::GetDefault();
+  wxString secret_store_error;
+  const bool secret_store_available =
+      credential_access && secret_store.IsOk(&secret_store_error);
+  wxString stored_username;
+  wxSecretValue stored_password;
+  bool have_stored_credentials =
+      secret_store_available &&
+      secret_store.Load(kCopernicusCredentialService, stored_username,
+                        stored_password);
+
   wxDialog dialog(frame, wxID_ANY, "Environmental GRIB Generator",
-                  wxDefaultPosition, wxSize(780, 720),
+                  wxDefaultPosition, wxSize(820, 760),
                   wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
   auto* root = new wxBoxSizer(wxVERTICAL);
   auto* grid = new wxFlexGridSizer(2, 6, 8);
@@ -774,10 +815,40 @@ void PortableGribHost::Impl::ShowGenerator() {
                               wxDefaultSize, presets);
   preset->SetSelection(0);
   auto* waves = new wxCheckBox(&dialog, wxID_ANY, "Include wave fields");
-  auto* currents =
-      new wxCheckBox(&dialog, wxID_ANY, "Generate/include currents");
-  auto* tpxo_directory = new wxTextCtrl(&dialog, wxID_ANY, wxEmptyString);
-  auto* tpxo_cache = new wxTextCtrl(&dialog, wxID_ANY, wxEmptyString);
+  wxArrayString current_sources;
+  current_sources.Add("None");
+  if (credential_access) {
+    current_sources.Add("Copernicus Marine North-West Shelf (hourly, ~1.5 km)");
+    current_sources.Add("Copernicus Marine Global (hourly, ~1/12 degree)");
+  }
+  auto* current_source = new wxChoice(&dialog, wxID_ANY, wxDefaultPosition,
+                                      wxDefaultSize, current_sources);
+  current_source->SetSelection(credential_access ? 1 : 0);
+  auto* current_note =
+      new wxStaticText(&dialog, wxID_ANY,
+                       "North-West Shelf coverage: 20 W to 13 E, 40 N to 65 N. "
+                       "Use Global outside this area.");
+  current_note->Wrap(520);
+  auto* account = new wxHyperlinkCtrl(
+      &dialog, wxID_ANY, "Create or manage a free Copernicus Marine account",
+      "https://data.marine.copernicus.eu/register");
+  auto* username = new wxTextCtrl(&dialog, wxID_ANY, stored_username);
+  wxSecretString initial_password;
+  if (have_stored_credentials)
+    initial_password.assign(stored_password.GetAsString());
+  auto* password =
+      new wxTextCtrl(&dialog, wxID_ANY, initial_password, wxDefaultPosition,
+                     wxDefaultSize, wxTE_PASSWORD);
+  auto* remember = new wxCheckBox(&dialog, wxID_ANY,
+                                  "Save in operating-system credential store");
+  remember->SetValue(secret_store_available);
+  remember->Enable(secret_store_available);
+  if (!secret_store_available) {
+    remember->SetToolTip("Credential storage unavailable: " +
+                         secret_store_error);
+  }
+  auto* forget = new wxButton(&dialog, wxID_ANY, "Forget saved login");
+  forget->Enable(have_stored_credentials);
   AddRow(grid, &dialog, "Generator executable", executable);
   AddRow(grid, &dialog, "West longitude", west);
   AddRow(grid, &dialog, "South latitude", south);
@@ -789,9 +860,13 @@ void PortableGribHost::Impl::ShowGenerator() {
   AddRow(grid, &dialog, "Weather provider", provider);
   AddRow(grid, &dialog, "Weather preset", preset);
   AddRow(grid, &dialog, "Waves", waves);
-  AddRow(grid, &dialog, "Currents", currents);
-  AddRow(grid, &dialog, "TPXO model directory", tpxo_directory);
-  AddRow(grid, &dialog, "TPXO cache file", tpxo_cache);
+  AddRow(grid, &dialog, "Current source", current_source);
+  AddRow(grid, &dialog, "Current-source details", current_note);
+  AddRow(grid, &dialog, "Copernicus account", account);
+  AddRow(grid, &dialog, "Copernicus username or email", username);
+  AddRow(grid, &dialog, "Copernicus password", password);
+  AddRow(grid, &dialog, "Credential storage", remember);
+  AddRow(grid, &dialog, "Saved credentials", forget);
   root->Add(grid, 1, wxEXPAND | wxALL, 10);
   root->Add(new wxStaticText(
                 &dialog, wxID_ANY,
@@ -802,7 +877,73 @@ void PortableGribHost::Impl::ShowGenerator() {
   auto* buttons = dialog.CreateSeparatedButtonSizer(wxOK | wxCANCEL);
   root->Add(buttons, 0, wxEXPAND | wxALL, 10);
   dialog.SetSizer(root);
+
+  auto update_current_controls = [&]() {
+    const bool enabled = current_source->GetSelection() != 0;
+    account->Enable(enabled);
+    username->Enable(enabled);
+    password->Enable(enabled);
+    remember->Enable(enabled && secret_store_available);
+    forget->Enable(enabled && have_stored_credentials);
+    current_note->SetLabel(
+        current_source->GetSelection() == 1
+            ? "North-West Shelf coverage: 20 W to 13 E, 40 N to 65 N. "
+              "Use Global outside this area."
+        : current_source->GetSelection() == 2
+            ? "Global model coverage: 180 W to 180 E, 80 S to 90 N."
+            : "No current fields will be included.");
+    current_note->Wrap(520);
+    dialog.Layout();
+  };
+  current_source->Bind(wxEVT_CHOICE,
+                       [&](wxCommandEvent&) { update_current_controls(); });
+  forget->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
+    if (have_stored_credentials &&
+        secret_store.Delete(kCopernicusCredentialService)) {
+      have_stored_credentials = false;
+      stored_username.clear();
+      username->Clear();
+      password->Clear();
+      remember->SetValue(false);
+      forget->Enable(false);
+    }
+  });
+  update_current_controls();
   if (dialog.ShowModal() != wxID_OK) return;
+
+  if (hours->GetValue() % step->GetValue() != 0) {
+    wxMessageBox(
+        "Forecast duration must be evenly divisible by the step interval. "
+        "For example, use 1 hour with a 1-hour step or 72 hours with a "
+        "3-hour step.",
+        "iGRIB", wxOK | wxICON_ERROR, frame);
+    return;
+  }
+
+  const bool use_copernicus = current_source->GetSelection() > 0;
+  wxString copernicus_username = username->GetValue();
+  copernicus_username.Trim(true).Trim(false);
+  wxSecretString copernicus_password(password->GetValue());
+  wxSecretValue copernicus_secret;
+  if (use_copernicus) {
+    if (copernicus_username.empty() || copernicus_password.empty()) {
+      wxMessageBox(
+          "Copernicus Marine currents require the username (or email) and "
+          "password for a free Copernicus Marine account.",
+          "iGRIB", wxOK | wxICON_ERROR, frame);
+      return;
+    }
+    copernicus_secret = wxSecretValue(copernicus_password);
+    if (remember->GetValue() &&
+        !secret_store.Save(kCopernicusCredentialService, copernicus_username,
+                           copernicus_secret)) {
+      wxMessageBox(
+          "The Copernicus login could not be saved securely. It will be "
+          "used for this generation only.",
+          "iGRIB", wxOK | wxICON_WARNING, frame);
+    }
+  }
+  password->Clear();
 
   wxFileDialog output_dialog(frame, "Save generated environmental GRIB",
                              wxEmptyString, "environment_igrib.grb",
@@ -838,15 +979,17 @@ void PortableGribHost::Impl::ShowGenerator() {
   request["includeWaves"] = waves->GetValue();
   request["waveProvider"] = wxString("gfs_wave");
   request["currentSource"] =
-      wxString(currents->GetValue() ? "tpxo-cache" : "none");
+      wxString(current_source->GetSelection() == 1   ? "copernicus_nws"
+               : current_source->GetSelection() == 2 ? "copernicus_global"
+                                                     : "none");
+  if (use_copernicus) {
+    request["copernicusUsername"] = copernicus_username;
+    request["currentGridSpacingDeg"] =
+        current_source->GetSelection() == 1 ? 0.05 : 0.1;
+    job["credentials"]["copernicusPasswordEnvironment"] =
+        wxString(kCopernicusPasswordEnvironment);
+  }
   const bool sandboxed_generator = HelperSupervisionAvailable();
-  if (!tpxo_directory->GetValue().empty())
-    request["tpxoModelDirectory"] =
-        sandboxed_generator ? "/tpxo-model" : tpxo_directory->GetValue();
-  if (!tpxo_cache->GetValue().empty())
-    request["inputCache"] =
-        sandboxed_generator ? "/input-cache" : tpxo_cache->GetValue();
-  request["autoPrepareTpxoCache"] = currents->GetValue();
   request["output"] = sandboxed_generator
                           ? "/output/" + output_dialog.GetFilename()
                           : output_dialog.GetPath();
@@ -864,10 +1007,10 @@ void PortableGribHost::Impl::ShowGenerator() {
   writer.Write(job, job_output);
   job_output.Close();
   generated_output_path = output_dialog.GetPath();
-  Launch(GeneratorCommand(job_path, result, generated_output_path,
-                          tpxo_cache->GetValue(), tpxo_directory->GetValue()),
+  Launch(GeneratorCommand(job_path, result, generated_output_path),
          Operation::Generate, result,
-         "Generating environmental GRIB in supervised helper…");
+         "Generating environmental GRIB in supervised helper…",
+         use_copernicus ? &copernicus_secret : nullptr);
 }
 
 bool PortableGribHost::Impl::Render(ocpnDC& dc, const ViewPort& viewport) {
@@ -973,8 +1116,9 @@ void PortableGribHost::Impl::Shutdown() {
 }
 
 PortableGribHost::PortableGribHost(wxWindow* parent,
-                                   const wxString& package_root)
-    : m_impl(std::make_unique<Impl>(parent, package_root)) {}
+                                   const wxString& package_root,
+                                   bool credential_access)
+    : m_impl(std::make_unique<Impl>(parent, package_root, credential_access)) {}
 
 PortableGribHost::~PortableGribHost() = default;
 

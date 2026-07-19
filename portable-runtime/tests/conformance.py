@@ -8,8 +8,10 @@ The JSON output deliberately distinguishes pass, skip and target identity.
 """
 
 import argparse
+import datetime
 import importlib.util
 import json
+import os
 import pathlib
 import platform
 import subprocess
@@ -70,6 +72,7 @@ def main():
     parser.add_argument("--trusted-key", required=True, type=pathlib.Path)
     parser.add_argument("--fixture", type=pathlib.Path)
     parser.add_argument("--full-generator", action="store_true")
+    parser.add_argument("--live-copernicus", action="store_true")
     parser.add_argument("--output-json", type=pathlib.Path)
     args = parser.parse_args()
 
@@ -124,6 +127,86 @@ def main():
             }
         else:
             report["checks"]["generator_protocol"] = "skipped-helper-optional"
+
+        if args.live_copernicus:
+            if not generator.is_file():
+                raise RuntimeError("--live-copernicus requires a target helper")
+            username = os.environ.get("COPERNICUSMARINE_SERVICE_USERNAME")
+            password = os.environ.get("COPERNICUSMARINE_SERVICE_PASSWORD")
+            if not username or not password:
+                raise RuntimeError(
+                    "--live-copernicus requires "
+                    "COPERNICUSMARINE_SERVICE_USERNAME and "
+                    "COPERNICUSMARINE_SERVICE_PASSWORD"
+                )
+            generated = work / "copernicus-nws-live.grb"
+            result_path = work / "copernicus-result.json"
+            job_path = work / "copernicus-job.json"
+            start = datetime.datetime.now(datetime.timezone.utc).replace(
+                minute=0, second=0, microsecond=0
+            )
+            job = {
+                "schemaVersion": 1,
+                "operation": "generateEnvironment",
+                "request": {
+                    "bbox": {
+                        "west": -6.6,
+                        "south": 52.2,
+                        "east": -6.4,
+                        "north": 52.4,
+                    },
+                    "start": start.strftime("%Y-%m-%dT%H:00:00Z"),
+                    "hours": 0,
+                    "stepHours": 1,
+                    "weatherProvider": "none",
+                    "includeWaves": False,
+                    "currentSource": "copernicus_nws",
+                    "copernicusUsername": username,
+                    "currentGridSpacingDeg": 0.1,
+                    "output": str(generated),
+                    "overwrite": True,
+                },
+                "credentials": {
+                    "copernicusPasswordEnvironment":
+                        "COPERNICUSMARINE_SERVICE_PASSWORD"
+                },
+            }
+            job_path.write_text(json.dumps(job))
+            _, copernicus_ms = run(
+                [
+                    generator,
+                    "run-job",
+                    "--job",
+                    job_path,
+                    "--result",
+                    result_path,
+                ],
+                300,
+            )
+            result = json.loads(result_path.read_text())
+            if result.get("status") != "complete" or not generated.is_file():
+                raise RuntimeError(
+                    "live Copernicus generation did not publish a complete GRIB"
+                )
+            inspection, inspect_ms = run(
+                [generator, "inspect-grib", generated], 120
+            )
+            current_counts = json.loads(inspection.stdout).get(
+                "current_component_counts", {}
+            )
+            if current_counts.get("u_49") != 1 or current_counts.get("v_50") != 1:
+                raise RuntimeError(
+                    "live Copernicus GRIB omitted current vector components"
+                )
+            report["checks"]["live_copernicus_nws"] = {
+                "status": "passed",
+                "generate_ms": copernicus_ms,
+                "inspect_ms": inspect_ms,
+                "bytes": generated.stat().st_size,
+                "messages": 2,
+            }
+        else:
+            report["checks"]["live_copernicus_nws"] = "skipped-opt-in"
 
         if args.fixture is not None:
             fixture = args.fixture.resolve(strict=True)

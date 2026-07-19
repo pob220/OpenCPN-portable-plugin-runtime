@@ -27,7 +27,8 @@
     "helpers.environment.generate",
     "charts.coverage",
     "network.http",
-    "storage.private"
+    "storage.private",
+    "credentials.provider"
   ],
   "helpers": {
     "environment-decoder": {

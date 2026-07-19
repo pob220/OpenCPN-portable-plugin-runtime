@@ -10,10 +10,13 @@ trusted_key="$repo_root/portable-runtime/development-keys/igrib-ed25519-public.p
 
 if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
   printf '%s\n' \
-    "Usage: portable-runtime/beta/run-conformance.sh [GRIB_FIXTURE]" \
+    "Usage: portable-runtime/beta/run-conformance.sh [--live-copernicus] [GRIB_FIXTURE]" \
     "" \
     "Without a fixture, run package/helper policy checks." \
-    "With a fixture, also decode it and run the existing-file generator path."
+    "With a fixture, also decode it and run the existing-file generator path." \
+    "--live-copernicus runs a bounded authenticated NWS current download" \
+    "using COPERNICUSMARINE_SERVICE_USERNAME and" \
+    "COPERNICUSMARINE_SERVICE_PASSWORD."
   exit 0
 fi
 if [[ ! -f "$package" ]]; then
@@ -27,11 +30,22 @@ arguments=(
   --package "$package"
   --trusted-key "$trusted_key"
 )
-if [[ -n "${1:-}" ]]; then
-  if [[ ! -f "$1" ]]; then
-    printf 'GRIB fixture not found: %s\n' "$1" >&2
+fixture=
+for argument in "$@"; do
+  if [[ "$argument" == --live-copernicus ]]; then
+    arguments+=(--live-copernicus)
+  elif [[ -z "$fixture" ]]; then
+    fixture="$argument"
+  else
+    printf 'Unexpected argument: %s\n' "$argument" >&2
+    exit 2
+  fi
+done
+if [[ -n "$fixture" ]]; then
+  if [[ ! -f "$fixture" ]]; then
+    printf 'GRIB fixture not found: %s\n' "$fixture" >&2
     exit 1
   fi
-  arguments+=(--fixture "$1" --full-generator)
+  arguments+=(--fixture "$fixture" --full-generator)
 fi
 python3 "$repo_root/portable-runtime/tests/conformance.py" "${arguments[@]}"

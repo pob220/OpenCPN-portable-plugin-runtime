@@ -480,7 +480,8 @@ int32_t PortablePluginManager::Impl::OpenEnvironmentalViewer(void* user_data) {
   if (!instance->environmental_host) {
     instance->environmental_host = std::make_unique<PortableGribHost>(
         instance->owner->plugin_manager->GetParentFrame(),
-        instance->package_root);
+        instance->package_root,
+        instance->owner->HasPermission(*instance, "credentials.provider"));
   }
   wxString error;
   if (!instance->environmental_host->Show(&error)) {
@@ -733,7 +734,8 @@ bool PortablePluginManager::Impl::Load() {
                                                 "helpers.environment.generate",
                                                 "charts.coverage",
                                                 "network.http",
-                                                "storage.private"};
+                                                "storage.private",
+                                                "credentials.provider"};
   wxString entry;
   bool more = directory.GetFirst(&entry, wxEmptyString, wxDIR_DIRS);
   while (more) {

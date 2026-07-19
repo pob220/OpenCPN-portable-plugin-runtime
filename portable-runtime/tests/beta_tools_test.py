@@ -9,6 +9,7 @@ import unittest
 
 RUNTIME = pathlib.Path(__file__).resolve().parents[1]
 BETA = RUNTIME / "beta"
+ROOT = RUNTIME.parent
 
 
 def load(name):
@@ -55,6 +56,16 @@ class BetaToolsTest(unittest.TestCase):
         self.assertNotIn("abc", redacted)
         self.assertNotIn("xyz", redacted)
         self.assertNotIn("Bearer-secret", redacted)
+
+    def test_copernicus_password_stays_out_of_jobs_and_arguments(self):
+        source = (ROOT / "gui/src/portable_grib_host.cpp").read_text()
+        self.assertIn("copernicus_nws", source)
+        self.assertIn("copernicus_global", source)
+        self.assertIn("copernicusPasswordEnvironment", source)
+        self.assertIn("wxSecretStore", source)
+        self.assertNotIn('request["copernicusPassword"]', source)
+        self.assertNotIn('"--password"', source)
+        self.assertNotIn("TPXO model directory", source)
 
     def test_shell_entry_points_have_working_help(self):
         for script in (
