@@ -168,6 +168,7 @@ WX_DEFINE_ARRAY_PTR(PlugInToolbarToolContainer*, ArrayOfPlugInToolbarTools);
 //-----------------------------------------------------------------------------------------------------
 
 class BlacklistUI;
+class PortablePluginManager;
 
 class PlugInManager : public wxEvtHandler {
 public:
@@ -231,6 +232,12 @@ public:
   void SetColorSchemeForAllPlugIns(ColorScheme cs);
   void NotifyAuiPlugIns(void);
   bool CallLateInit(void);
+
+#ifdef OCPN_ENABLE_PORTABLE_PLUGINS
+  bool LoadPortablePlugins();
+  void ShutdownPortablePlugins();
+  bool OnPortableToolbarAction(int toolbar_id);
+#endif
 
   bool IsAnyPlugInChartEnabled();
 
@@ -335,6 +342,10 @@ private:
   pluginUtilHandler* m_utilHandler;
   PluginListPanel* m_listPanel;
   std::unique_ptr<AbstractBlacklist> m_blacklist;
+
+#ifdef OCPN_ENABLE_PORTABLE_PLUGINS
+  std::unique_ptr<PortablePluginManager> m_portable_manager;
+#endif
 
 #ifndef __ANDROID__
 #ifdef OCPN_USE_CURL

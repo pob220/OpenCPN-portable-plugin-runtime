@@ -1,0 +1,694 @@
+use std::ffi::{CStr, c_char, c_void};
+use std::fs;
+use std::path::Path;
+use std::ptr;
+use std::slice;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::thread;
+use std::time::Duration;
+
+use wasmtime::component::ResourceTable;
+use wasmtime::component::{Component, HasSelf, Linker};
+use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
+use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
+
+use exports::opencpn::portable::plugin::JobEvent;
+
+wasmtime::component::bindgen!({
+    path: "../wit",
+    world: "plugin-world",
+});
+
+const HOST_ABI_VERSION: u32 = 2;
+const ERROR_TEXT_LIMIT: usize = 4096;
+const SETTINGS_VALUE_LIMIT: usize = 64 * 1024;
+const OVERLAY_POINT_LIMIT: usize = 1_000_000;
+const EPOCH_TICK: Duration = Duration::from_millis(100);
+const CALL_EPOCH_DEADLINE: u64 = 50;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GeoPoint {
+    latitude: f64,
+    longitude: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct OverlayStyle {
+    red: u8,
+    green: u8,
+    blue: u8,
+    alpha: u8,
+    width_pixels: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct HostCallbacks {
+    abi_version: u32,
+    user_data: *mut c_void,
+    log: Option<unsafe extern "C" fn(*mut c_void, u32, *const c_char, usize)>,
+    register_action: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            *const c_char,
+            usize,
+            *const c_char,
+            usize,
+            *const c_char,
+            usize,
+            *const c_char,
+            usize,
+            *mut u32,
+        ) -> i32,
+    >,
+    get_vessel_position: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            *mut f64,
+            *mut f64,
+            *mut f64,
+            *mut u8,
+            *mut f64,
+            *mut u8,
+        ) -> i32,
+    >,
+    setting_get: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            *const c_char,
+            usize,
+            *mut c_char,
+            usize,
+            *mut usize,
+            *mut u8,
+        ) -> i32,
+    >,
+    setting_set: Option<
+        unsafe extern "C" fn(*mut c_void, *const c_char, usize, *const c_char, usize) -> i32,
+    >,
+    submit_polyline: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            *const c_char,
+            usize,
+            *const GeoPoint,
+            usize,
+            OverlayStyle,
+        ) -> i32,
+    >,
+    clear_scene: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> i32>,
+    start_job: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize, u32) -> i32>,
+    cancel_job: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> i32>,
+    open_environmental_viewer: Option<unsafe extern "C" fn(*mut c_void) -> i32>,
+}
+
+unsafe impl Send for HostCallbacks {}
+
+struct HostState {
+    callbacks: HostCallbacks,
+    limits: StoreLimits,
+    wasi: WasiCtx,
+    table: ResourceTable,
+}
+
+impl WasiView for HostState {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.table,
+        }
+    }
+}
+
+pub struct Runtime {
+    store: Store<HostState>,
+    bindings: PluginWorld,
+    epoch_ticker_stop: Arc<AtomicBool>,
+    epoch_ticker: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        self.epoch_ticker_stop.store(true, Ordering::Release);
+        if let Some(ticker) = self.epoch_ticker.take() {
+            let _ = ticker.join();
+        }
+    }
+}
+
+fn prepare_call(runtime: &mut Runtime) -> anyhow::Result<()> {
+    // A fresh finite budget on every guest entry prevents one component from
+    // monopolising the UI thread while avoiding lifetime fuel depletion.
+    runtime.store.set_fuel(100_000_000)?;
+    // The engine ticker advances every 100 ms.  This is a five-second
+    // wall-clock ceiling even if compiled guest code does not consume fuel as
+    // expected; host services apply their own, shorter operation deadlines.
+    runtime.store.set_epoch_deadline(CALL_EPOCH_DEADLINE);
+    Ok(())
+}
+
+fn callback_error(operation: &str, code: i32) -> String {
+    format!("host service {operation} failed with code {code}")
+}
+
+impl opencpn::portable::host::Host for HostState {
+    fn log(&mut self, level: opencpn::portable::host::LogLevel, message: String) {
+        let numeric_level = match level {
+            opencpn::portable::host::LogLevel::Debug => 0,
+            opencpn::portable::host::LogLevel::Info => 1,
+            opencpn::portable::host::LogLevel::Warning => 2,
+            opencpn::portable::host::LogLevel::Error => 3,
+        };
+        if let Some(callback) = self.callbacks.log {
+            unsafe {
+                callback(
+                    self.callbacks.user_data,
+                    numeric_level,
+                    message.as_ptr().cast(),
+                    message.len(),
+                );
+            }
+        }
+    }
+
+    fn register_action(
+        &mut self,
+        action_id: String,
+        label: String,
+        tooltip: String,
+        icon_resource: Option<String>,
+    ) -> Result<u32, String> {
+        let callback = self
+            .callbacks
+            .register_action
+            .ok_or_else(|| "register-action service unavailable".to_string())?;
+        let mut host_id = 0_u32;
+        let (icon_ptr, icon_len) = icon_resource.as_ref().map_or((ptr::null(), 0), |value| {
+            (value.as_ptr().cast(), value.len())
+        });
+        let code = unsafe {
+            callback(
+                self.callbacks.user_data,
+                action_id.as_ptr().cast(),
+                action_id.len(),
+                label.as_ptr().cast(),
+                label.len(),
+                tooltip.as_ptr().cast(),
+                tooltip.len(),
+                icon_ptr,
+                icon_len,
+                &mut host_id,
+            )
+        };
+        (code == 0)
+            .then_some(host_id)
+            .ok_or_else(|| callback_error("register-action", code))
+    }
+
+    fn get_vessel_position(&mut self) -> Result<opencpn::portable::host::VesselPosition, String> {
+        let callback = self
+            .callbacks
+            .get_vessel_position
+            .ok_or_else(|| "get-vessel-position service unavailable".to_string())?;
+        let mut latitude = 0.0;
+        let mut longitude = 0.0;
+        let mut cog = 0.0;
+        let mut sog = 0.0;
+        let mut has_cog = 0;
+        let mut has_sog = 0;
+        let code = unsafe {
+            callback(
+                self.callbacks.user_data,
+                &mut latitude,
+                &mut longitude,
+                &mut cog,
+                &mut has_cog,
+                &mut sog,
+                &mut has_sog,
+            )
+        };
+        if code != 0 {
+            return Err(callback_error("get-vessel-position", code));
+        }
+        Ok(opencpn::portable::host::VesselPosition {
+            latitude,
+            longitude,
+            course_over_ground: (has_cog != 0).then_some(cog),
+            speed_over_ground: (has_sog != 0).then_some(sog),
+        })
+    }
+
+    fn setting_get(&mut self, key: String) -> Result<Option<String>, String> {
+        let callback = self
+            .callbacks
+            .setting_get
+            .ok_or_else(|| "setting-get service unavailable".to_string())?;
+        let mut value = vec![0_u8; SETTINGS_VALUE_LIMIT];
+        let mut value_len = 0_usize;
+        let mut found = 0_u8;
+        let code = unsafe {
+            callback(
+                self.callbacks.user_data,
+                key.as_ptr().cast(),
+                key.len(),
+                value.as_mut_ptr().cast(),
+                value.len(),
+                &mut value_len,
+                &mut found,
+            )
+        };
+        if code != 0 {
+            return Err(callback_error("setting-get", code));
+        }
+        if found == 0 {
+            return Ok(None);
+        }
+        if value_len > value.len() {
+            return Err("setting value exceeded host limit".to_string());
+        }
+        value.truncate(value_len);
+        String::from_utf8(value)
+            .map(Some)
+            .map_err(|_| "host returned a non-UTF-8 setting".to_string())
+    }
+
+    fn setting_set(&mut self, key: String, value: String) -> Result<(), String> {
+        let callback = self
+            .callbacks
+            .setting_set
+            .ok_or_else(|| "setting-set service unavailable".to_string())?;
+        let code = unsafe {
+            callback(
+                self.callbacks.user_data,
+                key.as_ptr().cast(),
+                key.len(),
+                value.as_ptr().cast(),
+                value.len(),
+            )
+        };
+        (code == 0)
+            .then_some(())
+            .ok_or_else(|| callback_error("setting-set", code))
+    }
+
+    fn submit_polyline(
+        &mut self,
+        scene_id: String,
+        points: Vec<opencpn::portable::host::GeoPoint>,
+        style: opencpn::portable::host::OverlayStyle,
+    ) -> Result<(), String> {
+        if points.len() > OVERLAY_POINT_LIMIT {
+            return Err("overlay point limit exceeded".to_string());
+        }
+        let callback = self
+            .callbacks
+            .submit_polyline
+            .ok_or_else(|| "submit-polyline service unavailable".to_string())?;
+        let c_points: Vec<GeoPoint> = points
+            .into_iter()
+            .map(|point| GeoPoint {
+                latitude: point.latitude,
+                longitude: point.longitude,
+            })
+            .collect();
+        let c_style = OverlayStyle {
+            red: style.red,
+            green: style.green,
+            blue: style.blue,
+            alpha: style.alpha,
+            width_pixels: style.width_pixels,
+        };
+        let code = unsafe {
+            callback(
+                self.callbacks.user_data,
+                scene_id.as_ptr().cast(),
+                scene_id.len(),
+                c_points.as_ptr(),
+                c_points.len(),
+                c_style,
+            )
+        };
+        (code == 0)
+            .then_some(())
+            .ok_or_else(|| callback_error("submit-polyline", code))
+    }
+
+    fn clear_scene(&mut self, scene_id: String) -> Result<(), String> {
+        let callback = self
+            .callbacks
+            .clear_scene
+            .ok_or_else(|| "clear-scene service unavailable".to_string())?;
+        let code = unsafe {
+            callback(
+                self.callbacks.user_data,
+                scene_id.as_ptr().cast(),
+                scene_id.len(),
+            )
+        };
+        (code == 0)
+            .then_some(())
+            .ok_or_else(|| callback_error("clear-scene", code))
+    }
+
+    fn start_job(&mut self, job_id: String, work_units: u32) -> Result<(), String> {
+        let callback = self
+            .callbacks
+            .start_job
+            .ok_or_else(|| "start-job service unavailable".to_string())?;
+        let code = unsafe {
+            callback(
+                self.callbacks.user_data,
+                job_id.as_ptr().cast(),
+                job_id.len(),
+                work_units,
+            )
+        };
+        (code == 0)
+            .then_some(())
+            .ok_or_else(|| callback_error("start-job", code))
+    }
+
+    fn cancel_job(&mut self, job_id: String) -> Result<(), String> {
+        let callback = self
+            .callbacks
+            .cancel_job
+            .ok_or_else(|| "cancel-job service unavailable".to_string())?;
+        let code = unsafe {
+            callback(
+                self.callbacks.user_data,
+                job_id.as_ptr().cast(),
+                job_id.len(),
+            )
+        };
+        (code == 0)
+            .then_some(())
+            .ok_or_else(|| callback_error("cancel-job", code))
+    }
+
+    fn open_environmental_viewer(&mut self) -> Result<(), String> {
+        let callback = self
+            .callbacks
+            .open_environmental_viewer
+            .ok_or_else(|| "open-environmental-viewer service unavailable".to_string())?;
+        let code = unsafe { callback(self.callbacks.user_data) };
+        (code == 0)
+            .then_some(())
+            .ok_or_else(|| callback_error("open-environmental-viewer", code))
+    }
+}
+
+fn write_error(error: *mut c_char, capacity: usize, message: &str) {
+    if error.is_null() || capacity == 0 {
+        return;
+    }
+    let bytes = message.as_bytes();
+    let length = bytes.len().min(capacity.saturating_sub(1));
+    unsafe {
+        ptr::copy_nonoverlapping(bytes.as_ptr(), error.cast(), length);
+        *error.add(length) = 0;
+    }
+}
+
+fn ffi_result<T>(result: anyhow::Result<T>, error: *mut c_char, error_capacity: usize) -> i32 {
+    match result {
+        Ok(_) => 0,
+        Err(err) => {
+            let message = format!("{err:#}");
+            write_error(error, error_capacity.min(ERROR_TEXT_LIMIT), &message);
+            -1
+        }
+    }
+}
+
+fn input_string(ptr: *const c_char, len: usize) -> anyhow::Result<String> {
+    if ptr.is_null() && len != 0 {
+        anyhow::bail!("null string pointer with non-zero length");
+    }
+    let bytes = if len == 0 {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(ptr.cast::<u8>(), len) }
+    };
+    Ok(std::str::from_utf8(bytes)?.to_string())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ocpn_portable_runtime_create(
+    component_path: *const c_char,
+    callbacks: *const HostCallbacks,
+    error: *mut c_char,
+    error_capacity: usize,
+) -> *mut Runtime {
+    let result = (|| -> anyhow::Result<Runtime> {
+        if component_path.is_null() || callbacks.is_null() {
+            anyhow::bail!("component path and callbacks are required");
+        }
+        let callbacks = unsafe { *callbacks };
+        if callbacks.abi_version != HOST_ABI_VERSION {
+            anyhow::bail!(
+                "unsupported host callback ABI {}, expected {}",
+                callbacks.abi_version,
+                HOST_ABI_VERSION
+            );
+        }
+        let path = unsafe { CStr::from_ptr(component_path) }.to_str()?;
+        let bytes = fs::read(Path::new(path))?;
+
+        let mut config = Config::new();
+        config.wasm_component_model(true);
+        config.consume_fuel(true);
+        config.epoch_interruption(true);
+        config.cranelift_nan_canonicalization(true);
+        let engine = Engine::new(&config)?;
+        let component = Component::new(&engine, bytes)?;
+        let mut linker = Linker::new(&engine);
+        // Supply only WASI's inert defaults.  In particular, do not inherit
+        // environment variables, arguments, stdio, filesystem preopens or
+        // network access. OpenCPN capabilities are the only authority source.
+        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+        PluginWorld::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)?;
+
+        let limits = StoreLimitsBuilder::new()
+            .memory_size(256 * 1024 * 1024)
+            .table_elements(100_000)
+            .instances(4)
+            .memories(4)
+            .tables(8)
+            .build();
+        let mut store = Store::new(
+            &engine,
+            HostState {
+                callbacks,
+                limits,
+                wasi: WasiCtx::builder().build(),
+                table: ResourceTable::new(),
+            },
+        );
+        store.limiter(|state| &mut state.limits);
+        store.set_fuel(100_000_000)?;
+        store.set_epoch_deadline(CALL_EPOCH_DEADLINE);
+
+        let bindings = PluginWorld::instantiate(&mut store, &component, &linker)?;
+        let epoch_ticker_stop = Arc::new(AtomicBool::new(false));
+        let ticker_stop = Arc::clone(&epoch_ticker_stop);
+        let ticker_engine = engine.clone();
+        let epoch_ticker = thread::Builder::new()
+            .name("ocpn-portable-epoch".to_string())
+            .spawn(move || {
+                while !ticker_stop.load(Ordering::Acquire) {
+                    thread::sleep(EPOCH_TICK);
+                    ticker_engine.increment_epoch();
+                }
+            })?;
+        Ok(Runtime {
+            store,
+            bindings,
+            epoch_ticker_stop,
+            epoch_ticker: Some(epoch_ticker),
+        })
+    })();
+
+    match result {
+        Ok(runtime) => Box::into_raw(Box::new(runtime)),
+        Err(err) => {
+            write_error(error, error_capacity, &format!("{err:#}"));
+            ptr::null_mut()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ocpn_portable_runtime_destroy(runtime: *mut Runtime) {
+    if !runtime.is_null() {
+        drop(unsafe { Box::from_raw(runtime) });
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ocpn_portable_runtime_initialize(
+    runtime: *mut Runtime,
+    expected_id: *const c_char,
+    expected_id_len: usize,
+    expected_name: *const c_char,
+    expected_name_len: usize,
+    expected_version: *const c_char,
+    expected_version_len: usize,
+    error: *mut c_char,
+    error_capacity: usize,
+) -> i32 {
+    let Some(runtime) = (unsafe { runtime.as_mut() }) else {
+        write_error(error, error_capacity, "runtime is null");
+        return -1;
+    };
+    let result = (|| -> anyhow::Result<()> {
+        prepare_call(runtime)?;
+        let expected_id = input_string(expected_id, expected_id_len)?;
+        let expected_name = input_string(expected_name, expected_name_len)?;
+        let expected_version = input_string(expected_version, expected_version_len)?;
+        let info = runtime
+            .bindings
+            .opencpn_portable_plugin()
+            .call_initialize(&mut runtime.store)?
+            .map_err(anyhow::Error::msg)?;
+        if info.id != expected_id || info.name != expected_name || info.version != expected_version
+        {
+            anyhow::bail!(
+                "component identity mismatch: manifest ({expected_id}, {expected_name}, {expected_version}), component ({}, {}, {})",
+                info.id,
+                info.name,
+                info.version
+            );
+        }
+        Ok(())
+    })();
+    ffi_result(result, error, error_capacity)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ocpn_portable_runtime_enable(
+    runtime: *mut Runtime,
+    error: *mut c_char,
+    error_capacity: usize,
+) -> i32 {
+    let Some(runtime) = (unsafe { runtime.as_mut() }) else {
+        write_error(error, error_capacity, "runtime is null");
+        return -1;
+    };
+    let result = (|| -> anyhow::Result<()> {
+        prepare_call(runtime)?;
+        runtime
+            .bindings
+            .opencpn_portable_plugin()
+            .call_enable(&mut runtime.store)?
+            .map_err(anyhow::Error::msg)?;
+        Ok(())
+    })();
+    ffi_result(result, error, error_capacity)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ocpn_portable_runtime_disable(
+    runtime: *mut Runtime,
+    error: *mut c_char,
+    error_capacity: usize,
+) -> i32 {
+    let Some(runtime) = (unsafe { runtime.as_mut() }) else {
+        write_error(error, error_capacity, "runtime is null");
+        return -1;
+    };
+    let result = (|| -> anyhow::Result<()> {
+        prepare_call(runtime)?;
+        runtime
+            .bindings
+            .opencpn_portable_plugin()
+            .call_disable(&mut runtime.store)?;
+        Ok(())
+    })();
+    ffi_result(result, error, error_capacity)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ocpn_portable_runtime_on_action(
+    runtime: *mut Runtime,
+    action_id: *const c_char,
+    action_id_len: usize,
+    error: *mut c_char,
+    error_capacity: usize,
+) -> i32 {
+    let Some(runtime) = (unsafe { runtime.as_mut() }) else {
+        write_error(error, error_capacity, "runtime is null");
+        return -1;
+    };
+    let result = (|| -> anyhow::Result<()> {
+        prepare_call(runtime)?;
+        let action_id = input_string(action_id, action_id_len)?;
+        runtime
+            .bindings
+            .opencpn_portable_plugin()
+            .call_on_action(&mut runtime.store, &action_id)?
+            .map_err(anyhow::Error::msg)?;
+        Ok(())
+    })();
+    ffi_result(result, error, error_capacity)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ocpn_portable_runtime_on_job_event(
+    runtime: *mut Runtime,
+    job_id: *const c_char,
+    job_id_len: usize,
+    event_kind: u32,
+    progress: u8,
+    message: *const c_char,
+    message_len: usize,
+    error: *mut c_char,
+    error_capacity: usize,
+) -> i32 {
+    let Some(runtime) = (unsafe { runtime.as_mut() }) else {
+        write_error(error, error_capacity, "runtime is null");
+        return -1;
+    };
+    let result = (|| -> anyhow::Result<()> {
+        prepare_call(runtime)?;
+        let job_id = input_string(job_id, job_id_len)?;
+        let event = match event_kind {
+            0 => JobEvent::Progress(progress),
+            1 => JobEvent::Completed,
+            2 => JobEvent::Cancelled,
+            3 => JobEvent::Failed(input_string(message, message_len)?),
+            _ => anyhow::bail!("invalid job event kind {event_kind}"),
+        };
+        runtime
+            .bindings
+            .opencpn_portable_plugin()
+            .call_on_job_event(&mut runtime.store, &job_id, &event)?;
+        Ok(())
+    })();
+    ffi_result(result, error, error_capacity)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ocpn_portable_runtime_test_trap(
+    runtime: *mut Runtime,
+    error: *mut c_char,
+    error_capacity: usize,
+) -> i32 {
+    let Some(runtime) = (unsafe { runtime.as_mut() }) else {
+        write_error(error, error_capacity, "runtime is null");
+        return -1;
+    };
+    let result = (|| -> anyhow::Result<()> {
+        prepare_call(runtime)?;
+        runtime
+            .bindings
+            .opencpn_portable_plugin()
+            .call_test_trap(&mut runtime.store)?;
+        Ok(())
+    })();
+    ffi_result(result, error, error_capacity)
+}

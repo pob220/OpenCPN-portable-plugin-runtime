@@ -6,6 +6,9 @@
 .idea
 .vs
 .vscode
+.portable-toolchain/
+__pycache__/
+*.pyc
 build
 buildwin/NSIS_Unicode/Include/Langstrings_*.nsh
 buildwin/crashrpt/CrashRpt1402.dll

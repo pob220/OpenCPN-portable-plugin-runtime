@@ -1567,6 +1567,9 @@ void MyApp::BuildMainFrame() {
 
   AbstractPlatform::ShowBusySpinner();
   PluginLoader::GetInstance()->LoadAllPlugIns(true);
+#ifdef OCPN_ENABLE_PORTABLE_PLUGINS
+  g_pi_manager->LoadPortablePlugins();
+#endif
   AbstractPlatform::HideBusySpinner();
 
   if (g_kiosk_startup) g_pi_manager->CallLateInit();

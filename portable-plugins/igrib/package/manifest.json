@@ -1,0 +1,28 @@
+{
+  "format_version": 1,
+  "id": "org.opencpn.igrib",
+  "name": "iGRIB",
+  "version": "0.1.0",
+  "description": "Portable environmental-data proof of concept for OpenCPN",
+  "component": "component/igrib.wasm",
+  "runtime": ">=0.1.0 <0.2.0",
+  "portable_api": ">=0.1.0 <0.2.0",
+  "optional_services": [
+    {
+      "interface": "org.opencpn.environment.viewer",
+      "range": ">=0.1.0 <0.2.0",
+      "provider": "xGRIB compatibility adapter"
+    }
+  ],
+  "permissions": [
+    "ui.commands",
+    "navigation.position.read",
+    "settings.read-write",
+    "overlay.submit",
+    "jobs.compute",
+    "environment.compat.xgrib-viewer"
+  ],
+  "resources": ["resources/grib.svg"],
+  "licenses": ["GPL-2.0-or-later"],
+  "development": true
+}

@@ -126,6 +126,8 @@ endif ()
 
 option(OCPN_VERBOSE "Make verbose builds" ON)
 option(OCPN_PEDANTIC "Enable more compiler warnings" OFF)
+option(OCPN_ENABLE_PORTABLE_PLUGINS
+       "Build the experimental Component Model portable-plugin runtime" OFF)
 
 set(OCPN_PACKAGE_RELEASE
   "1" CACHE STRING "Package release number"
@@ -166,6 +168,11 @@ if (QT_ANDROID)
   set(OCPN_BUILD_TEST OFF)
 else ()
   option(OCPN_BUILD_TEST "Enable test subproject build" ON)
+endif ()
+if (OCPN_BUILD_TEST)
+  # This must be called from the top-level directory so ctest discovers tests
+  # registered by optional subdirectories added before test/.
+  enable_testing()
 endif ()
 
 execute_process(
@@ -1059,6 +1066,15 @@ if (NOT MSVC AND NOT APPLE)
   list(APPEND GUI_SRC ${GUI_SRC_DIR}/ocpn_fontdlg.cpp)
 endif ()
 
+if (OCPN_ENABLE_PORTABLE_PLUGINS)
+  if (QT_ANDROID)
+    message(FATAL_ERROR "The portable-plugin prototype does not yet support Android")
+  endif ()
+  list(APPEND GUI_HDRS ${GUI_HDR_DIR}/portable_plugin_manager.h)
+  list(APPEND GUI_SRC ${GUI_SRC_DIR}/portable_plugin_manager.cpp)
+  add_subdirectory(portable-runtime)
+endif ()
+
 set(SRCS ${GUI_SRC})
 set(HDRS ${GUI_HDRS})
 if (APPLE)
@@ -1085,6 +1101,18 @@ target_include_directories(
             ${CMAKE_CURRENT_SOURCE_DIR}/resources
             ${CMAKE_CURRENT_SOURCE_DIR}/gui/src/mbtiles
 )
+
+if (OCPN_ENABLE_PORTABLE_PLUGINS)
+  target_compile_definitions(${PACKAGE_NAME} PRIVATE
+                             OCPN_ENABLE_PORTABLE_PLUGINS=1)
+  target_include_directories(${PACKAGE_NAME} PRIVATE
+      ${CMAKE_SOURCE_DIR}/portable-runtime/bridge/include)
+  target_link_libraries(${PACKAGE_NAME} PRIVATE ocpn_portable_runtime_bridge)
+  if (UNIX)
+    find_package(Threads REQUIRED)
+    target_link_libraries(${PACKAGE_NAME} PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+  endif ()
+endif ()
 if (MSVC)
   target_include_directories(_opencpn INTERFACE ${CMAKE_SOURCE_DIR}/buildwin)
 elseif (APPLE)

@@ -1665,6 +1665,9 @@ void MyFrame::OnCloseWindow(wxCloseEvent &event) {
   pConfig->UpdateSettings();
 
   //    Deactivate the PlugIns
+#ifdef OCPN_ENABLE_PORTABLE_PLUGINS
+  if (g_pi_manager) g_pi_manager->ShutdownPortablePlugins();
+#endif
   PluginLoader::GetInstance()->DeactivateAllPlugIns();
   wxLogMessage("opencpn::MyFrame exiting cleanly.");
 
@@ -2738,8 +2741,12 @@ void MyFrame::OnToolLeftClick(wxCommandEvent &event) {
         for (unsigned int i = 0; i < tool_array.size(); i++) {
           PlugInToolbarToolContainer *pttc = tool_array[i];
           if (event.GetId() == pttc->id) {
-            if (pttc->m_pplugin)
+            if (pttc->m_pplugin) {
               pttc->m_pplugin->OnToolbarToolCallback(pttc->id);
+#ifdef OCPN_ENABLE_PORTABLE_PLUGINS
+            } else if (g_pi_manager->OnPortableToolbarAction(pttc->id)) {
+#endif
+            }
             return;  // required to prevent event.Skip() being called
           }
         }

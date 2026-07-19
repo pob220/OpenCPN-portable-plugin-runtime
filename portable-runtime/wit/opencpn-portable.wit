@@ -1,0 +1,70 @@
+package opencpn:portable@0.1.0;
+
+interface host {
+  enum log-level {
+    debug,
+    info,
+    warning,
+    error,
+  }
+
+  record vessel-position {
+    latitude: f64,
+    longitude: f64,
+    course-over-ground: option<f64>,
+    speed-over-ground: option<f64>,
+  }
+
+  record geo-point {
+    latitude: f64,
+    longitude: f64,
+  }
+
+  record overlay-style {
+    red: u8,
+    green: u8,
+    blue: u8,
+    alpha: u8,
+    width-pixels: f32,
+  }
+
+  log: func(level: log-level, message: string);
+  register-action: func(action-id: string, label: string, tooltip: string,
+                        icon-resource: option<string>) -> result<u32, string>;
+  get-vessel-position: func() -> result<vessel-position, string>;
+  setting-get: func(key: string) -> result<option<string>, string>;
+  setting-set: func(key: string, value: string) -> result<_, string>;
+  submit-polyline: func(scene-id: string, points: list<geo-point>,
+                        style: overlay-style) -> result<_, string>;
+  clear-scene: func(scene-id: string) -> result<_, string>;
+  start-job: func(job-id: string, work-units: u32) -> result<_, string>;
+  cancel-job: func(job-id: string) -> result<_, string>;
+  open-environmental-viewer: func() -> result<_, string>;
+}
+
+interface plugin {
+  record plugin-info {
+    id: string,
+    name: string,
+    version: string,
+  }
+
+  variant job-event {
+    progress(u8),
+    completed,
+    cancelled,
+    failed(string),
+  }
+
+  initialize: func() -> result<plugin-info, string>;
+  enable: func() -> result<_, string>;
+  disable: func();
+  on-action: func(action-id: string) -> result<_, string>;
+  on-job-event: func(job-id: string, event: job-event);
+  test-trap: func();
+}
+
+world plugin-world {
+  import host;
+  export plugin;
+}
