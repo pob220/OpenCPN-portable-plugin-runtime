@@ -138,7 +138,9 @@ Use non-critical sample data and record each result:
 3. Toggle wind, pressure, waves, current and air-temperature layers.
 4. Step forward/backward and run timeline playback.
 5. Open **Generate GRIB**, request a very small GFS area and one or two time
-   steps, then verify the resulting GRIB opens automatically.
+   steps, select **Copernicus Marine North-West Shelf** currents, and enter a
+   free Copernicus Marine account login. Verify the resulting GRIB opens
+   automatically and contains current vectors.
 6. Start a larger operation and press **Cancel**; the UI must remain usable.
 7. Try a small text file renamed to `.grb`; the error must be contained and
    OpenCPN must remain operational.
@@ -149,6 +151,13 @@ Use non-critical sample data and record each result:
 Provider availability and forecast contents depend on upstream services.
 Failure messages should be reported as structured provider failures rather
 than treated as proof that the runtime itself failed.
+
+Copernicus Marine accounts can be created at the official
+[registration page](https://data.marine.copernicus.eu/register). iGRIB keeps a
+remembered password in the operating-system credential store, not in its job
+file or plugin settings. If no credential store is available, the password is
+used for that generation only. North-West Shelf currents cover 20 W to 13 E
+and 40 N to 65 N; select the global current model outside that area.
 
 ## 6. Conformance tests
 
@@ -166,6 +175,26 @@ portable-runtime/beta/run-conformance.sh /path/to/fixture.grb
 
 The second form also exercises the versioned generator job protocol using the
 fixture as an existing-file input. The source fixture is never modified.
+
+To opt into a small authenticated, live Copernicus current download from the
+conformance runner, enter credentials without placing the password on the
+command line:
+
+```sh
+read -r -p "Copernicus Marine username or email: " \
+  COPERNICUSMARINE_SERVICE_USERNAME
+read -r -s -p "Copernicus Marine password: " \
+  COPERNICUSMARINE_SERVICE_PASSWORD
+printf '\n'
+export COPERNICUSMARINE_SERVICE_USERNAME
+export COPERNICUSMARINE_SERVICE_PASSWORD
+portable-runtime/beta/run-conformance.sh --live-copernicus
+unset COPERNICUSMARINE_SERVICE_USERNAME COPERNICUSMARINE_SERVICE_PASSWORD
+```
+
+This is an explicit network test. It downloads one hour over a small Irish Sea
+box, validates the generated GRIB stream and verifies both current-vector
+components. The report contains no username or password.
 
 ## 7. Reporting a result
 

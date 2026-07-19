@@ -10,7 +10,8 @@ The current proof implements:
 - an accessible, host-rendered xGRIB-style viewer with timeline playback and
   wind, current, pressure, wave-height and air-temperature layers;
 - ecCodes metadata and frame decoding in a separately supervised helper;
-- GFS/UKMO environmental generation plus optional waves and TPXO current
+- GFS/UKMO environmental generation plus optional waves and authenticated
+  Copernicus Marine North-West Shelf or global current
   inputs through the signed `environmental-grib` helper;
 - user-selected input/output paths, namespaced private storage and a
   permission-controlled host HTTP client;

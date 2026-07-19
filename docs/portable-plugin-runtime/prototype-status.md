@@ -26,7 +26,8 @@ default.
 - Standalone ecCodes helper supporting bounded `inspect` and `frame` operations
   with structured result/error JSON and atomic result publication.
 - Environmental generator helper using versioned job/result/progress messages,
-  GFS and UKMO providers, optional waves and TPXO current inputs, user-selected
+  GFS and UKMO providers, optional waves and authenticated Copernicus Marine
+  North-West Shelf or global current inputs, user-selected
   output and automatic reopening of completed output.
 - Linux helper containment with bubblewrap namespaces and explicit immutable
   input/output/CA grants, `prlimit` CPU/address-space limits, child termination
@@ -42,9 +43,9 @@ default.
 ## Linux x86-64 evidence
 
 - Full Test-OpenCPN links with `-Werror`.
-- Three CTests pass: real component lifecycle/trap/identity and typed service
-  exercise; 15 package/signing/update security tests; target package/helper
-  conformance.
+- Four CTests pass: real component lifecycle/trap/identity and typed service
+  exercise; package/signing/update security tests; beta-tool security checks;
+  and target package/helper conformance.
 - Signed package install and replacement preserve executable helper modes and
   retain the previous version in `.rollback`.
 - A 44,821,471-byte real GRIB fixture was decoded as 387 messages, seven
@@ -58,6 +59,13 @@ default.
   wrote a 1,246-byte/six-message GRIB, reopened it and displayed 75 retained
   samples. An initial missing CA mount and wxJSON string-conversion bug were
   detected by this test and fixed before the final run.
+- An authenticated live Copernicus Marine North-West Shelf request against
+  `cmems_mod_nws_phy-cur_anfc_1.5km-2D_PT1H-i` generated and re-inspected a
+  bounded two-message GRIB containing the expected `u_49` and `v_50` current
+  components. The final host-rendered GUI test combined live GFS and
+  Copernicus data into a valid 1,546-byte, ten-message GRIB, reopened it in
+  iGRIB and retained no password in its job, arguments, settings or report.
+  The opt-in conformance path also publishes no credentials.
 - The component's host HTTP action downloaded 7,655 bytes and read them back
   through namespaced private storage.
 - A four-segment chart coverage request completed as one batch. A deliberate
@@ -83,8 +91,8 @@ Measured conformance values for this machine are recorded in
 - Chart coverage batching is real, but structured land/depth/drying/conflict
   safety evidence and route-shaped immutable caches are not yet implemented.
 - Production catalogue/TUF metadata, revocation, user permission-consent UI,
-  OS credential stores, state migrations and a security-response ownership
-  agreement remain absent.
+  cross-platform credential-store conformance, state migrations and a
+  security-response ownership agreement remain absent.
 - Guest entry dispatch and some host callbacks still need a dedicated serial
   runtime executor before production so no potentially long guest call can
   occupy the wx event thread.
