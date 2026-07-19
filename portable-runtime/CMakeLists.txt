@@ -231,6 +231,11 @@ if (OCPN_BUILD_TEST)
     COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/package_tools_test.py"
   )
+  add_test(
+    NAME portable_beta_tools
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/beta_tools_test.py"
+  )
   if (OCPN_IGRIB_BUILD_NATIVE_HELPER)
     add_test(
       NAME portable_igrib_conformance
