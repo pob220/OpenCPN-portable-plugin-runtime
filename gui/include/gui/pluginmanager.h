@@ -237,6 +237,7 @@ public:
   bool LoadPortablePlugins();
   void ShutdownPortablePlugins();
   bool OnPortableToolbarAction(int toolbar_id);
+  void SetPortableCursorPosition(double latitude, double longitude);
 #endif
 
   bool IsAnyPlugInChartEnabled();

@@ -1,6 +1,6 @@
 # Portable runtime implementation status
 
-Status date: 2026-07-19. Baseline: OpenCPN Release 5.14.0 in the separate
+Status date: 2026-07-20. Baseline: OpenCPN Release 5.14.0 in the separate
 Test-OpenCPN build/profile. The native xGRIB library was disabled and then
 moved to Test-OpenCPN's recoverable `plugins-disabled` directory for the final
 standalone test. The modified working OpenCPN 5.15 setup was not used.
@@ -21,14 +21,16 @@ default.
   chart-coverage batches, host HTTP-to-private-storage and bounded private
   reads. No pointers, wxWidgets objects or graphics handles cross the boundary.
 - Host-rendered declarative iGRIB surface with timeline navigation/playback,
-  toggles for wind/current/pressure/waves/temperature, progress/cancellation,
+  chart-cursor values, persistent overlay/playback settings, toggles for
+  wind/current/pressure/waves/temperature, progress/cancellation,
   open/settings/download/generate actions and native file pickers.
 - Standalone ecCodes helper supporting bounded `inspect` and `frame` operations
   with structured result/error JSON and atomic result publication.
 - Environmental generator helper using versioned job/result/progress messages,
   GFS and UKMO providers, optional waves and authenticated Copernicus Marine
-  North-West Shelf or global current inputs, user-selected
-  output and automatic reopening of completed output.
+  North-West Shelf or global current inputs, optional local weather/current
+  GRIB replacement inputs, user-selected output and automatic reopening of
+  completed output.
 - Linux helper containment with bubblewrap namespaces and explicit immutable
   input/output/CA grants, `prlimit` CPU/address-space limits, child termination
   on cancellation/disable and deterministic cleanup. Other OS supervision
@@ -48,13 +50,23 @@ default.
   and target package/helper conformance.
 - Signed package install and replacement preserve executable helper modes and
   retain the previous version in `.rollback`.
-- A 44,821,471-byte real GRIB fixture was decoded as 387 messages, seven
-  supported environmental field groups and 67 forecast times. A frame retained
-  5,960 samples. Timeline playback advanced and overlays remained responsive.
+- A 44,865,184-byte real GRIB fixture was decoded as 465 messages, seven
+  supported environmental field groups and 81 forecast times. A conformance
+  frame retained 5,960 samples. Timeline playback advanced and overlays
+  remained responsive.
 - Malformed input returned a structured `environment-decode-failed` result and
   did not affect OpenCPN.
 - The generator helper copied/validated the 44.8 MB fixture under containment
   and published a valid 387-message GRIB.
+- The real versioned generator job path merged a 244-message local weather
+  input and a 146-message local current input into a valid 44,815,544-byte,
+  390-message output. The sandbox mounted only those two files read-only at
+  fixed capability paths; no source directory was exposed.
+- The installed Test-OpenCPN GUI repeated that merge using explicit **Local
+  GRIB file…** weather/current source selections, automatically reopened the
+  390-message output and retained 46,468 decoded samples for its first frame.
+  The native xGRIB library was absent from the plugin search path during this
+  final run.
 - The actual GUI generated a one-degree, one-hour NOAA GFS product over HTTPS,
   wrote a 1,246-byte/six-message GRIB, reopened it and displayed 75 retained
   samples. An initial missing CA mount and wxJSON string-conversion bug were
@@ -84,10 +96,10 @@ Measured conformance values for this machine are recorded in
 - The package assembled here contains the Linux x86-64 helper payload. A single
   multi-target archive requires the central build service to add all signed
   target helpers; the Wasm component itself is unchanged across targets.
-- The UI is an xGRIB-style functional surface, not a pixel-for-pixel port of
-  every xGRIB preference, cursor interpolation, contour option or provider
-  dialog. Broader parity should be incremental, not an expansion of the WIT
-  boundary into wxWidgets.
+- The UI is an xGRIB-style functional surface with the core bundled-GRIB
+  workflow, not a pixel-for-pixel port of every xGRIB preference, contour
+  option or provider dialog. Broader parity should be incremental, not an
+  expansion of the WIT boundary into wxWidgets.
 - Chart coverage batching is real, but structured land/depth/drying/conflict
   safety evidence and route-shaped immutable caches are not yet implemented.
 - Production catalogue/TUF metadata, revocation, user permission-consent UI,

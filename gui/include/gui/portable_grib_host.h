@@ -28,6 +28,7 @@ public:
 
   bool Show(wxString* error);
   bool Render(ocpnDC& dc, const ViewPort& viewport);
+  void SetCursorPosition(double latitude, double longitude);
   void Shutdown();
 
 private:

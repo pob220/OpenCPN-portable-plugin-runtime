@@ -959,6 +959,12 @@ bool PlugInManager::OnPortableToolbarAction(int toolbar_id) {
   return m_portable_manager &&
          m_portable_manager->HandleToolbarAction(toolbar_id);
 }
+
+void PlugInManager::SetPortableCursorPosition(double latitude,
+                                              double longitude) {
+  if (m_portable_manager)
+    m_portable_manager->SetCursorPosition(latitude, longitude);
+}
 #endif
 
 void PlugInManager::InitCommListeners() {

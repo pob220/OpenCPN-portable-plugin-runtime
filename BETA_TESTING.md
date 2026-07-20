@@ -128,7 +128,7 @@ portable-runtime/beta/launch-linux.sh -- --fullscreen
 
 iGRIB should load and open automatically. A separate toolbar action remains
 available if the window is closed. The three portable actions use distinct
-icons: the xGRIB-style weather icon opens iGRIB, the warning icon deliberately
+icons: the blue **i** and wave icon opens iGRIB, the warning icon deliberately
 tests Wasm trap containment, and the download icon tests the permission-gated
 host HTTP client. The latter two are diagnostic actions, not normal forecast
 controls.
@@ -139,20 +139,31 @@ Use non-critical sample data and record each result:
 
 1. Confirm the title is **iGRIB — Portable Environmental Data**.
 2. Open a valid GRIB and verify its forecast times appear.
-3. Toggle wind, pressure, waves, current and air-temperature layers.
-4. Step forward/backward and run timeline playback.
-5. Open **Generate GRIB**, request a very small GFS area and one or two time
+3. Toggle wind, pressure, waves, current and air-temperature layers. Move the
+   chart cursor and verify that decoded values are shown in the iGRIB window.
+4. Open **Settings**. Change wind barbs/arrows, vector and scalar spacing,
+   opacity, playback speed and timeline looping; verify that the choices
+   survive closing and reopening iGRIB.
+5. Step forward/backward and run timeline playback.
+6. Open **Generate GRIB**, request a very small GFS area and one or two time
    steps, select **Copernicus Marine North-West Shelf** currents, and enter a
    free Copernicus Marine account login. Set **Output GRIB** directly in the
    form, or use **Browse…** to choose it, then press **Generate GRIB**. This
    button starts the supervised job immediately; no second save dialog should
    appear. Verify the resulting GRIB opens automatically and contains current
    vectors.
-6. Start a larger operation and press **Cancel**; the UI must remain usable.
-7. Try a small text file renamed to `.grb`; the error must be contained and
+7. Test a local merge using non-sensitive GRIB files. Choose **Local GRIB
+   file…** in the weather and/or current source selector, select each enabled
+   file input, choose the output and generate. A local weather file replaces
+   online weather and wave downloads (wave records already in that file are
+   preserved); a local current file replaces the online current source. The
+   helper receives read-only access to only those selected files. Verify that
+   the output opens automatically and contains the expected combined fields.
+8. Start a larger operation and press **Cancel**; the UI must remain usable.
+9. Try a small text file renamed to `.grb`; the error must be contained and
    OpenCPN must remain operational.
-8. Close and reopen iGRIB, then exit and restart Test-OpenCPN.
-9. Verify a normal installed OpenCPN still uses its original profile and
+10. Close and reopen iGRIB, then exit and restart Test-OpenCPN.
+11. Verify a normal installed OpenCPN still uses its original profile and
    plugins.
 
 Provider availability and forecast contents depend on upstream services.

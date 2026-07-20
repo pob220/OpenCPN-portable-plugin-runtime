@@ -208,7 +208,7 @@ bool NormalLifecycle(const char* component_path) {
   ok = ok && state.actions[1] == "igrib.failure-test";
   ok = ok && state.actions[2] == "igrib.http-test";
   ok = ok && state.action_icons.size() == 3;
-  ok = ok && state.action_icons[0] == "resources/grib.svg";
+  ok = ok && state.action_icons[0] == "resources/igrib.svg";
   ok = ok && state.action_icons[1] == "resources/fault-test.svg";
   ok = ok && state.action_icons[2] == "resources/http-download.svg";
   ok = ok && state.settings["activation-count"] == "1";

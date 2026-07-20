@@ -190,6 +190,7 @@ public:
   void Shutdown();
   bool HandleToolbarAction(int toolbar_id);
   bool Render(ocpnDC& dc, const ViewPort& viewport, int priority);
+  void SetCursorPosition(double latitude, double longitude);
 
   bool HasPermission(const Instance& instance, const wxString& permission) {
     return instance.permissions.count(permission) != 0;
@@ -984,6 +985,14 @@ bool PortablePluginManager::Impl::Render(ocpnDC& dc, const ViewPort& viewport,
   return rendered;
 }
 
+void PortablePluginManager::Impl::SetCursorPosition(double latitude,
+                                                    double longitude) {
+  for (const auto& instance : instances) {
+    if (instance->enabled && !instance->failed && instance->environmental_host)
+      instance->environmental_host->SetCursorPosition(latitude, longitude);
+  }
+}
+
 PortablePluginManager::PortablePluginManager(PlugInManager* plugin_manager)
     : m_impl(std::make_unique<Impl>(plugin_manager)) {}
 
@@ -1000,4 +1009,9 @@ bool PortablePluginManager::HandleToolbarAction(int toolbar_id) {
 bool PortablePluginManager::Render(ocpnDC& dc, const ViewPort& viewport,
                                    int priority) {
   return m_impl->Render(dc, viewport, priority);
+}
+
+void PortablePluginManager::SetCursorPosition(double latitude,
+                                              double longitude) {
+  m_impl->SetCursorPosition(latitude, longitude);
 }

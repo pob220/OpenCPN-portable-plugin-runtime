@@ -43,7 +43,7 @@
     }
   },
   "resources": [
-    "resources/grib.svg",
+    "resources/igrib.svg",
     "resources/fault-test.svg",
     "resources/http-download.svg",
     "ui/igrib-viewer.ui.json"

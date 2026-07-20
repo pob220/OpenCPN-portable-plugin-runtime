@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <map>
 #include <set>
 #include <utility>
@@ -35,11 +36,13 @@
 #include <wx/statline.h>
 #include <wx/stattext.h>
 #include <wx/stdpaths.h>
+#include <wx/textctrl.h>
 #include <wx/timer.h>
 #include <wx/utils.h>
 #include <wx/wfstream.h>
 
 #include "model/base_platform.h"
+#include "navutil.h"
 #include "ocpndc.h"
 #include "top_frame.h"
 #include "viewport.h"
@@ -50,6 +53,7 @@ constexpr int kHelperProcessId = wxID_HIGHEST + 711;
 constexpr int kProgressTimerId = wxID_HIGHEST + 712;
 constexpr int kPlaybackTimerId = wxID_HIGHEST + 713;
 constexpr size_t kMaximumResultBytes = 32U * 1024U * 1024U;
+constexpr double kPi = 3.14159265358979323846;
 constexpr const char* kCopernicusCredentialService =
     "OpenCPN iGRIB Copernicus Marine";
 constexpr const char* kCopernicusPasswordEnvironment =
@@ -188,6 +192,7 @@ public:
 
   bool Show(wxString* error);
   bool Render(ocpnDC& dc, const ViewPort& viewport);
+  void SetCursorPosition(double latitude, double longitude);
   void Shutdown();
 
 private:
@@ -196,6 +201,10 @@ private:
   void StartInspect(const wxString& path);
   void StartFrame(size_t index);
   void ShowGenerator();
+  void ShowSettings();
+  void LoadSettings();
+  void SaveSettings();
+  void UpdateCursorStatus();
   void Cancel();
   bool Launch(const std::vector<wxString>& arguments, Operation next_operation,
               const wxString& result, const wxString& status,
@@ -206,7 +215,9 @@ private:
                                        const wxString& result) const;
   std::vector<wxString> GeneratorCommand(const wxString& job,
                                          const wxString& result,
-                                         const wxString& output) const;
+                                         const wxString& output,
+                                         const wxString& weather_input,
+                                         const wxString& current_input) const;
   void OnProcessEnded(wxProcessEvent& event);
   void OnProgressTimer(wxTimerEvent& event);
   void OnPlaybackTimer(wxTimerEvent& event);
@@ -231,10 +242,12 @@ private:
   wxCheckBox* show_current = nullptr;
   wxCheckBox* show_temperature = nullptr;
   wxStaticText* data_status = nullptr;
+  wxStaticText* cursor_status = nullptr;
   wxGauge* progress = nullptr;
   wxButton* cancel_button = nullptr;
   wxButton* open_button = nullptr;
   wxButton* generate_button = nullptr;
+  wxButton* play_button = nullptr;
   wxTimer progress_timer;
   wxTimer playback_timer;
   wxProcess* process = nullptr;
@@ -246,6 +259,16 @@ private:
   std::vector<wxString> times;
   std::map<wxString, std::vector<Sample>> fields;
   std::map<wxString, wxString> field_units;
+  double cursor_latitude = 0.0;
+  double cursor_longitude = 0.0;
+  bool have_cursor = false;
+  bool wind_barbs = true;
+  bool scalar_maps = true;
+  bool loop_playback = true;
+  int vector_spacing = 34;
+  int scalar_spacing = 18;
+  int overlay_opacity = 145;
+  int playback_interval_ms = 1200;
   bool stopped = false;
 };
 
@@ -270,8 +293,9 @@ wxString PortableGribHost::Impl::GeneratorHelper() const {
 }
 
 void PortableGribHost::Impl::CreateFrame() {
+  LoadSettings();
   frame = new wxFrame(parent, wxID_ANY, surface_title, wxDefaultPosition,
-                      wxSize(930, 280),
+                      wxSize(930, 315),
                       wxDEFAULT_FRAME_STYLE | wxFRAME_FLOAT_ON_PARENT);
   auto* root = new wxBoxSizer(wxVERTICAL);
   file_label = new wxStaticText(frame, wxID_ANY, "File: (none)");
@@ -286,12 +310,12 @@ void PortableGribHost::Impl::CreateFrame() {
   timeline = new wxChoice(frame, wxID_ANY);
   auto* next =
       new wxButton(frame, wxID_ANY, "▶", wxDefaultPosition, wxSize(42, -1));
-  auto* play = new wxButton(frame, wxID_ANY, "Play");
+  play_button = new wxButton(frame, wxID_ANY, "Play");
   auto* now = new wxButton(frame, wxID_ANY, "Now");
   timeline_row->Add(previous, 0, wxRIGHT, 5);
   timeline_row->Add(timeline, 1, wxRIGHT, 5);
   timeline_row->Add(next, 0, wxRIGHT, 5);
-  timeline_row->Add(play, 0, wxRIGHT, 5);
+  timeline_row->Add(play_button, 0, wxRIGHT, 5);
   timeline_row->Add(now, 0);
   controls->Add(timeline_row, 0, wxEXPAND | wxALL, 7);
 
@@ -303,17 +327,24 @@ void PortableGribHost::Impl::CreateFrame() {
   show_waves = new wxCheckBox(frame, wxID_ANY, "Waves");
   show_current = new wxCheckBox(frame, wxID_ANY, "Current");
   show_temperature = new wxCheckBox(frame, wxID_ANY, "Air Temp");
-  show_wind->SetValue(true);
-  show_pressure->SetValue(true);
-  show_waves->SetValue(true);
-  show_current->SetValue(true);
+  const wxString old_path = pConfig->GetPath();
+  pConfig->SetPath("/PortablePlugins/org.opencpn.igrib/Display");
+  show_wind->SetValue(pConfig->ReadBool("showWind", true));
+  show_pressure->SetValue(pConfig->ReadBool("showPressure", true));
+  show_waves->SetValue(pConfig->ReadBool("showWaves", true));
+  show_current->SetValue(pConfig->ReadBool("showCurrent", true));
+  show_temperature->SetValue(pConfig->ReadBool("showTemperature", false));
+  pConfig->SetPath(old_path);
   for (auto* toggle :
        {show_wind, show_pressure, show_waves, show_current, show_temperature})
     toggles->Add(toggle, 0, wxRIGHT, 14);
   data_status = new wxStaticText(frame, wxID_ANY,
                                  "Open a GRIB file to inspect its fields");
+  cursor_status = new wxStaticText(frame, wxID_ANY,
+                                   "Move the chart cursor to inspect data");
   data->Add(toggles, 0, wxEXPAND | wxALL, 5);
   data->Add(data_status, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
+  data->Add(cursor_status, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
   controls->Add(data, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 7);
 
   progress = new wxGauge(frame, wxID_ANY, 100);
@@ -348,12 +379,7 @@ void PortableGribHost::Impl::CreateFrame() {
                         [this](wxCommandEvent&) { ShowGenerator(); });
   download->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { ShowGenerator(); });
   cancel_button->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { Cancel(); });
-  settings->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-    wxMessageBox(
-        "iGRIB uses a host-rendered, accessible control surface. GRIB data is "
-        "decoded in an isolated helper and overlays are retained by OpenCPN.",
-        "iGRIB settings", wxOK | wxICON_INFORMATION, frame);
-  });
+  settings->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { ShowSettings(); });
   previous->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
     const int selected = timeline->GetSelection();
     if (selected > 0) StartFrame(static_cast<size_t>(selected - 1));
@@ -372,13 +398,13 @@ void PortableGribHost::Impl::CreateFrame() {
       if (times[i] <= current) best = i;
     StartFrame(best);
   });
-  play->Bind(wxEVT_BUTTON, [this, play](wxCommandEvent&) {
+  play_button->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
     if (playback_timer.IsRunning()) {
       playback_timer.Stop();
-      play->SetLabel("Play");
+      play_button->SetLabel("Play");
     } else if (!times.empty()) {
-      playback_timer.Start(1200);
-      play->SetLabel("Pause");
+      playback_timer.Start(playback_interval_ms);
+      play_button->SetLabel("Pause");
     }
   });
   timeline->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
@@ -387,9 +413,103 @@ void PortableGribHost::Impl::CreateFrame() {
   });
   for (auto* toggle :
        {show_wind, show_pressure, show_waves, show_current, show_temperature})
-    toggle->Bind(wxEVT_CHECKBOX, [](wxCommandEvent&) {
+    toggle->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
+      SaveSettings();
       if (top_frame::Get()) top_frame::Get()->RefreshAllCanvas(false);
     });
+}
+
+void PortableGribHost::Impl::LoadSettings() {
+  const wxString old_path = pConfig->GetPath();
+  pConfig->SetPath("/PortablePlugins/org.opencpn.igrib/Display");
+  wind_barbs = pConfig->ReadBool("windBarbs", true);
+  scalar_maps = pConfig->ReadBool("scalarMaps", true);
+  loop_playback = pConfig->ReadBool("loopPlayback", true);
+  vector_spacing =
+      std::clamp<int>(pConfig->ReadLong("vectorSpacing", 34), 18, 100);
+  scalar_spacing =
+      std::clamp<int>(pConfig->ReadLong("scalarSpacing", 18), 8, 80);
+  overlay_opacity =
+      std::clamp<int>(pConfig->ReadLong("overlayOpacity", 145), 20, 255);
+  playback_interval_ms =
+      std::clamp<int>(pConfig->ReadLong("playbackIntervalMs", 1200), 200, 5000);
+  pConfig->SetPath(old_path);
+}
+
+void PortableGribHost::Impl::SaveSettings() {
+  const wxString old_path = pConfig->GetPath();
+  pConfig->SetPath("/PortablePlugins/org.opencpn.igrib/Display");
+  pConfig->Write("windBarbs", wind_barbs);
+  pConfig->Write("scalarMaps", scalar_maps);
+  pConfig->Write("loopPlayback", loop_playback);
+  pConfig->Write("vectorSpacing", static_cast<long>(vector_spacing));
+  pConfig->Write("scalarSpacing", static_cast<long>(scalar_spacing));
+  pConfig->Write("overlayOpacity", static_cast<long>(overlay_opacity));
+  pConfig->Write("playbackIntervalMs", static_cast<long>(playback_interval_ms));
+  if (show_wind) pConfig->Write("showWind", show_wind->GetValue());
+  if (show_pressure) pConfig->Write("showPressure", show_pressure->GetValue());
+  if (show_waves) pConfig->Write("showWaves", show_waves->GetValue());
+  if (show_current) pConfig->Write("showCurrent", show_current->GetValue());
+  if (show_temperature)
+    pConfig->Write("showTemperature", show_temperature->GetValue());
+  pConfig->SetPath(old_path);
+  pConfig->Flush();
+}
+
+void PortableGribHost::Impl::ShowSettings() {
+  wxDialog dialog(frame, wxID_ANY, "iGRIB display settings", wxDefaultPosition,
+                  wxDefaultSize, wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+  auto* root = new wxBoxSizer(wxVERTICAL);
+  auto* grid = new wxFlexGridSizer(2, 8, 10);
+  grid->AddGrowableCol(1, 1);
+  wxArrayString wind_styles;
+  wind_styles.Add("Meteorological barbs");
+  wind_styles.Add("Direction arrows");
+  auto* wind_style = new wxChoice(&dialog, wxID_ANY, wxDefaultPosition,
+                                  wxDefaultSize, wind_styles);
+  wind_style->SetSelection(wind_barbs ? 0 : 1);
+  auto* vector_density =
+      new wxSpinCtrl(&dialog, wxID_ANY, wxString::Format("%d", vector_spacing),
+                     wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 18, 100,
+                     vector_spacing);
+  auto* scalar_density = new wxSpinCtrl(
+      &dialog, wxID_ANY, wxString::Format("%d", scalar_spacing),
+      wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 8, 80, scalar_spacing);
+  auto* opacity =
+      new wxSpinCtrl(&dialog, wxID_ANY, wxString::Format("%d", overlay_opacity),
+                     wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 20, 255,
+                     overlay_opacity);
+  auto* playback = new wxSpinCtrl(
+      &dialog, wxID_ANY, wxString::Format("%d", playback_interval_ms),
+      wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 200, 5000,
+      playback_interval_ms);
+  auto* maps = new wxCheckBox(&dialog, wxID_ANY,
+                              "Draw scalar pressure/wave/temperature maps");
+  maps->SetValue(scalar_maps);
+  auto* loop = new wxCheckBox(&dialog, wxID_ANY, "Loop timeline playback");
+  loop->SetValue(loop_playback);
+  AddRow(grid, &dialog, "Wind display", wind_style);
+  AddRow(grid, &dialog, "Vector spacing (pixels)", vector_density);
+  AddRow(grid, &dialog, "Scalar spacing (pixels)", scalar_density);
+  AddRow(grid, &dialog, "Overlay opacity (20–255)", opacity);
+  AddRow(grid, &dialog, "Playback interval (milliseconds)", playback);
+  AddRow(grid, &dialog, "Scalar overlays", maps);
+  AddRow(grid, &dialog, "Timeline", loop);
+  root->Add(grid, 1, wxEXPAND | wxALL, 12);
+  root->Add(dialog.CreateSeparatedButtonSizer(wxOK | wxCANCEL), 0,
+            wxEXPAND | wxALL, 10);
+  dialog.SetSizerAndFit(root);
+  if (dialog.ShowModal() != wxID_OK) return;
+  wind_barbs = wind_style->GetSelection() == 0;
+  vector_spacing = vector_density->GetValue();
+  scalar_spacing = scalar_density->GetValue();
+  overlay_opacity = opacity->GetValue();
+  playback_interval_ms = playback->GetValue();
+  scalar_maps = maps->GetValue();
+  loop_playback = loop->GetValue();
+  if (playback_timer.IsRunning()) playback_timer.Start(playback_interval_ms);
+  SaveSettings();
+  if (top_frame::Get()) top_frame::Get()->RefreshAllCanvas(false);
 }
 
 bool PortableGribHost::Impl::Show(wxString* error) {
@@ -467,7 +587,7 @@ std::vector<wxString> PortableGribHost::Impl::DecoderCommand(
     command.insert(command.end(), sandbox.begin(), sandbox.end());
     if (verb == "frame") {
       command.push_back(time);
-      command.push_back("1500");
+      command.push_back("12000");
     }
     command.push_back("/output/" + wxFileName(result).GetFullName());
     return command;
@@ -481,51 +601,61 @@ std::vector<wxString> PortableGribHost::Impl::DecoderCommand(
 }
 
 std::vector<wxString> PortableGribHost::Impl::GeneratorCommand(
-    const wxString& job, const wxString& result, const wxString& output) const {
+    const wxString& job, const wxString& result, const wxString& output,
+    const wxString& weather_input, const wxString& current_input) const {
 #if defined(__linux__)
   if (HelperSupervisionAvailable()) {
     std::vector<wxString> command = {"/usr/bin/prlimit", "--as=4294967296",
                                      "--cpu=1800", "--"};
     const wxString output_directory = wxFileName(output).GetPath();
-    const std::vector<wxString> sandbox = {"/usr/bin/bwrap",
-                                           "--die-with-parent",
-                                           "--new-session",
-                                           "--unshare-user",
-                                           "--unshare-pid",
-                                           "--unshare-ipc",
-                                           "--unshare-uts",
-                                           "--share-net",
-                                           "--ro-bind",
-                                           "/usr",
-                                           "/usr",
-                                           "--ro-bind",
-                                           "/lib",
-                                           "/lib",
-                                           "--ro-bind",
-                                           "/lib64",
-                                           "/lib64",
-                                           "--ro-bind",
-                                           "/etc/ssl",
-                                           "/etc/ssl",
-                                           "--ro-bind",
-                                           "/etc/resolv.conf",
-                                           "/etc/resolv.conf",
-                                           "--ro-bind",
-                                           GeneratorHelper(),
-                                           "/environmental-grib",
-                                           "--bind",
-                                           private_directory,
-                                           "/job",
-                                           "--bind",
-                                           output_directory,
-                                           "/output",
-                                           "--tmpfs",
-                                           "/tmp"};
-    command.insert(command.end(), sandbox.begin(), sandbox.end());
+    std::vector<wxString> sandbox = {"/usr/bin/bwrap",
+                                     "--die-with-parent",
+                                     "--new-session",
+                                     "--unshare-user",
+                                     "--unshare-pid",
+                                     "--unshare-ipc",
+                                     "--unshare-uts",
+                                     "--share-net",
+                                     "--ro-bind",
+                                     "/usr",
+                                     "/usr",
+                                     "--ro-bind",
+                                     "/lib",
+                                     "/lib",
+                                     "--ro-bind",
+                                     "/lib64",
+                                     "/lib64",
+                                     "--ro-bind",
+                                     "/etc/ssl",
+                                     "/etc/ssl",
+                                     "--ro-bind",
+                                     "/etc/resolv.conf",
+                                     "/etc/resolv.conf",
+                                     "--ro-bind",
+                                     GeneratorHelper(),
+                                     "/environmental-grib",
+                                     "--bind",
+                                     private_directory,
+                                     "/job",
+                                     "--bind",
+                                     output_directory,
+                                     "/output",
+                                     "--tmpfs",
+                                     "/tmp"};
     if (wxDirExists("/etc/ca-certificates")) {
-      command.insert(command.end(), {"--ro-bind", "/etc/ca-certificates",
+      sandbox.insert(sandbox.end(), {"--ro-bind", "/etc/ca-certificates",
                                      "/etc/ca-certificates"});
     }
+    if (!weather_input.empty() || !current_input.empty()) {
+      sandbox.insert(sandbox.end(), {"--dir", "/inputs"});
+      if (!weather_input.empty())
+        sandbox.insert(sandbox.end(),
+                       {"--ro-bind", weather_input, "/inputs/weather.grb"});
+      if (!current_input.empty())
+        sandbox.insert(sandbox.end(),
+                       {"--ro-bind", current_input, "/inputs/current.grb"});
+    }
+    command.insert(command.end(), sandbox.begin(), sandbox.end());
     command.insert(command.end(),
                    {"/environmental-grib", "run-job", "--job",
                     "/job/" + wxFileName(job).GetFullName(), "--result",
@@ -536,6 +666,8 @@ std::vector<wxString> PortableGribHost::Impl::GeneratorCommand(
   static_cast<void>(job);
   static_cast<void>(result);
   static_cast<void>(output);
+  static_cast<void>(weather_input);
+  static_cast<void>(current_input);
   return {};
 }
 
@@ -644,6 +776,12 @@ void PortableGribHost::Impl::OnProgressTimer(wxTimerEvent&) {
 void PortableGribHost::Impl::OnPlaybackTimer(wxTimerEvent&) {
   if (process || times.empty() || !timeline) return;
   const int selected = timeline->GetSelection();
+  if (!loop_playback && selected != wxNOT_FOUND &&
+      static_cast<size_t>(selected + 1) >= times.size()) {
+    playback_timer.Stop();
+    if (play_button) play_button->SetLabel("Play");
+    return;
+  }
   const size_t next = selected == wxNOT_FOUND
                           ? 0
                           : (static_cast<size_t>(selected) + 1) % times.size();
@@ -746,6 +884,7 @@ void PortableGribHost::Impl::HandleFrame(wxJSONValue& value) {
   data_status->SetLabel(wxString::Format(
       "%s — %d samples retained by OpenCPN (not navigation-authoritative)",
       value["time"].AsString(), value["sampleCount"].AsInt()));
+  UpdateCursorStatus();
   if (top_frame::Get()) top_frame::Get()->RefreshAllCanvas(false);
 }
 
@@ -798,9 +937,8 @@ void PortableGribHost::Impl::ShowGenerator() {
   auto* south = new wxTextCtrl(form, wxID_ANY, "50.5");
   auto* east = new wxTextCtrl(form, wxID_ANY, "-2.5");
   auto* north = new wxTextCtrl(form, wxID_ANY, "56.5");
-  auto* start =
-      new wxTextCtrl(form, wxID_ANY,
-                     wxDateTime::Now().ToUTC().Format("%Y-%m-%dT%H:00:00Z"));
+  auto* start = new wxTextCtrl(
+      form, wxID_ANY, wxDateTime::Now().ToUTC().Format("%Y-%m-%dT%H:00:00Z"));
   auto* hours = new wxSpinCtrl(form, wxID_ANY, "72", wxDefaultPosition,
                                wxDefaultSize, wxSP_ARROW_KEYS, 1, 360, 72);
   auto* step = new wxSpinCtrl(form, wxID_ANY, "3", wxDefaultPosition,
@@ -808,22 +946,40 @@ void PortableGribHost::Impl::ShowGenerator() {
   wxArrayString weather_providers;
   weather_providers.Add("NOAA GFS forecast");
   weather_providers.Add("UK Met Office UKV");
+  weather_providers.Add("Local GRIB file…");
+  constexpr int kLocalWeatherProvider = 2;
   auto* provider = new wxChoice(form, wxID_ANY, wxDefaultPosition,
                                 wxDefaultSize, weather_providers);
   provider->SetSelection(0);
   wxArrayString presets;
   presets.Add("Routing");
   presets.Add("Viewer");
-  auto* preset = new wxChoice(form, wxID_ANY, wxDefaultPosition,
-                              wxDefaultSize, presets);
+  auto* preset =
+      new wxChoice(form, wxID_ANY, wxDefaultPosition, wxDefaultSize, presets);
   preset->SetSelection(0);
   auto* waves = new wxCheckBox(form, wxID_ANY, "Include wave fields");
+  auto make_input_picker = [&](wxTextCtrl** path, wxButton** browse) {
+    auto* panel = new wxPanel(form);
+    auto* sizer = new wxBoxSizer(wxHORIZONTAL);
+    *path = new wxTextCtrl(panel, wxID_ANY);
+    *browse = new wxButton(panel, wxID_ANY, "Browse…");
+    sizer->Add(*path, 1, wxEXPAND | wxRIGHT, 6);
+    sizer->Add(*browse, 0, wxEXPAND);
+    panel->SetSizer(sizer);
+    return panel;
+  };
+  wxTextCtrl* local_weather = nullptr;
+  wxButton* browse_weather = nullptr;
+  auto* weather_input_panel =
+      make_input_picker(&local_weather, &browse_weather);
   wxArrayString current_sources;
   current_sources.Add("None");
   if (credential_access) {
     current_sources.Add("Copernicus Marine North-West Shelf (hourly, ~1.5 km)");
     current_sources.Add("Copernicus Marine Global (hourly, ~1/12 degree)");
   }
+  const int local_current_source = static_cast<int>(current_sources.GetCount());
+  current_sources.Add("Local GRIB file…");
   auto* current_source = new wxChoice(form, wxID_ANY, wxDefaultPosition,
                                       wxDefaultSize, current_sources);
   current_source->SetSelection(credential_access ? 1 : 0);
@@ -832,6 +988,10 @@ void PortableGribHost::Impl::ShowGenerator() {
                        "North-West Shelf coverage: 20 W to 13 E, 40 N to 65 N. "
                        "Use Global outside this area.");
   current_note->Wrap(520);
+  wxTextCtrl* local_current = nullptr;
+  wxButton* browse_current = nullptr;
+  auto* current_input_panel =
+      make_input_picker(&local_current, &browse_current);
   auto* account = new wxHyperlinkCtrl(
       form, wxID_ANY, "Create or manage a free Copernicus Marine account",
       "https://data.marine.copernicus.eu/register");
@@ -877,8 +1037,10 @@ void PortableGribHost::Impl::ShowGenerator() {
   AddRow(grid, form, "Weather provider", provider);
   AddRow(grid, form, "Weather preset", preset);
   AddRow(grid, form, "Waves", waves);
+  AddRow(grid, form, "Weather GRIB file", weather_input_panel);
   AddRow(grid, form, "Current source", current_source);
   AddRow(grid, form, "Current-source details", current_note);
+  AddRow(grid, form, "Current GRIB file", current_input_panel);
   AddRow(grid, form, "Copernicus account", account);
   AddRow(grid, form, "Copernicus username or email", username);
   AddRow(grid, form, "Copernicus password", password);
@@ -900,18 +1062,36 @@ void PortableGribHost::Impl::ShowGenerator() {
   root->Add(buttons, 0, wxEXPAND | wxALL, 10);
   dialog.SetSizer(root);
 
+  auto update_weather_controls = [&]() {
+    const bool local = provider->GetSelection() == kLocalWeatherProvider;
+    local_weather->Enable(local);
+    browse_weather->Enable(local);
+    preset->Enable(!local);
+    waves->Enable(!local);
+    if (local)
+      waves->SetToolTip(
+          "Wave records already present in the local file are preserved");
+    else
+      waves->UnsetToolTip();
+  };
   auto update_current_controls = [&]() {
-    const bool enabled = current_source->GetSelection() != 0;
-    account->Enable(enabled);
-    username->Enable(enabled);
-    password->Enable(enabled);
-    remember->Enable(enabled && secret_store_available);
-    forget->Enable(enabled && have_stored_credentials);
+    const int selection = current_source->GetSelection();
+    const bool local = selection == local_current_source;
+    const bool copernicus =
+        credential_access && (selection == 1 || selection == 2);
+    local_current->Enable(local);
+    browse_current->Enable(local);
+    account->Enable(copernicus);
+    username->Enable(copernicus);
+    password->Enable(copernicus);
+    remember->Enable(copernicus && secret_store_available);
+    forget->Enable(copernicus && have_stored_credentials);
     current_note->SetLabel(
-        current_source->GetSelection() == 1
+        local ? "The selected local GRIB replaces the online current source."
+        : selection == 1
             ? "North-West Shelf coverage: 20 W to 13 E, 40 N to 65 N. "
               "Use Global outside this area."
-        : current_source->GetSelection() == 2
+        : selection == 2
             ? "Global model coverage: 180 W to 180 E, 80 S to 90 N."
             : "No current fields will be included.");
     current_note->Wrap(520);
@@ -919,6 +1099,24 @@ void PortableGribHost::Impl::ShowGenerator() {
   };
   current_source->Bind(wxEVT_CHOICE,
                        [&](wxCommandEvent&) { update_current_controls(); });
+  provider->Bind(wxEVT_CHOICE,
+                 [&](wxCommandEvent&) { update_weather_controls(); });
+  auto bind_input_picker = [&](wxButton* button, wxTextCtrl* path,
+                               const wxString& title) {
+    button->Bind(wxEVT_BUTTON, [&, path, title](wxCommandEvent&) {
+      wxFileDialog input_dialog(
+          &dialog, title, wxEmptyString, wxEmptyString,
+          "GRIB files (*.grb;*.grib;*.grb2)|*.grb;*.grib;*.grb2|"
+          "All files (*.*)|*.*",
+          wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+      if (input_dialog.ShowModal() == wxID_OK)
+        path->SetValue(input_dialog.GetPath());
+    });
+  };
+  bind_input_picker(browse_weather, local_weather,
+                    "Select a local weather GRIB to merge");
+  bind_input_picker(browse_current, local_current,
+                    "Select a local current GRIB to merge");
   forget->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
     if (have_stored_credentials &&
         secret_store.Delete(kCopernicusCredentialService)) {
@@ -942,6 +1140,7 @@ void PortableGribHost::Impl::ShowGenerator() {
     if (output_dialog.ShowModal() == wxID_OK)
       output_path->SetValue(output_dialog.GetPath());
   });
+  update_weather_controls();
   update_current_controls();
   if (dialog.ShowModal() != wxID_OK) return;
 
@@ -967,19 +1166,57 @@ void PortableGribHost::Impl::ShowGenerator() {
   const wxString output_directory = output_filename.GetPath();
   if (!wxDirExists(output_directory) ||
       !wxFileName::IsDirWritable(output_directory)) {
-    wxMessageBox("The selected output directory does not exist or is not "
-                 "writable",
-                 "iGRIB", wxOK | wxICON_ERROR, frame);
+    wxMessageBox(
+        "The selected output directory does not exist or is not "
+        "writable",
+        "iGRIB", wxOK | wxICON_ERROR, frame);
     return;
   }
   if (output_filename.FileExists() &&
-      wxMessageBox("Replace the existing GRIB file?\n" +
-                       output_filename.GetFullPath(),
-                   "iGRIB", wxYES_NO | wxNO_DEFAULT | wxICON_WARNING,
-                   frame) != wxYES)
+      wxMessageBox(
+          "Replace the existing GRIB file?\n" + output_filename.GetFullPath(),
+          "iGRIB", wxYES_NO | wxNO_DEFAULT | wxICON_WARNING, frame) != wxYES)
     return;
 
-  const bool use_copernicus = current_source->GetSelection() > 0;
+  auto validate_input = [&](wxTextCtrl* control, const wxString& label,
+                            bool required, wxString* value) {
+    *value = control->GetValue();
+    value->Trim(true).Trim(false);
+    if (value->empty()) {
+      if (required) {
+        wxMessageBox("Choose " + label + " or select an online source", "iGRIB",
+                     wxOK | wxICON_ERROR, frame);
+        return false;
+      }
+      return true;
+    }
+    wxFileName file(*value);
+    if (!file.IsAbsolute() || !file.FileExists()) {
+      wxMessageBox(label + " must be an existing GRIB file", "iGRIB",
+                   wxOK | wxICON_ERROR, frame);
+      return false;
+    }
+    file.Normalize(wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE);
+    *value = file.GetFullPath();
+    return true;
+  };
+  wxString weather_input;
+  wxString current_input;
+  const bool local_weather_selected =
+      provider->GetSelection() == kLocalWeatherProvider;
+  const bool local_current_selected =
+      current_source->GetSelection() == local_current_source;
+  if ((local_weather_selected &&
+       !validate_input(local_weather, "a local weather GRIB", true,
+                       &weather_input)) ||
+      (local_current_selected &&
+       !validate_input(local_current, "a local current GRIB", true,
+                       &current_input)))
+    return;
+
+  const bool use_copernicus =
+      credential_access && (current_source->GetSelection() == 1 ||
+                            current_source->GetSelection() == 2);
   wxString copernicus_username = username->GetValue();
   copernicus_username.Trim(true).Trim(false);
   wxSecretString copernicus_password(password->GetValue());
@@ -1026,15 +1263,25 @@ void PortableGribHost::Impl::ShowGenerator() {
   request["hours"] = hours->GetValue();
   request["stepHours"] = step->GetValue();
   request["weatherProvider"] =
-      wxString(provider->GetSelection() == 1 ? "ukmo_ukv" : "gfs");
+      wxString(local_weather_selected
+                   ? "existing-file"
+                   : (provider->GetSelection() == 1 ? "ukmo_ukv" : "gfs"));
+  if (local_weather_selected)
+    request["weatherFile"] = wxString("/inputs/weather.grb");
   request["weatherPreset"] =
       wxString(preset->GetSelection() == 1 ? "viewer" : "routing");
-  request["includeWaves"] = waves->GetValue();
+  // A user-selected weather file is copied as one validated stream, including
+  // any wave records it already contains.  Do not unexpectedly contact an
+  // online wave provider while performing an otherwise local merge.
+  request["includeWaves"] = !local_weather_selected && waves->GetValue();
   request["waveProvider"] = wxString("gfs_wave");
   request["currentSource"] =
-      wxString(current_source->GetSelection() == 1   ? "copernicus_nws"
+      wxString(local_current_selected                ? "existing-file"
+               : current_source->GetSelection() == 1 ? "copernicus_nws"
                : current_source->GetSelection() == 2 ? "copernicus_global"
                                                      : "none");
+  if (local_current_selected)
+    request["currentFile"] = wxString("/inputs/current.grb");
   if (use_copernicus) {
     request["copernicusUsername"] = copernicus_username;
     request["currentGridSpacingDeg"] =
@@ -1060,10 +1307,67 @@ void PortableGribHost::Impl::ShowGenerator() {
   writer.Write(job, job_output);
   job_output.Close();
   generated_output_path = output_filename.GetFullPath();
-  Launch(GeneratorCommand(job_path, result, generated_output_path),
+  Launch(GeneratorCommand(job_path, result, generated_output_path,
+                          weather_input, current_input),
          Operation::Generate, result,
          "Generating environmental GRIB in supervised helper…",
          use_copernicus ? &copernicus_secret : nullptr);
+}
+
+void PortableGribHost::Impl::SetCursorPosition(double latitude,
+                                               double longitude) {
+  if (!std::isfinite(latitude) || !std::isfinite(longitude)) return;
+  cursor_latitude = latitude;
+  cursor_longitude = longitude;
+  have_cursor = true;
+  UpdateCursorStatus();
+}
+
+void PortableGribHost::Impl::UpdateCursorStatus() {
+  if (!cursor_status || !have_cursor || fields.empty()) return;
+  auto nearest = [&](const wxString& kind, double* value) {
+    const auto found = fields.find(kind);
+    if (found == fields.end() || found->second.empty()) return false;
+    const double longitude_scale =
+        std::max(0.1, std::cos(cursor_latitude * kPi / 180.0));
+    double best_distance = std::numeric_limits<double>::max();
+    for (const auto& sample : found->second) {
+      const double dy = sample.latitude - cursor_latitude;
+      const double dx = (sample.longitude - cursor_longitude) * longitude_scale;
+      const double distance = dx * dx + dy * dy;
+      if (distance < best_distance) {
+        best_distance = distance;
+        *value = sample.value;
+      }
+    }
+    return best_distance < 4.0;
+  };
+  wxArrayString values;
+  double u = 0.0, v = 0.0, value = 0.0;
+  if (nearest("wind-u", &u) && nearest("wind-v", &v)) {
+    const double knots = std::hypot(u, v) * 1.94384449;
+    double from = std::atan2(-u, -v) * 180.0 / kPi;
+    if (from < 0.0) from += 360.0;
+    values.Add(wxString::Format("Wind %.1f kt %03.0f°", knots, from));
+  }
+  if (nearest("pressure", &value)) {
+    if (std::abs(value) > 2000.0) value /= 100.0;
+    values.Add(wxString::Format("Pressure %.1f hPa", value));
+  }
+  if (nearest("wave-height", &value))
+    values.Add(wxString::Format("Waves %.2f m", value));
+  if (nearest("current-u", &u) && nearest("current-v", &v)) {
+    const double knots = std::hypot(u, v) * 1.94384449;
+    double toward = std::atan2(u, v) * 180.0 / kPi;
+    if (toward < 0.0) toward += 360.0;
+    values.Add(wxString::Format("Current %.2f kt → %03.0f°", knots, toward));
+  }
+  if (nearest("air-temperature", &value)) {
+    if (value > 150.0) value -= 273.15;
+    values.Add(wxString::Format("Air %.1f °C", value));
+  }
+  cursor_status->SetLabel(values.empty() ? "No decoded data near cursor"
+                                         : wxJoin(values, ' '));
 }
 
 bool PortableGribHost::Impl::Render(ocpnDC& dc, const ViewPort& viewport) {
@@ -1078,6 +1382,7 @@ bool PortableGribHost::Impl::Render(ocpnDC& dc, const ViewPort& viewport) {
     if (u == fields.end() || v == fields.end()) return;
     const size_t count = std::min(u->second.size(), v->second.size());
     dc.SetPen(wxPen(colour, 2, wxPENSTYLE_SOLID));
+    std::set<std::pair<int, int>> occupied;
     for (size_t i = 0; i < count; ++i) {
       const auto& us = u->second[i];
       const auto& vs = v->second[i];
@@ -1088,15 +1393,35 @@ bool PortableGribHost::Impl::Render(ocpnDC& dc, const ViewPort& viewport) {
       if (magnitude < 0.01) continue;
       const double length = std::clamp(7.0 + magnitude * 0.7, 8.0, 28.0);
       const wxPoint origin = projection.GetPixFromLL(us.latitude, us.longitude);
+      if (origin.x < 0 || origin.y < 0 || origin.x >= viewport.pix_width ||
+          origin.y >= viewport.pix_height)
+        continue;
+      const auto cell =
+          std::make_pair(origin.x / vector_spacing, origin.y / vector_spacing);
+      if (!occupied.insert(cell).second) continue;
       const double dx = us.value / magnitude * length;
       const double dy = -vs.value / magnitude * length;
       const wxPoint tip(origin.x + static_cast<int>(dx),
                         origin.y + static_cast<int>(dy));
       dc.DrawLine(origin.x, origin.y, tip.x, tip.y);
-      dc.DrawLine(tip.x, tip.y, tip.x - static_cast<int>(0.35 * dx - 0.25 * dy),
-                  tip.y - static_cast<int>(0.35 * dy + 0.25 * dx));
-      dc.DrawLine(tip.x, tip.y, tip.x - static_cast<int>(0.35 * dx + 0.25 * dy),
-                  tip.y - static_cast<int>(0.35 * dy - 0.25 * dx));
+      if (wind_barbs && u_name == "wind-u") {
+        const int feathers = std::clamp(
+            static_cast<int>(std::lround(magnitude * 1.94384449 / 5.0)), 1, 6);
+        for (int feather = 0; feather < feathers; ++feather) {
+          const double along = 0.25 + feather * 0.11;
+          const int x = tip.x - static_cast<int>(along * dx);
+          const int y = tip.y - static_cast<int>(along * dy);
+          dc.DrawLine(x, y, x - static_cast<int>(0.33 * dx - 0.28 * dy),
+                      y - static_cast<int>(0.33 * dy + 0.28 * dx));
+        }
+      } else {
+        dc.DrawLine(tip.x, tip.y,
+                    tip.x - static_cast<int>(0.35 * dx - 0.25 * dy),
+                    tip.y - static_cast<int>(0.35 * dy + 0.25 * dx));
+        dc.DrawLine(tip.x, tip.y,
+                    tip.x - static_cast<int>(0.35 * dx + 0.25 * dy),
+                    tip.y - static_cast<int>(0.35 * dy - 0.25 * dx));
+      }
     }
     rendered = count != 0 || rendered;
   };
@@ -1107,7 +1432,7 @@ bool PortableGribHost::Impl::Render(ocpnDC& dc, const ViewPort& viewport) {
 
   auto draw_scalar = [&](const wxString& name, bool enabled,
                          const wxColour& low, const wxColour& high) {
-    if (!enabled) return;
+    if (!enabled || !scalar_maps) return;
     const auto found = fields.find(name);
     if (found == fields.end() || found->second.empty()) return;
     const auto& samples = found->second;
@@ -1118,10 +1443,9 @@ bool PortableGribHost::Impl::Render(ocpnDC& dc, const ViewPort& viewport) {
                             });
     const double minimum = limits.first->value;
     const double span = std::max(1e-12, limits.second->value - minimum);
-    const size_t stride = std::max<size_t>(1, samples.size() / 180);
     dc.SetPen(wxPen(wxColour(40, 40, 40), 1));
-    for (size_t i = 0; i < samples.size(); i += stride) {
-      const auto& sample = samples[i];
+    std::set<std::pair<int, int>> occupied;
+    for (const auto& sample : samples) {
       const double fraction =
           std::clamp((sample.value - minimum) / span, 0.0, 1.0);
       const auto channel = [fraction](unsigned char low_channel,
@@ -1130,11 +1454,17 @@ bool PortableGribHost::Impl::Render(ocpnDC& dc, const ViewPort& viewport) {
             static_cast<double>(low_channel) +
             fraction * (static_cast<double>(high_channel) - low_channel));
       };
-      dc.SetBrush(wxBrush(wxColour(channel(low.Red(), high.Red()),
-                                   channel(low.Green(), high.Green()),
-                                   channel(low.Blue(), high.Blue()), 150)));
+      dc.SetBrush(wxBrush(wxColour(
+          channel(low.Red(), high.Red()), channel(low.Green(), high.Green()),
+          channel(low.Blue(), high.Blue()), overlay_opacity)));
       const wxPoint point =
           projection.GetPixFromLL(sample.latitude, sample.longitude);
+      if (point.x < 0 || point.y < 0 || point.x >= viewport.pix_width ||
+          point.y >= viewport.pix_height)
+        continue;
+      const auto cell =
+          std::make_pair(point.x / scalar_spacing, point.y / scalar_spacing);
+      if (!occupied.insert(cell).second) continue;
       dc.DrawCircle(point, 4);
     }
     rendered = true;
@@ -1179,6 +1509,10 @@ bool PortableGribHost::Show(wxString* error) { return m_impl->Show(error); }
 
 bool PortableGribHost::Render(ocpnDC& dc, const ViewPort& viewport) {
   return m_impl->Render(dc, viewport);
+}
+
+void PortableGribHost::SetCursorPosition(double latitude, double longitude) {
+  m_impl->SetCursorPosition(latitude, longitude);
 }
 
 void PortableGribHost::Shutdown() { m_impl->Shutdown(); }

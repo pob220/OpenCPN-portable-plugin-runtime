@@ -61,7 +61,7 @@ impl exports::opencpn::portable::plugin::Guest for IGrib {
             ACTION_TOGGLE,
             "iGRIB",
             "Open the portable iGRIB proof of concept",
-            Some("resources/grib.svg"),
+            Some("resources/igrib.svg"),
         )?;
         host::register_action(
             ACTION_FAILURE_TEST,

@@ -153,8 +153,8 @@ add_custom_command(
           "${_igrib_source}/package/manifest.json"
           "${_igrib_package}/manifest.json"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
-          "${CMAKE_SOURCE_DIR}/plugins/grib_pi/data/grib.svg"
-          "${_igrib_package}/resources/grib.svg"
+          "${_igrib_source}/package/igrib.svg"
+          "${_igrib_package}/resources/igrib.svg"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           "${CMAKE_SOURCE_DIR}/data/svg/markicons/Hazard-Warning.svg"
           "${_igrib_package}/resources/fault-test.svg"
@@ -179,7 +179,7 @@ add_custom_command(
           "${_igrib_source}/component/Cargo.lock"
           "${_igrib_source}/package/manifest.json"
           "${_igrib_source}/package/igrib-viewer.ui.json"
-          "${CMAKE_SOURCE_DIR}/plugins/grib_pi/data/grib.svg"
+          "${_igrib_source}/package/igrib.svg"
           "${CMAKE_SOURCE_DIR}/data/svg/markicons/Hazard-Warning.svg"
           "${CMAKE_SOURCE_DIR}/data/svg/traditional/emblem-download.svg"
           "${CMAKE_SOURCE_DIR}/COPYING.gplv2"

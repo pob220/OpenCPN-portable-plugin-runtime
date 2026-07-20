@@ -34,6 +34,9 @@ public:
   /** Render retained geographic scenes using OpenCPN's renderer. */
   bool Render(ocpnDC& dc, const ViewPort& viewport, int priority);
 
+  /** Publish the chart cursor as value data to interested host services. */
+  void SetCursorPosition(double latitude, double longitude);
+
 private:
   class Impl;
   std::unique_ptr<Impl> m_impl;

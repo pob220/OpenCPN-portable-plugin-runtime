@@ -97,7 +97,7 @@ def main():
         report["checks"]["signed_package_install"] = "passed"
 
         action_resources = [
-            destination / "resources" / "grib.svg",
+            destination / "resources" / "igrib.svg",
             destination / "resources" / "fault-test.svg",
             destination / "resources" / "http-download.svg",
         ]
