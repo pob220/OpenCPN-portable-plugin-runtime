@@ -138,7 +138,10 @@ controls.
 Use non-critical sample data and record each result:
 
 1. Confirm the title is **iGRIB — Portable Environmental Data**.
-2. Open a valid GRIB and verify its forecast times appear.
+2. Open a valid GRIB and verify its forecast times appear. Open the picker
+   again and verify it returns to the directory containing the successfully
+   loaded GRIB, rather than GTK's unrelated global file-chooser directory.
+   Generated GRIBs should likewise become the remembered location.
 3. Toggle wind, pressure, waves, current and air-temperature layers. Move the
    chart cursor and verify that decoded values are shown in the iGRIB window.
    Wave readouts include significant height, peak period and direction when
@@ -150,13 +153,17 @@ Use non-critical sample data and record each result:
    Air temperature pages. Change units, each field's display colour, vectors,
    colour overlay, values, spacing and the available contour controls. Verify
    proper meteorological wind barbs and the single/double/tidal-style
-   proportional current arrow forms. For proportional arrows, adjust both the
-   baseline size and pixels-per-knot growth; verify that weaker currents remain
-   smaller than stronger currents and that spacing remains independently
-   adjustable. Currents default to arrows only; the optional current colour
-   overlay can be enabled deliberately if a magnitude map is wanted. Also
-   change opacity, playback speed and timeline looping, then verify that all
-   choices survive closing and reopening iGRIB.
+   proportional current arrow forms. Exercise all three wave-specific forms:
+   crest-and-travel markers, travel-direction arrows and height circles with a
+   direction tick. Change wave colour, symbol size and spacing and verify that
+   the complete symbol—not just its numeric label—changes colour. For
+   proportional current arrows, adjust both the baseline size and
+   pixels-per-knot growth; verify that weaker currents remain smaller than
+   stronger currents and that spacing remains independently adjustable.
+   Currents default to arrows only; the optional current colour overlay can be
+   enabled deliberately if a magnitude map is wanted. Also change opacity,
+   playback speed and timeline looping, then verify that all choices survive
+   closing and reopening iGRIB.
 5. Step forward/backward and run timeline playback.
 6. Open **Generate GRIB**, request a very small GFS area and one or two time
    steps, select **Copernicus Marine North-West Shelf** currents, and enter a

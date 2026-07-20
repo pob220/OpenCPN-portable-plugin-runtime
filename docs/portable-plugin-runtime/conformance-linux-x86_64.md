@@ -43,6 +43,10 @@ choosing service budgets.
   came from 18:00. Playback advanced to the next forecast time.
 - Existing display preferences migrated to current arrows without scalar
   circles by default; the optional magnitude overlay remains user-selectable.
+- Wave rendering exposed crest-and-travel, travel-arrow and
+  height-circle/direction forms with configurable symbol colour, size and
+  spacing. The native picker remembered the last successfully loaded GRIB
+  directory in only the isolated iGRIB profile.
 - One batched request evaluated four chart-coverage segments.
 - The host HTTP test fetched 7,655 bytes and read them through plugin-private
   storage.

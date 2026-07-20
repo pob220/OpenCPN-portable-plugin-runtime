@@ -30,7 +30,10 @@ default.
   size and pixels-per-knot growth are independently adjustable from vector
   spacing. Currents default to arrows without the scalar spot layer, while the
   magnitude overlay remains an explicit setting. Every field has an
-  independently selectable display colour.
+  independently selectable display colour. Waves have independent symbol
+  spacing and size plus crest-and-travel, travel-arrow and
+  height-circle/direction forms; the selected colour applies to the complete
+  symbol and optional scalar-map outline as well as values.
 - Standalone ecCodes helper supporting bounded `inspect` and `frame` operations
   with structured result/error JSON and atomic result publication. Sparse
   three-hourly wave height/period/direction records are selected within a
@@ -102,7 +105,10 @@ default.
   settings pages, five colour selectors, meteorological wind barbs and
   proportional-current-arrow selection. The current display profile migrated
   to arrow-only defaults without affecting the optional magnitude overlay.
-  The display settings survived a close/reopen cycle in the isolated profile.
+  The wave profile migrated from scalar spots to distinct crest-and-travel
+  symbols while retaining the scalar map as an option. The display settings
+  and last successfully opened GRIB directory survived a close/reopen cycle in
+  the isolated profile.
 
 Measured conformance values for this machine are recorded in
 `conformance-linux-x86_64.md`. Values are observations, not release budgets.

@@ -309,6 +309,7 @@ private:
   wxString result_path;
   wxString selected_file;
   wxString generated_output_path;
+  wxString last_grib_directory;
   std::vector<wxString> times;
   std::map<wxString, std::vector<Sample>> fields;
   std::map<wxString, wxString> field_units;
@@ -323,7 +324,8 @@ private:
   LayerDisplaySettings pressure_display{
       0, false, false, false, true, 44, 70, 4, 0, wxColour(40, 90, 190)};
   LayerDisplaySettings wave_display{
-      0, false, true, false, false, 44, 70, 1, 0, wxColour(0, 180, 210)};
+      0,  true, false, false, false, 44, 70, 1, 0, wxColour(0, 180, 210),
+      18, 0.0};
   LayerDisplaySettings current_display{
       0, true, false, false, false, 44, 70, 1, 2, wxColour(30, 90, 220)};
   LayerDisplaySettings temperature_display{
@@ -547,7 +549,17 @@ void PortableGribHost::Impl::LoadSettings() {
   if (display_settings_schema < 2) {
     current_display.overlay = false;
     pConfig->Write("CurrentOverlay", false);
-    pConfig->Write("displaySettingsSchema", 2L);
+  }
+  if (display_settings_schema < 3) {
+    wave_display.vectors = true;
+    wave_display.overlay = false;
+    wave_display.vector_style = 0;
+    wave_display.proportional_base_size = 18;
+    pConfig->Write("WaveVectors", true);
+    pConfig->Write("WaveOverlay", false);
+    pConfig->Write("WaveVectorStyle", 0L);
+    pConfig->Write("WaveProportionalBaseSize", 18L);
+    pConfig->Write("displaySettingsSchema", 3L);
     pConfig->Flush();
   }
   if (!pConfig->HasEntry("TemperatureOverlay"))
@@ -556,6 +568,9 @@ void PortableGribHost::Impl::LoadSettings() {
       std::clamp<int>(pConfig->ReadLong("overlayOpacity", 145), 20, 255);
   playback_interval_ms =
       std::clamp<int>(pConfig->ReadLong("playbackIntervalMs", 1200), 200, 5000);
+  last_grib_directory = pConfig->Read("lastGribDirectory", wxEmptyString);
+  if (!last_grib_directory.empty() && !wxDirExists(last_grib_directory))
+    last_grib_directory.clear();
   pConfig->SetPath(old_path);
 }
 
@@ -564,7 +579,7 @@ void PortableGribHost::Impl::SaveSettings() {
   pConfig->SetPath("/PortablePlugins/org.opencpn.igrib/Display");
   pConfig->Write("windBarbs", wind_barbs);
   pConfig->Write("loopPlayback", loop_playback);
-  pConfig->Write("displaySettingsSchema", 2L);
+  pConfig->Write("displaySettingsSchema", 3L);
   auto write_layer = [&](const wxString& name,
                          const LayerDisplaySettings& settings) {
     pConfig->Write(name + "Units", static_cast<long>(settings.units));
@@ -594,6 +609,8 @@ void PortableGribHost::Impl::SaveSettings() {
   write_layer("Temperature", temperature_display);
   pConfig->Write("overlayOpacity", static_cast<long>(overlay_opacity));
   pConfig->Write("playbackIntervalMs", static_cast<long>(playback_interval_ms));
+  if (!last_grib_directory.empty())
+    pConfig->Write("lastGribDirectory", last_grib_directory);
   if (show_wind) pConfig->Write("showWind", show_wind->GetValue());
   if (show_pressure) pConfig->Write("showPressure", show_pressure->GetValue());
   if (show_waves) pConfig->Write("showWaves", show_waves->GetValue());
@@ -642,41 +659,54 @@ void PortableGribHost::Impl::ShowSettings() {
     controls.colour = new wxColourPickerCtrl(page, wxID_ANY, layer->colour);
     AddRow(grid, page, "Display colour", controls.colour);
     if (vector_kind != 0) {
-      controls.vectors =
-          new wxCheckBox(page, wxID_ANY,
-                         vector_kind == 1 ? "Display wind vectors"
-                                          : "Display direction arrows");
+      wxString vector_label = "Display direction arrows";
+      if (vector_kind == 1) vector_label = "Display wind vectors";
+      if (vector_kind == 3) vector_label = "Display wave symbols";
+      controls.vectors = new wxCheckBox(page, wxID_ANY, vector_label);
       controls.vectors->SetValue(layer->vectors);
-      AddRow(grid, page, "Vectors", controls.vectors);
+      AddRow(grid, page, vector_kind == 3 ? "Symbols" : "Vectors",
+             controls.vectors);
       wxArrayString styles;
       if (vector_kind == 1) {
         styles.Add("Meteorological barbs");
         styles.Add("Direction arrows");
-      } else {
+      } else if (vector_kind == 2) {
         styles.Add("Single arrows");
         styles.Add("Double arrows");
         styles.Add("Proportional arrows");
+      } else {
+        styles.Add("Wave crests with travel marker");
+        styles.Add("Travel-direction arrows");
+        styles.Add("Height circles with direction tick");
       }
       controls.vector_style = new wxChoice(page, wxID_ANY, wxDefaultPosition,
                                            wxDefaultSize, styles);
       controls.vector_style->SetSelection(std::min<int>(
           layer->vector_style, static_cast<int>(styles.GetCount()) - 1));
-      AddRow(grid, page,
-             vector_kind == 1 ? "Wind vector style" : "Current arrow form",
-             controls.vector_style);
+      wxString style_label = "Current arrow form";
+      if (vector_kind == 1) style_label = "Wind vector style";
+      if (vector_kind == 3) style_label = "Wave symbol style";
+      AddRow(grid, page, style_label, controls.vector_style);
       controls.vector_spacing = new wxSpinCtrl(
           page, wxID_ANY, wxString::Format("%d", layer->vector_spacing),
           wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 24, 120,
           layer->vector_spacing);
-      AddRow(grid, page, "Vector spacing (pixels)", controls.vector_spacing);
-      if (vector_kind == 2) {
+      AddRow(grid, page,
+             vector_kind == 3 ? "Symbol spacing (pixels)"
+                              : "Vector spacing (pixels)",
+             controls.vector_spacing);
+      if (vector_kind == 2 || vector_kind == 3) {
         controls.proportional_base_size = new wxSpinCtrl(
             page, wxID_ANY,
             wxString::Format("%d", layer->proportional_base_size),
-            wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 6, 40,
-            layer->proportional_base_size);
-        AddRow(grid, page, "Proportional baseline size (pixels)",
+            wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS,
+            vector_kind == 3 ? 8 : 6, 40, layer->proportional_base_size);
+        AddRow(grid, page,
+               vector_kind == 3 ? "Wave symbol size (pixels)"
+                                : "Proportional baseline size (pixels)",
                controls.proportional_base_size);
+      }
+      if (vector_kind == 2) {
         controls.proportional_growth_per_knot = new wxSpinCtrlDouble(
             page, wxID_ANY,
             wxString::Format("%.1f", layer->proportional_growth_per_knot),
@@ -701,7 +731,9 @@ void PortableGribHost::Impl::ShowSettings() {
       }
     }
     controls.overlay =
-        new wxCheckBox(page, wxID_ANY, "Display colour overlay map");
+        new wxCheckBox(page, wxID_ANY,
+                       vector_kind == 3 ? "Display wave-height colour overlay"
+                                        : "Display colour overlay map");
     controls.overlay->SetValue(layer->overlay);
     AddRow(grid, page, "Overlay map", controls.overlay);
     controls.numbers =
@@ -748,7 +780,7 @@ void PortableGribHost::Impl::ShowSettings() {
   temperature_units.Add("°F");
   add_layer("Wind", &wind_display, speed_units, 1, "isotachs");
   add_layer("Pressure", &pressure_display, pressure_units, 0, "isobars");
-  add_layer("Waves", &wave_display, height_units, 0, wxEmptyString);
+  add_layer("Waves", &wave_display, height_units, 3, wxEmptyString);
   add_layer("Current", &current_display, speed_units, 2, wxEmptyString);
   add_layer("Air temperature", &temperature_display, temperature_units, 0,
             "isotherms");
@@ -843,7 +875,7 @@ bool PortableGribHost::Impl::Show(wxString* error) {
 }
 
 void PortableGribHost::Impl::OpenFile() {
-  wxFileDialog dialog(frame, "Open environmental GRIB", wxEmptyString,
+  wxFileDialog dialog(frame, "Open environmental GRIB", last_grib_directory,
                       wxEmptyString,
                       "GRIB files (*.grb;*.grib;*.grb2)|*.grb;*.grib;*.grb2|"
                       "All files (*.*)|*.*",
@@ -1150,6 +1182,12 @@ void PortableGribHost::Impl::HandleInspect(wxJSONValue& value) {
     timeline->Append(FormatGribTime(times.back()));
   }
   file_label->SetLabel("File: " + wxFileName(selected_file).GetFullName());
+  const wxString opened_directory = wxFileName(selected_file).GetPath();
+  if (wxDirExists(opened_directory) &&
+      opened_directory != last_grib_directory) {
+    last_grib_directory = opened_directory;
+    SaveSettings();
+  }
   data_status->SetLabel(wxString::Format(
       "%d GRIB messages; %zu forecast times; decoded out of process",
       value["messageCount"].AsInt(), times.size()));
@@ -1915,6 +1953,104 @@ bool PortableGribHost::Impl::Render(ocpnDC& dc, const ViewPort& viewport) {
       rendered = true;
     }
   };
+
+  auto draw_wave_symbols = [&](bool enabled,
+                               const LayerDisplaySettings& settings) {
+    if (!enabled) return;
+    const auto heights = fields.find("wave-height");
+    const auto directions = fields.find("wave-direction");
+    if (heights == fields.end() || directions == fields.end()) return;
+    const size_t count =
+        std::min(heights->second.size(), directions->second.size());
+    const double size =
+        std::clamp<double>(settings.proportional_base_size, 8.0, 40.0);
+    dc.SetPen(wxPen(settings.colour, 2, wxPENSTYLE_SOLID));
+    dc.SetBrush(*wxTRANSPARENT_BRUSH);
+    std::set<std::pair<int, int>> occupied;
+    auto point = [](const wxPoint& origin, double along_x, double along_y,
+                    double across_x, double across_y, double along,
+                    double across) {
+      return wxPoint(origin.x + static_cast<int>(std::lround(
+                                    along_x * along + across_x * across)),
+                     origin.y + static_cast<int>(std::lround(
+                                    along_y * along + across_y * across)));
+    };
+    auto draw_line = [&](const wxPoint& first, const wxPoint& second) {
+      dc.DrawLine(first.x, first.y, second.x, second.y);
+    };
+    for (size_t i = 0; i < count; ++i) {
+      const auto& height = heights->second[i];
+      const auto& direction = directions->second[i];
+      if (std::abs(height.latitude - direction.latitude) > 0.001 ||
+          std::abs(height.longitude - direction.longitude) > 0.001 ||
+          !std::isfinite(height.value) || !std::isfinite(direction.value) ||
+          height.value < 0.0 || height.value > 100.0 || direction.value < 0.0 ||
+          direction.value > 360.0)
+        continue;
+      const wxPoint origin =
+          projection.GetPixFromLL(height.latitude, height.longitude);
+      if (origin.x < 0 || origin.y < 0 || origin.x >= viewport.pix_width ||
+          origin.y >= viewport.pix_height)
+        continue;
+      const auto cell = std::make_pair(origin.x / settings.vector_spacing,
+                                       origin.y / settings.vector_spacing);
+      if (!occupied.insert(cell).second) continue;
+
+      // dirpw is the direction waves come from. Symbols point in the
+      // propagation direction and rotate with the chart viewport.
+      const double travel_bearing =
+          std::fmod(direction.value + 180.0, 360.0) * kPi / 180.0 +
+          viewport.rotation;
+      const double along_x = std::sin(travel_bearing);
+      const double along_y = -std::cos(travel_bearing);
+      const double across_x = -along_y;
+      const double across_y = along_x;
+
+      if (settings.vector_style == 2) {
+        const double radius =
+            std::clamp(size * 0.22 + height.value * 1.5, 4.0, size * 0.55);
+        dc.DrawCircle(origin, static_cast<int>(std::lround(radius)));
+        draw_line(origin, point(origin, along_x, along_y, across_x, across_y,
+                                radius + size * 0.22, 0.0));
+      } else if (settings.vector_style == 1) {
+        const wxPoint tail = point(origin, along_x, along_y, across_x, across_y,
+                                   -size * 0.45, 0.0);
+        const wxPoint tip = point(origin, along_x, along_y, across_x, across_y,
+                                  size * 0.45, 0.0);
+        const wxPoint left = point(origin, along_x, along_y, across_x, across_y,
+                                   size * 0.18, size * 0.20);
+        const wxPoint right = point(origin, along_x, along_y, across_x,
+                                    across_y, size * 0.18, -size * 0.20);
+        draw_line(tail, tip);
+        draw_line(tip, left);
+        draw_line(tip, right);
+      } else {
+        // Two transverse crests plus a compact propagation marker are
+        // visually distinct from both meteorological barbs and tidal arrows.
+        draw_line(point(origin, along_x, along_y, across_x, across_y,
+                        -size * 0.17, -size * 0.45),
+                  point(origin, along_x, along_y, across_x, across_y,
+                        -size * 0.17, size * 0.45));
+        draw_line(point(origin, along_x, along_y, across_x, across_y,
+                        size * 0.10, -size * 0.30),
+                  point(origin, along_x, along_y, across_x, across_y,
+                        size * 0.10, size * 0.30));
+        const wxPoint marker_base = point(origin, along_x, along_y, across_x,
+                                          across_y, size * 0.10, 0.0);
+        const wxPoint marker_tip = point(origin, along_x, along_y, across_x,
+                                         across_y, size * 0.48, 0.0);
+        const wxPoint marker_left = point(origin, along_x, along_y, across_x,
+                                          across_y, size * 0.28, size * 0.13);
+        const wxPoint marker_right = point(origin, along_x, along_y, across_x,
+                                           across_y, size * 0.28, -size * 0.13);
+        draw_line(marker_base, marker_tip);
+        draw_line(marker_tip, marker_left);
+        draw_line(marker_tip, marker_right);
+      }
+      rendered = true;
+    }
+  };
+
   auto draw_scalar = [&](const std::vector<Sample>& samples, bool enabled,
                          const wxColour& low, const wxColour& high) {
     if (!enabled || samples.empty()) return;
@@ -1925,7 +2061,7 @@ bool PortableGribHost::Impl::Render(ocpnDC& dc, const ViewPort& viewport) {
                             });
     const double minimum = limits.first->value;
     const double span = std::max(1e-12, limits.second->value - minimum);
-    dc.SetPen(wxPen(wxColour(40, 40, 40), 1));
+    dc.SetPen(wxPen(high, 1));
     std::set<std::pair<int, int>> occupied;
     for (const auto& sample : samples) {
       const double fraction =
@@ -2146,6 +2282,9 @@ bool PortableGribHost::Impl::Render(ocpnDC& dc, const ViewPort& viewport) {
   draw_vectors("wind-u", "wind-v", wind_display.colour,
                show_wind && show_wind->GetValue() && wind_display.vectors,
                wind_display, true);
+  draw_wave_symbols(
+      show_waves && show_waves->GetValue() && wave_display.vectors,
+      wave_display);
   draw_vectors(
       "current-u", "current-v", current_display.colour,
       show_current && show_current->GetValue() && current_display.vectors,
