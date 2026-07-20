@@ -79,6 +79,8 @@ struct LayerDisplaySettings {
   int contour_spacing = 4;
   int vector_style = 0;
   wxColour colour = *wxBLACK;
+  int proportional_base_size = 12;
+  double proportional_growth_per_knot = 6.0;
 };
 
 bool ParseGribTime(const wxString& value, wxDateTime* result) {
@@ -517,6 +519,14 @@ void PortableGribHost::Impl::LoadSettings() {
         1, 100);
     settings->vector_style = std::clamp<int>(
         pConfig->ReadLong(name + "VectorStyle", settings->vector_style), 0, 2);
+    settings->proportional_base_size =
+        std::clamp<int>(pConfig->ReadLong(name + "ProportionalBaseSize",
+                                          settings->proportional_base_size),
+                        6, 40);
+    settings->proportional_growth_per_knot =
+        std::clamp(pConfig->ReadDouble(name + "ProportionalGrowthPerKnot",
+                                       settings->proportional_growth_per_knot),
+                   0.0, 12.0);
     const wxString colour_name = pConfig->Read(
         name + "Colour", settings->colour.GetAsString(wxC2S_HTML_SYNTAX));
     const wxColour colour(colour_name);
@@ -562,6 +572,10 @@ void PortableGribHost::Impl::SaveSettings() {
                    static_cast<long>(settings.contour_spacing));
     pConfig->Write(name + "VectorStyle",
                    static_cast<long>(settings.vector_style));
+    pConfig->Write(name + "ProportionalBaseSize",
+                   static_cast<long>(settings.proportional_base_size));
+    pConfig->Write(name + "ProportionalGrowthPerKnot",
+                   settings.proportional_growth_per_knot);
     pConfig->Write(name + "Colour",
                    settings.colour.GetAsString(wxC2S_HTML_SYNTAX));
   };
@@ -595,6 +609,8 @@ void PortableGribHost::Impl::ShowSettings() {
     wxCheckBox* vectors = nullptr;
     wxChoice* vector_style = nullptr;
     wxSpinCtrl* vector_spacing = nullptr;
+    wxSpinCtrl* proportional_base_size = nullptr;
+    wxSpinCtrlDouble* proportional_growth_per_knot = nullptr;
     wxCheckBox* overlay = nullptr;
     wxCheckBox* numbers = nullptr;
     wxSpinCtrl* number_spacing = nullptr;
@@ -645,6 +661,36 @@ void PortableGribHost::Impl::ShowSettings() {
           wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 24, 120,
           layer->vector_spacing);
       AddRow(grid, page, "Vector spacing (pixels)", controls.vector_spacing);
+      if (vector_kind == 2) {
+        controls.proportional_base_size = new wxSpinCtrl(
+            page, wxID_ANY,
+            wxString::Format("%d", layer->proportional_base_size),
+            wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 6, 40,
+            layer->proportional_base_size);
+        AddRow(grid, page, "Proportional baseline size (pixels)",
+               controls.proportional_base_size);
+        controls.proportional_growth_per_knot = new wxSpinCtrlDouble(
+            page, wxID_ANY,
+            wxString::Format("%.1f", layer->proportional_growth_per_knot),
+            wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 0.0, 12.0,
+            layer->proportional_growth_per_knot, 0.5);
+        controls.proportional_growth_per_knot->SetDigits(1);
+        AddRow(grid, page, "Growth (pixels per knot)",
+               controls.proportional_growth_per_knot);
+        auto update_proportional_controls =
+            [choice = controls.vector_style,
+             base = controls.proportional_base_size,
+             growth = controls.proportional_growth_per_knot]() {
+              const bool enabled = choice->GetSelection() == 2;
+              base->Enable(enabled);
+              growth->Enable(enabled);
+            };
+        controls.vector_style->Bind(
+            wxEVT_CHOICE, [update_proportional_controls](wxCommandEvent&) {
+              update_proportional_controls();
+            });
+        update_proportional_controls();
+      }
     }
     controls.overlay =
         new wxCheckBox(page, wxID_ANY, "Display colour overlay map");
@@ -736,6 +782,12 @@ void PortableGribHost::Impl::ShowSettings() {
     if (controls.vectors) layer.vectors = controls.vectors->GetValue();
     if (controls.vector_spacing)
       layer.vector_spacing = controls.vector_spacing->GetValue();
+    if (controls.proportional_base_size)
+      layer.proportional_base_size =
+          controls.proportional_base_size->GetValue();
+    if (controls.proportional_growth_per_knot)
+      layer.proportional_growth_per_knot =
+          controls.proportional_growth_per_knot->GetValue();
     layer.overlay = controls.overlay->GetValue();
     layer.numbers = controls.numbers->GetValue();
     layer.number_spacing = controls.number_spacing->GetValue();
@@ -1733,6 +1785,49 @@ bool PortableGribHost::Impl::Render(ocpnDC& dc, const ViewPort& viewport) {
     }
   };
 
+  auto draw_tidal_arrow = [&](const wxPoint& origin, double u, double v,
+                              const wxColour& colour,
+                              const LayerDisplaySettings& settings) {
+    const double magnitude = std::hypot(u, v);
+    if (magnitude < 0.01) return;
+    const double knots = magnitude * 1.94384449;
+    const double length =
+        std::clamp(settings.proportional_base_size +
+                       settings.proportional_growth_per_knot * knots,
+                   6.0, 64.0);
+    const double direction_x = u / magnitude;
+    const double direction_y = -v / magnitude;
+    const double perpendicular_x = -direction_y;
+    const double perpendicular_y = direction_x;
+    const double head_length = std::clamp(length * 0.34, 4.0, 13.0);
+    const double head_half_width = std::clamp(length * 0.20, 3.0, 8.0);
+    const wxPoint tail(
+        origin.x - static_cast<int>(std::lround(direction_x * length * 0.42)),
+        origin.y - static_cast<int>(std::lround(direction_y * length * 0.42)));
+    const wxPoint tip(
+        origin.x + static_cast<int>(std::lround(direction_x * length * 0.58)),
+        origin.y + static_cast<int>(std::lround(direction_y * length * 0.58)));
+    const double neck_x = tip.x - direction_x * head_length;
+    const double neck_y = tip.y - direction_y * head_length;
+    const wxPoint neck(static_cast<int>(std::lround(neck_x)),
+                       static_cast<int>(std::lround(neck_y)));
+    const wxPoint left(static_cast<int>(std::lround(
+                           neck_x + perpendicular_x * head_half_width)),
+                       static_cast<int>(std::lround(
+                           neck_y + perpendicular_y * head_half_width)));
+    const wxPoint right(static_cast<int>(std::lround(
+                            neck_x - perpendicular_x * head_half_width)),
+                        static_cast<int>(std::lround(
+                            neck_y - perpendicular_y * head_half_width)));
+    const int width =
+        std::clamp<int>(static_cast<int>(std::lround(length / 12.0)), 1, 4);
+    dc.SetPen(wxPen(colour, width, wxPENSTYLE_SOLID));
+    dc.SetBrush(wxBrush(colour));
+    dc.DrawLine(tail.x, tail.y, neck.x, neck.y);
+    wxPoint head[3] = {tip, left, right};
+    dc.DrawPolygon(3, head);
+  };
+
   auto draw_vectors = [&](const wxString& u_name, const wxString& v_name,
                           const wxColour& colour, bool enabled,
                           const LayerDisplaySettings& settings,
@@ -1764,10 +1859,14 @@ bool PortableGribHost::Impl::Render(ocpnDC& dc, const ViewPort& viewport) {
         rendered = true;
         continue;
       }
+      if (!meteorological && settings.vector_style == 2) {
+        draw_tidal_arrow(origin, us.value, vs.value, colour, settings);
+        rendered = true;
+        continue;
+      }
       const double length =
-          !meteorological && settings.vector_style != 2
-              ? 22.0
-              : std::clamp(11.0 + magnitude * 1.4, 12.0, 30.0);
+          !meteorological ? 22.0
+                          : std::clamp(11.0 + magnitude * 1.4, 12.0, 30.0);
       const double dx = us.value / magnitude * length;
       const double dy = -vs.value / magnitude * length;
       const wxPoint tip(origin.x + static_cast<int>(dx),

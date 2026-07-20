@@ -144,8 +144,11 @@ Use non-critical sample data and record each result:
 4. Open **Settings**. Exercise the separate Wind, Pressure, Waves, Current and
    Air temperature pages. Change units, each field's display colour, vectors,
    colour overlay, values, spacing and the available contour controls. Verify
-   proper meteorological wind barbs and the single/double/proportional current
-   arrow forms. Also change opacity, playback speed and timeline looping, then
+   proper meteorological wind barbs and the single/double/tidal-style
+   proportional current arrow forms. For proportional arrows, adjust both the
+   baseline size and pixels-per-knot growth; verify that weaker currents remain
+   smaller than stronger currents and that spacing remains independently
+   adjustable. Also change opacity, playback speed and timeline looping, then
    verify that all choices survive closing and reopening iGRIB.
 5. Step forward/backward and run timeline playback.
 6. Open **Generate GRIB**, request a very small GFS area and one or two time

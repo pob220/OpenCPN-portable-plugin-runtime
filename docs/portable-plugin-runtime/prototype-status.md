@@ -25,9 +25,10 @@ default.
   open/settings/download/generate actions and native file pickers. Persistent
   per-field display profiles cover units, vectors, colour overlays, numeric
   labels, spacing and relevant contours. Wind supports proper meteorological
-  barbs or direction arrows; currents support single, double or
-  magnitude-proportional arrows. Every field has an independently selectable
-  display colour.
+  barbs or direction arrows; currents support single, double or filled-head,
+  tidal-stream-style magnitude-proportional arrows. The proportional baseline
+  size and pixels-per-knot growth are independently adjustable from vector
+  spacing. Every field has an independently selectable display colour.
 - Standalone ecCodes helper supporting bounded `inspect` and `frame` operations
   with structured result/error JSON and atomic result publication.
 - Environmental generator helper using versioned job/result/progress messages,
