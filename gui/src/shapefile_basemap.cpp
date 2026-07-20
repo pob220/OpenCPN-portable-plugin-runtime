@@ -22,14 +22,19 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <any>
 #include <chrono>
+#include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <future>
 #include <limits>
 #include <list>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <utility>
 
 #include <wx/colour.h>
@@ -60,6 +65,153 @@
 #endif
 
 ShapeBaseChartSet gShapeBasemap;
+
+namespace {
+
+int64_t LandMaskTileKey(int latitude, int longitude) {
+  return (static_cast<int64_t>(latitude) + 90) * 360 + longitude + 180;
+}
+
+using LandMaskRing = std::vector<std::pair<double, double>>;
+using LandMaskPolygon = std::vector<LandMaskRing>;
+
+bool LandMaskPolygonContains(const LandMaskPolygon &polygon, double latitude,
+                             double longitude) {
+  bool inside = false;
+  for (const auto &ring : polygon) {
+    if (ring.size() < 3) continue;
+    bool ring_inside = false;
+    constexpr double epsilon = 1e-10;
+    for (size_t i = 0, previous = ring.size() - 1; i < ring.size();
+         previous = i++) {
+      const double x1 = ring[previous].first;
+      const double y1 = ring[previous].second;
+      const double x2 = ring[i].first;
+      const double y2 = ring[i].second;
+      const double cross =
+          (longitude - x1) * (y2 - y1) - (latitude - y1) * (x2 - x1);
+      if (std::abs(cross) <= epsilon &&
+          longitude >= std::min(x1, x2) - epsilon &&
+          longitude <= std::max(x1, x2) + epsilon &&
+          latitude >= std::min(y1, y2) - epsilon &&
+          latitude <= std::max(y1, y2) + epsilon)
+        return true;
+      if ((y1 > latitude) != (y2 > latitude)) {
+        const double intersection =
+            x1 + (latitude - y1) * (x2 - x1) / (y2 - y1);
+        if (longitude < intersection) ring_inside = !ring_inside;
+      }
+    }
+    if (ring_inside) inside = !inside;
+  }
+  return inside;
+}
+
+std::string SelectLandMaskShapefile() {
+  static const std::array<const char *, 5> qualities = {
+      "full", "high", "medium", "low", "crude_10x10"};
+  std::vector<std::string> directories;
+  if (!gWorldShapefileLocation.empty())
+    directories.push_back(gWorldShapefileLocation.ToStdString());
+  if (g_Platform) {
+    wxString bundled = g_Platform->GetSharedDataDir();
+    bundled.Append("basemap_shp");
+    directories.push_back(bundled.ToStdString());
+  }
+  for (const auto &directory : directories) {
+    for (const char *quality : qualities) {
+      const std::string candidate =
+          ShapeBaseChart::ConstructPath(directory, quality);
+      if (fs::exists(candidate)) return candidate;
+    }
+  }
+  return {};
+}
+
+class ShapefileLandMask {
+public:
+  bool IsLand(double latitude, double longitude) {
+    if (!std::isfinite(latitude) || !std::isfinite(longitude) ||
+        latitude < -90.0 || latitude > 90.0)
+      return false;
+    while (longitude < -180.0) longitude += 360.0;
+    while (longitude >= 180.0) longitude -= 360.0;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (source_.empty()) {
+      const std::string source = SelectLandMaskShapefile();
+      if (source.empty() || !Load(source)) return false;
+    }
+
+    const int latitude_cell =
+        static_cast<int>(std::floor(latitude / tile_size_) * tile_size_);
+    const int longitude_cell =
+        static_cast<int>(std::floor(longitude / tile_size_) * tile_size_);
+    for (int y = latitude_cell - tile_size_; y <= latitude_cell + tile_size_;
+         y += tile_size_) {
+      for (int x = longitude_cell - tile_size_;
+           x <= longitude_cell + tile_size_; x += tile_size_) {
+        auto found = tiles_.find(LandMaskTileKey(y, x));
+        if (found == tiles_.end()) continue;
+        for (const auto &polygon : found->second) {
+          if (LandMaskPolygonContains(polygon, latitude, longitude))
+            return true;
+        }
+      }
+    }
+    return false;
+  }
+
+private:
+  bool Load(const std::string &source) {
+    auto reader = std::make_unique<shp::ShapefileReader>(source);
+    if (!reader->isOpen() ||
+        reader->getGeometryType() != shp::GeometryType::Polygon)
+      return false;
+    std::unordered_map<int64_t, std::vector<LandMaskPolygon>> tiles;
+    const int count = reader->getCount();
+    for (int index = 0; index < count; ++index) {
+      const auto feature = reader->getFeature(index);
+      const auto attributes = feature.getAttributes();
+      const auto x = attributes.find("x");
+      const auto y = attributes.find("y");
+      if (x == attributes.end() || y == attributes.end()) continue;
+      try {
+        const auto *source_polygon =
+            dynamic_cast<const shp::Polygon *>(feature.getGeometry());
+        if (!source_polygon) return false;
+        LandMaskPolygon polygon;
+        for (const auto &source_ring : source_polygon->getRings()) {
+          LandMaskRing ring;
+          for (const auto &point : source_ring.getPoints())
+            ring.emplace_back(point.getX(), point.getY());
+          polygon.push_back(std::move(ring));
+        }
+        tiles[LandMaskTileKey(std::any_cast<int>(y->second),
+                              std::any_cast<int>(x->second))]
+            .push_back(std::move(polygon));
+      } catch (const std::bad_any_cast &) {
+        return false;
+      }
+    }
+    if (tiles.empty()) return false;
+    tile_size_ = source.find("crude_10x10") == std::string::npos ? 1 : 10;
+    tiles_ = std::move(tiles);
+    source_ = source;
+    return true;
+  }
+
+  std::mutex mutex_;
+  std::string source_;
+  std::unordered_map<int64_t, std::vector<LandMaskPolygon>> tiles_;
+  int tile_size_ = 1;
+};
+
+}  // namespace
+
+bool shapefileBasemapIsLand(double latitude, double longitude) {
+  static ShapefileLandMask land_mask;
+  return land_mask.IsLand(latitude, longitude);
+}
 
 #ifdef ocpnUSE_GL
 

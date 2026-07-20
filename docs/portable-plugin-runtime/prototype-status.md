@@ -44,7 +44,11 @@ default.
   independently selectable display colour. Waves have independent symbol
   spacing and size plus crest-and-travel, travel-arrow and
   height-circle/direction forms; the selected colour applies to the complete
-  symbol and optional scalar-map outline as well as values.
+  symbol and optional scalar-map outline as well as values. The host filters
+  waves and currents through a cached point-in-polygon index built from the
+  best bundled shapefile basemap; wind, pressure and air temperature remain
+  visible over land. The same marine-only policy applies to typed environmental
+  batches consumed by iWeatherRouting.
 - Standalone ecCodes helper supporting bounded `inspect` and `frame` operations
   with structured result/error JSON and atomic result publication. Sparse
   three-hourly wave height/period/direction records are selected within a
@@ -127,6 +131,11 @@ default.
   symbols while retaining the scalar map as an option. The display settings
   and last successfully opened GRIB directory survived a close/reopen cycle in
   the isolated profile.
+- The host land classifier was checked against bundled shapefile data at
+  Dublin, the Isle of Man and Manchester (land) and at an Irish Sea and an
+  Atlantic point (water). Current and wave rendering/readouts are suppressed
+  at classified land points; this display mask is explicitly not a
+  hydrographic or navigation-safety result.
 
 Measured conformance values for this machine are recorded in
 `conformance-linux-x86_64.md`. Values are observations, not release budgets.

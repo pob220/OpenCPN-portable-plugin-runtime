@@ -405,4 +405,10 @@ private:
 };
 
 extern ShapeBaseChartSet gShapeBasemap; /**< global instance */
+
+/**
+ * Classify a geographic point using the best installed shapefile basemap.
+ * Intended for display filtering only; this is not a navigation-safety query.
+ */
+bool shapefileBasemapIsLand(double latitude, double longitude);
 #endif

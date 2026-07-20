@@ -49,6 +49,7 @@
 #include "model/base_platform.h"
 #include "navutil.h"
 #include "ocpndc.h"
+#include "shapefile_basemap.h"
 #include "top_frame.h"
 #include "viewport.h"
 
@@ -76,8 +77,8 @@ struct DecodedEnvironmentFrame {
   std::map<wxString, wxString> source_times;
 };
 
-bool ParseDecodedFrame(wxJSONValue& value,
-                       DecodedEnvironmentFrame* decoded, wxString* error) {
+bool ParseDecodedFrame(wxJSONValue& value, DecodedEnvironmentFrame* decoded,
+                       wxString* error) {
   if (!decoded || !value["fields"].IsArray()) {
     if (error) *error = "decoder returned an incompatible frame schema";
     return false;
@@ -324,6 +325,7 @@ private:
                           wxString* error) const;
   void CacheRoutingFrame(const wxString& time,
                          const DecodedEnvironmentFrame& decoded) const;
+  bool IsMarinePoint(double latitude, double longitude) const;
   void SetBusy(bool busy, const wxString& status);
   wxString DecoderHelper() const;
   wxString GeneratorHelper() const;
@@ -370,6 +372,8 @@ private:
   mutable std::mutex routing_decode_mutex;
   mutable std::map<wxString, DecodedEnvironmentFrame> routing_frames;
   mutable std::list<wxString> routing_frame_lru;
+  mutable std::mutex land_mask_mutex;
+  mutable std::map<std::pair<int32_t, int32_t>, bool> land_mask_cache;
   double cursor_latitude = 0.0;
   double cursor_longitude = 0.0;
   bool have_cursor = false;
@@ -1128,6 +1132,10 @@ bool PortableGribHost::Impl::Launch(const std::vector<wxString>& arguments,
 void PortableGribHost::Impl::StartInspect(const wxString& path) {
   if (process) return;
   {
+    std::lock_guard<std::mutex> land_lock(land_mask_mutex);
+    land_mask_cache.clear();
+  }
+  {
     std::lock_guard<std::mutex> decode_lock(routing_decode_mutex);
     std::lock_guard<std::mutex> field_lock(field_mutex);
     routing_frames.clear();
@@ -1306,6 +1314,21 @@ void PortableGribHost::Impl::CacheRoutingFrame(
   }
 }
 
+bool PortableGribHost::Impl::IsMarinePoint(double latitude,
+                                           double longitude) const {
+  if (!std::isfinite(latitude) || !std::isfinite(longitude)) return false;
+  constexpr double kMaskPrecision = 100000.0;
+  const auto key = std::make_pair(
+      static_cast<int32_t>(std::lround(latitude * kMaskPrecision)),
+      static_cast<int32_t>(std::lround(longitude * kMaskPrecision)));
+  std::lock_guard<std::mutex> lock(land_mask_mutex);
+  const auto cached = land_mask_cache.find(key);
+  if (cached != land_mask_cache.end()) return !cached->second;
+  const bool land = shapefileBasemapIsLand(latitude, longitude);
+  land_mask_cache.emplace(key, land);
+  return !land;
+}
+
 bool PortableGribHost::Impl::DecodeRoutingFrame(
     const wxString& source, const wxString& time,
     DecodedEnvironmentFrame* decoded, wxString* error) const {
@@ -1326,8 +1349,8 @@ bool PortableGribHost::Impl::DecodeRoutingFrame(
   if (wxFileExists(result)) wxRemoveFile(result);
   if (exit_code != 0) {
     if (error && error->empty())
-      *error = wxString::Format(
-          "supervised decoder exited with status %ld", exit_code);
+      *error = wxString::Format("supervised decoder exited with status %ld",
+                                exit_code);
     return false;
   }
   return read && ParseDecodedFrame(value, decoded, error);
@@ -1804,6 +1827,7 @@ void PortableGribHost::Impl::UpdateCursorStatus() {
   if (wave_value) wave_value->SetLabel("N/A");
   if (current_value) current_value->SetLabel("N/A");
   if (temperature_value) temperature_value->SetLabel("N/A");
+  const bool marine_cursor = IsMarinePoint(cursor_latitude, cursor_longitude);
   double u = 0.0, v = 0.0, value = 0.0;
   if (nearest("wind-u", &u) && nearest("wind-v", &v)) {
     double from = std::atan2(-u, -v) * 180.0 / kPi;
@@ -1822,7 +1846,7 @@ void PortableGribHost::Impl::UpdateCursorStatus() {
     else
       pressure_value->SetLabel(wxString::Format("%.1f hPa", hpa));
   }
-  if (nearest("wave-height", &value)) {
+  if (marine_cursor && nearest("wave-height", &value)) {
     wxString label = wave_display.units == 1
                          ? wxString::Format("%.1f ft", value * 3.2808399)
                          : wxString::Format("%.2f m", value);
@@ -1834,7 +1858,7 @@ void PortableGribHost::Impl::UpdateCursorStatus() {
       label += wxString::Format("  %03.0f° from", direction);
     wave_value->SetLabel(label);
   }
-  if (nearest("current-u", &u) && nearest("current-v", &v)) {
+  if (marine_cursor && nearest("current-u", &u) && nearest("current-v", &v)) {
     double toward = std::atan2(u, v) * 180.0 / kPi;
     if (toward < 0.0) toward += 360.0;
     current_value->SetLabel(
@@ -1861,7 +1885,8 @@ bool PortableGribHost::Impl::Render(ocpnDC& dc, const ViewPort& viewport) {
   bool rendered = false;
   ViewPort projection = viewport;
 
-  auto vector_samples = [&](const wxString& u_name, const wxString& v_name) {
+  auto vector_samples = [&](const wxString& u_name, const wxString& v_name,
+                            bool marine_only) {
     std::vector<Sample> output;
     const auto u = fields.find(u_name);
     const auto v = fields.find(v_name);
@@ -1872,7 +1897,8 @@ bool PortableGribHost::Impl::Render(ocpnDC& dc, const ViewPort& viewport) {
       const auto& us = u->second[i];
       const auto& vs = v->second[i];
       if (std::abs(us.latitude - vs.latitude) <= 0.001 &&
-          std::abs(us.longitude - vs.longitude) <= 0.001)
+          std::abs(us.longitude - vs.longitude) <= 0.001 &&
+          (!marine_only || IsMarinePoint(us.latitude, us.longitude)))
         output.push_back(
             {us.latitude, us.longitude, std::hypot(us.value, vs.value)});
     }
@@ -1990,7 +2016,7 @@ bool PortableGribHost::Impl::Render(ocpnDC& dc, const ViewPort& viewport) {
   auto draw_vectors = [&](const wxString& u_name, const wxString& v_name,
                           const wxColour& colour, bool enabled,
                           const LayerDisplaySettings& settings,
-                          bool meteorological) {
+                          bool meteorological, bool marine_only) {
     if (!enabled) return;
     const auto u = fields.find(u_name);
     const auto v = fields.find(v_name);
@@ -2004,6 +2030,7 @@ bool PortableGribHost::Impl::Render(ocpnDC& dc, const ViewPort& viewport) {
       if (std::abs(us.latitude - vs.latitude) > 0.001 ||
           std::abs(us.longitude - vs.longitude) > 0.001)
         continue;
+      if (marine_only && !IsMarinePoint(us.latitude, us.longitude)) continue;
       const double magnitude = std::hypot(us.value, vs.value);
       if (magnitude < 0.01) continue;
       const wxPoint origin = projection.GetPixFromLL(us.latitude, us.longitude);
@@ -2082,6 +2109,7 @@ bool PortableGribHost::Impl::Render(ocpnDC& dc, const ViewPort& viewport) {
           height.value < 0.0 || height.value > 100.0 || direction.value < 0.0 ||
           direction.value > 360.0)
         continue;
+      if (!IsMarinePoint(height.latitude, height.longitude)) continue;
       const wxPoint origin =
           projection.GetPixFromLL(height.latitude, height.longitude);
       if (origin.x < 0 || origin.y < 0 || origin.x >= viewport.pix_width ||
@@ -2183,19 +2211,27 @@ bool PortableGribHost::Impl::Render(ocpnDC& dc, const ViewPort& viewport) {
   };
 
   auto field_samples = [&](const wxString& name,
-                           double (*convert)(double) = nullptr) {
+                           double (*convert)(double) = nullptr,
+                           bool marine_only = false) {
     std::vector<Sample> output;
     const auto found = fields.find(name);
     if (found == fields.end()) return output;
     output = found->second;
+    if (marine_only)
+      output.erase(std::remove_if(output.begin(), output.end(),
+                                  [&](const Sample& sample) {
+                                    return !IsMarinePoint(sample.latitude,
+                                                          sample.longitude);
+                                  }),
+                   output.end());
     if (convert)
       for (auto& sample : output) sample.value = convert(sample.value);
     return output;
   };
-  const auto wind_speed = vector_samples("wind-u", "wind-v");
-  const auto current_speed = vector_samples("current-u", "current-v");
+  const auto wind_speed = vector_samples("wind-u", "wind-v", false);
+  const auto current_speed = vector_samples("current-u", "current-v", true);
   const auto pressure = field_samples("pressure", PressureHpa);
-  const auto waves = field_samples("wave-height");
+  const auto waves = field_samples("wave-height", nullptr, true);
   const auto temperature = field_samples("air-temperature", TemperatureCelsius);
   auto pale = [](const wxColour& colour) {
     return wxColour(static_cast<unsigned char>(190 + colour.Red() * 65 / 255),
@@ -2376,14 +2412,14 @@ bool PortableGribHost::Impl::Render(ocpnDC& dc, const ViewPort& viewport) {
   // Vectors are rendered last so translucent scalar maps cannot obscure them.
   draw_vectors("wind-u", "wind-v", wind_display.colour,
                show_wind && show_wind->GetValue() && wind_display.vectors,
-               wind_display, true);
+               wind_display, true, false);
   draw_wave_symbols(
       show_waves && show_waves->GetValue() && wave_display.vectors,
       wave_display);
   draw_vectors(
       "current-u", "current-v", current_display.colour,
       show_current && show_current->GetValue() && current_display.vectors,
-      current_display, false);
+      current_display, false, true);
   return rendered;
 }
 
@@ -2409,6 +2445,10 @@ void PortableGribHost::Impl::Shutdown() {
   field_source_times.clear();
   routing_frames.clear();
   routing_frame_lru.clear();
+  {
+    std::lock_guard<std::mutex> land_lock(land_mask_mutex);
+    land_mask_cache.clear();
+  }
 }
 
 bool PortableGribHost::Impl::SampleBatch(
@@ -2428,8 +2468,9 @@ bool PortableGribHost::Impl::SampleBatch(
   }
   if (source.empty() || forecast_times.empty()) {
     if (error)
-      *error = "iGRIB has no time-indexed environmental dataset; open or "
-               "generate a GRIB first";
+      *error =
+          "iGRIB has no time-indexed environmental dataset; open or "
+          "generate a GRIB first";
     return false;
   }
 
@@ -2488,9 +2529,8 @@ bool PortableGribHost::Impl::SampleBatch(
     CacheRoutingFrame(time, decoded);
   }
 
-  auto nearest = [](const DecodedEnvironmentFrame& frame,
-                    const wxString& name, double latitude, double longitude,
-                    double* output) {
+  auto nearest = [](const DecodedEnvironmentFrame& frame, const wxString& name,
+                    double latitude, double longitude, double* output) {
     const auto found = frame.fields.find(name);
     if (found == frame.fields.end() || found->second.empty()) return false;
     const Sample* best = nullptr;
@@ -2524,6 +2564,7 @@ bool PortableGribHost::Impl::SampleBatch(
       return false;
     }
     const auto& frame = cached->second;
+    const bool marine = IsMarinePoint(request.latitude, request.longitude);
     double u = 0.0, v = 0.0;
     if (nearest(frame, "wind-u", request.latitude, request.longitude, &u) &&
         nearest(frame, "wind-v", request.latitude, request.longitude, &v)) {
@@ -2531,14 +2572,15 @@ bool PortableGribHost::Impl::SampleBatch(
       sample.wind_v_knots = v * 1.94384449;
       sample.available |= 1;
     }
-    if (nearest(frame, "current-u", request.latitude, request.longitude, &u) &&
+    if (marine &&
+        nearest(frame, "current-u", request.latitude, request.longitude, &u) &&
         nearest(frame, "current-v", request.latitude, request.longitude, &v)) {
       sample.current_u_knots = u * 1.94384449;
       sample.current_v_knots = v * 1.94384449;
       sample.available |= 2;
     }
-    if (nearest(frame, "wave-height", request.latitude, request.longitude,
-                &sample.wave_height_metres))
+    if (marine && nearest(frame, "wave-height", request.latitude,
+                          request.longitude, &sample.wave_height_metres))
       sample.available |= 4;
     results->push_back(sample);
   }
@@ -2548,9 +2590,9 @@ bool PortableGribHost::Impl::SampleBatch(
 wxString PortableGribHost::Impl::DatasetSummary() const {
   std::lock_guard<std::mutex> lock(field_mutex);
   if (selected_file.empty()) return "No iGRIB dataset is open";
-  return wxString::Format("iGRIB: %s (%zu forecast times; %zu displayed fields)",
-                          wxFileName(selected_file).GetFullName(), times.size(),
-                          fields.size());
+  return wxString::Format(
+      "iGRIB: %s (%zu forecast times; %zu displayed fields)",
+      wxFileName(selected_file).GetFullName(), times.size(), fields.size());
 }
 
 PortableGribHost::PortableGribHost(wxWindow* parent,

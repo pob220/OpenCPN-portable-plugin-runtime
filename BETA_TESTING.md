@@ -148,6 +148,10 @@ Use non-critical sample data and record each result:
    Generated GRIBs should likewise become the remembered location.
 3. Toggle wind, pressure, waves, current and air-temperature layers. Move the
    chart cursor and verify that decoded values are shown in the iGRIB window.
+   Pan across a coastline and verify that current and wave symbols, scalar
+   maps, numeric labels and cursor readouts stop at land while wind, pressure
+   and air temperature remain available over land. The mask uses the bundled
+   shapefile basemap and is a display aid, not a chart-safety assertion.
    Wave readouts include significant height, peak period and direction when
    these fields are present. Some products publish waves every three hours
    among hourly weather/current records; on an intervening timeline step,
