@@ -28,7 +28,8 @@ credentials before posting this report or a diagnostic archive.
 
 - iGRIB discovered and opened:
 - Timeline and layer toggles:
-- Overlay rendering:
+- Per-field units/colours/vector styles/contours persisted:
+- Overlay rendering (including wind barbs and current arrows):
 - Download/generation:
 - Cancellation latency/behaviour:
 - Malformed-input containment:

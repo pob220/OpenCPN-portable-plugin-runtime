@@ -141,9 +141,12 @@ Use non-critical sample data and record each result:
 2. Open a valid GRIB and verify its forecast times appear.
 3. Toggle wind, pressure, waves, current and air-temperature layers. Move the
    chart cursor and verify that decoded values are shown in the iGRIB window.
-4. Open **Settings**. Change wind barbs/arrows, vector and scalar spacing,
-   opacity, playback speed and timeline looping; verify that the choices
-   survive closing and reopening iGRIB.
+4. Open **Settings**. Exercise the separate Wind, Pressure, Waves, Current and
+   Air temperature pages. Change units, each field's display colour, vectors,
+   colour overlay, values, spacing and the available contour controls. Verify
+   proper meteorological wind barbs and the single/double/proportional current
+   arrow forms. Also change opacity, playback speed and timeline looping, then
+   verify that all choices survive closing and reopening iGRIB.
 5. Step forward/backward and run timeline playback.
 6. Open **Generate GRIB**, request a very small GFS area and one or two time
    steps, select **Copernicus Marine North-West Shelf** currents, and enter a

@@ -16,6 +16,7 @@
 #include <wx/button.h>
 #include <wx/checkbox.h>
 #include <wx/choice.h>
+#include <wx/clrpicker.h>
 #include <wx/datetime.h>
 #include <wx/dialog.h>
 #include <wx/filedlg.h>
@@ -28,6 +29,8 @@
 #include <wx/jsonwriter.h>
 #include <wx/log.h>
 #include <wx/msgdlg.h>
+#include <wx/notebook.h>
+#include <wx/panel.h>
 #include <wx/process.h>
 #include <wx/scrolwin.h>
 #include <wx/secretstore.h>
@@ -64,6 +67,49 @@ struct Sample {
   double longitude = 0.0;
   double value = 0.0;
 };
+
+struct LayerDisplaySettings {
+  int units = 0;
+  bool vectors = false;
+  bool overlay = false;
+  bool numbers = false;
+  bool contours = false;
+  int vector_spacing = 44;
+  int number_spacing = 70;
+  int contour_spacing = 4;
+  int vector_style = 0;
+  wxColour colour = *wxBLACK;
+};
+
+bool ParseGribTime(const wxString& value, wxDateTime* result) {
+  if (value.length() != 14 || value[8] != 'T' || value[13] != 'Z') return false;
+  long year = 0, month = 0, day = 0, hour = 0, minute = 0;
+  if (!value.Mid(0, 4).ToLong(&year) || !value.Mid(4, 2).ToLong(&month) ||
+      !value.Mid(6, 2).ToLong(&day) || !value.Mid(9, 2).ToLong(&hour) ||
+      !value.Mid(11, 2).ToLong(&minute) || month < 1 || month > 12 || day < 1 ||
+      day > 31 || hour > 23 || minute > 59)
+    return false;
+  *result = wxDateTime(static_cast<wxDateTime::wxDateTime_t>(day),
+                       static_cast<wxDateTime::Month>(month - 1),
+                       static_cast<int>(year),
+                       static_cast<wxDateTime::wxDateTime_t>(hour),
+                       static_cast<wxDateTime::wxDateTime_t>(minute));
+  return result->IsValid();
+}
+
+wxString FormatGribTime(const wxString& value) {
+  wxDateTime time;
+  return ParseGribTime(value, &time) ? time.Format("%a %d %b %Y  %H:%M UTC")
+                                     : value;
+}
+
+double PressureHpa(double value) {
+  return std::abs(value) > 2000.0 ? value / 100.0 : value;
+}
+
+double TemperatureCelsius(double value) {
+  return value > 150.0 ? value - 273.15 : value;
+}
 
 wxString HostHelperDirectory() {
 #if defined(__WXMSW__)
@@ -241,6 +287,11 @@ private:
   wxCheckBox* show_waves = nullptr;
   wxCheckBox* show_current = nullptr;
   wxCheckBox* show_temperature = nullptr;
+  wxStaticText* wind_value = nullptr;
+  wxStaticText* pressure_value = nullptr;
+  wxStaticText* wave_value = nullptr;
+  wxStaticText* current_value = nullptr;
+  wxStaticText* temperature_value = nullptr;
   wxStaticText* data_status = nullptr;
   wxStaticText* cursor_status = nullptr;
   wxGauge* progress = nullptr;
@@ -263,10 +314,17 @@ private:
   double cursor_longitude = 0.0;
   bool have_cursor = false;
   bool wind_barbs = true;
-  bool scalar_maps = true;
   bool loop_playback = true;
-  int vector_spacing = 34;
-  int scalar_spacing = 18;
+  LayerDisplaySettings wind_display{
+      0, true, false, false, false, 44, 70, 5, 0, wxColour(145, 88, 25)};
+  LayerDisplaySettings pressure_display{
+      0, false, false, false, true, 44, 70, 4, 0, wxColour(40, 90, 190)};
+  LayerDisplaySettings wave_display{
+      0, false, true, false, false, 44, 70, 1, 0, wxColour(0, 180, 210)};
+  LayerDisplaySettings current_display{
+      0, true, true, false, false, 44, 70, 1, 2, wxColour(30, 90, 220)};
+  LayerDisplaySettings temperature_display{
+      0, false, true, false, false, 44, 70, 2, 0, wxColour(220, 65, 35)};
   int overlay_opacity = 145;
   int playback_interval_ms = 1200;
   bool stopped = false;
@@ -295,7 +353,7 @@ wxString PortableGribHost::Impl::GeneratorHelper() const {
 void PortableGribHost::Impl::CreateFrame() {
   LoadSettings();
   frame = new wxFrame(parent, wxID_ANY, surface_title, wxDefaultPosition,
-                      wxSize(930, 315),
+                      wxSize(940, 385),
                       wxDEFAULT_FRAME_STYLE | wxFRAME_FLOAT_ON_PARENT);
   auto* root = new wxBoxSizer(wxVERTICAL);
   file_label = new wxStaticText(frame, wxID_ANY, "File: (none)");
@@ -321,7 +379,8 @@ void PortableGribHost::Impl::CreateFrame() {
 
   auto* data =
       new wxStaticBoxSizer(wxVERTICAL, frame, "Data at cursor position");
-  auto* toggles = new wxBoxSizer(wxHORIZONTAL);
+  auto* values = new wxFlexGridSizer(2, 4, 12);
+  values->AddGrowableCol(1, 1);
   show_wind = new wxCheckBox(frame, wxID_ANY, "Wind");
   show_pressure = new wxCheckBox(frame, wxID_ANY, "Pressure");
   show_waves = new wxCheckBox(frame, wxID_ANY, "Waves");
@@ -335,14 +394,26 @@ void PortableGribHost::Impl::CreateFrame() {
   show_current->SetValue(pConfig->ReadBool("showCurrent", true));
   show_temperature->SetValue(pConfig->ReadBool("showTemperature", false));
   pConfig->SetPath(old_path);
-  for (auto* toggle :
-       {show_wind, show_pressure, show_waves, show_current, show_temperature})
-    toggles->Add(toggle, 0, wxRIGHT, 14);
+  wind_value = new wxStaticText(frame, wxID_ANY, "N/A");
+  pressure_value = new wxStaticText(frame, wxID_ANY, "N/A");
+  wave_value = new wxStaticText(frame, wxID_ANY, "N/A");
+  current_value = new wxStaticText(frame, wxID_ANY, "N/A");
+  temperature_value = new wxStaticText(frame, wxID_ANY, "N/A");
+  for (const auto& entry : std::vector<std::pair<wxCheckBox*, wxStaticText*>>{
+           {show_wind, wind_value},
+           {show_pressure, pressure_value},
+           {show_waves, wave_value},
+           {show_current, current_value},
+           {show_temperature, temperature_value}}) {
+    values->Add(entry.first, 0, wxALIGN_CENTER_VERTICAL);
+    values->Add(entry.second, 1, wxEXPAND | wxALIGN_CENTER_VERTICAL);
+  }
   data_status = new wxStaticText(frame, wxID_ANY,
                                  "Open a GRIB file to inspect its fields");
   cursor_status = new wxStaticText(frame, wxID_ANY,
-                                   "Move the chart cursor to inspect data");
-  data->Add(toggles, 0, wxEXPAND | wxALL, 5);
+                                   "Move the chart cursor to inspect data "
+                                   "(model output; not for navigation)");
+  data->Add(values, 0, wxEXPAND | wxALL, 5);
   data->Add(data_status, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
   data->Add(cursor_status, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
   controls->Add(data, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 7);
@@ -423,12 +494,47 @@ void PortableGribHost::Impl::LoadSettings() {
   const wxString old_path = pConfig->GetPath();
   pConfig->SetPath("/PortablePlugins/org.opencpn.igrib/Display");
   wind_barbs = pConfig->ReadBool("windBarbs", true);
-  scalar_maps = pConfig->ReadBool("scalarMaps", true);
   loop_playback = pConfig->ReadBool("loopPlayback", true);
-  vector_spacing =
-      std::clamp<int>(pConfig->ReadLong("vectorSpacing", 34), 18, 100);
-  scalar_spacing =
-      std::clamp<int>(pConfig->ReadLong("scalarSpacing", 18), 8, 80);
+  const int legacy_vector_spacing =
+      std::clamp<int>(pConfig->ReadLong("vectorSpacing", 44), 24, 120);
+  const bool legacy_scalar_maps = pConfig->ReadBool("scalarMaps", true);
+  auto read_layer = [&](const wxString& name, LayerDisplaySettings* settings) {
+    settings->units = std::clamp<int>(
+        pConfig->ReadLong(name + "Units", settings->units), 0, 4);
+    settings->vectors = pConfig->ReadBool(name + "Vectors", settings->vectors);
+    settings->overlay = pConfig->ReadBool(name + "Overlay", settings->overlay);
+    settings->numbers = pConfig->ReadBool(name + "Numbers", settings->numbers);
+    settings->contours =
+        pConfig->ReadBool(name + "Contours", settings->contours);
+    settings->vector_spacing = std::clamp<int>(
+        pConfig->ReadLong(name + "VectorSpacing", legacy_vector_spacing), 24,
+        120);
+    settings->number_spacing = std::clamp<int>(
+        pConfig->ReadLong(name + "NumberSpacing", settings->number_spacing), 35,
+        160);
+    settings->contour_spacing = std::clamp<int>(
+        pConfig->ReadLong(name + "ContourSpacing", settings->contour_spacing),
+        1, 100);
+    settings->vector_style = std::clamp<int>(
+        pConfig->ReadLong(name + "VectorStyle", settings->vector_style), 0, 2);
+    const wxString colour_name = pConfig->Read(
+        name + "Colour", settings->colour.GetAsString(wxC2S_HTML_SYNTAX));
+    const wxColour colour(colour_name);
+    if (colour.IsOk()) settings->colour = colour;
+  };
+  read_layer("Wind", &wind_display);
+  read_layer("Pressure", &pressure_display);
+  read_layer("Wave", &wave_display);
+  read_layer("Current", &current_display);
+  read_layer("Temperature", &temperature_display);
+  if (!pConfig->HasEntry("WindVectorStyle"))
+    wind_display.vector_style = wind_barbs ? 0 : 1;
+  if (!pConfig->HasEntry("WaveOverlay"))
+    wave_display.overlay = legacy_scalar_maps;
+  if (!pConfig->HasEntry("CurrentOverlay"))
+    current_display.overlay = legacy_scalar_maps;
+  if (!pConfig->HasEntry("TemperatureOverlay"))
+    temperature_display.overlay = legacy_scalar_maps;
   overlay_opacity =
       std::clamp<int>(pConfig->ReadLong("overlayOpacity", 145), 20, 255);
   playback_interval_ms =
@@ -440,10 +546,30 @@ void PortableGribHost::Impl::SaveSettings() {
   const wxString old_path = pConfig->GetPath();
   pConfig->SetPath("/PortablePlugins/org.opencpn.igrib/Display");
   pConfig->Write("windBarbs", wind_barbs);
-  pConfig->Write("scalarMaps", scalar_maps);
   pConfig->Write("loopPlayback", loop_playback);
-  pConfig->Write("vectorSpacing", static_cast<long>(vector_spacing));
-  pConfig->Write("scalarSpacing", static_cast<long>(scalar_spacing));
+  auto write_layer = [&](const wxString& name,
+                         const LayerDisplaySettings& settings) {
+    pConfig->Write(name + "Units", static_cast<long>(settings.units));
+    pConfig->Write(name + "Vectors", settings.vectors);
+    pConfig->Write(name + "Overlay", settings.overlay);
+    pConfig->Write(name + "Numbers", settings.numbers);
+    pConfig->Write(name + "Contours", settings.contours);
+    pConfig->Write(name + "VectorSpacing",
+                   static_cast<long>(settings.vector_spacing));
+    pConfig->Write(name + "NumberSpacing",
+                   static_cast<long>(settings.number_spacing));
+    pConfig->Write(name + "ContourSpacing",
+                   static_cast<long>(settings.contour_spacing));
+    pConfig->Write(name + "VectorStyle",
+                   static_cast<long>(settings.vector_style));
+    pConfig->Write(name + "Colour",
+                   settings.colour.GetAsString(wxC2S_HTML_SYNTAX));
+  };
+  write_layer("Wind", wind_display);
+  write_layer("Pressure", pressure_display);
+  write_layer("Wave", wave_display);
+  write_layer("Current", current_display);
+  write_layer("Temperature", temperature_display);
   pConfig->Write("overlayOpacity", static_cast<long>(overlay_opacity));
   pConfig->Write("playbackIntervalMs", static_cast<long>(playback_interval_ms));
   if (show_wind) pConfig->Write("showWind", show_wind->GetValue());
@@ -460,52 +586,168 @@ void PortableGribHost::Impl::ShowSettings() {
   wxDialog dialog(frame, wxID_ANY, "iGRIB display settings", wxDefaultPosition,
                   wxDefaultSize, wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
   auto* root = new wxBoxSizer(wxVERTICAL);
-  auto* grid = new wxFlexGridSizer(2, 8, 10);
-  grid->AddGrowableCol(1, 1);
-  wxArrayString wind_styles;
-  wind_styles.Add("Meteorological barbs");
-  wind_styles.Add("Direction arrows");
-  auto* wind_style = new wxChoice(&dialog, wxID_ANY, wxDefaultPosition,
-                                  wxDefaultSize, wind_styles);
-  wind_style->SetSelection(wind_barbs ? 0 : 1);
-  auto* vector_density =
-      new wxSpinCtrl(&dialog, wxID_ANY, wxString::Format("%d", vector_spacing),
-                     wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 18, 100,
-                     vector_spacing);
-  auto* scalar_density = new wxSpinCtrl(
-      &dialog, wxID_ANY, wxString::Format("%d", scalar_spacing),
-      wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 8, 80, scalar_spacing);
+  auto* notebook = new wxNotebook(&dialog, wxID_ANY);
+
+  struct LayerControls {
+    LayerDisplaySettings* settings = nullptr;
+    wxChoice* units = nullptr;
+    wxColourPickerCtrl* colour = nullptr;
+    wxCheckBox* vectors = nullptr;
+    wxChoice* vector_style = nullptr;
+    wxSpinCtrl* vector_spacing = nullptr;
+    wxCheckBox* overlay = nullptr;
+    wxCheckBox* numbers = nullptr;
+    wxSpinCtrl* number_spacing = nullptr;
+    wxCheckBox* contours = nullptr;
+    wxSpinCtrl* contour_spacing = nullptr;
+  };
+  std::vector<LayerControls> layer_controls;
+  auto add_layer = [&](const wxString& title, LayerDisplaySettings* layer,
+                       const wxArrayString& unit_names, int vector_kind,
+                       const wxString& contour_name) {
+    auto* page = new wxPanel(notebook);
+    auto* grid = new wxFlexGridSizer(2, 9, 12);
+    grid->AddGrowableCol(1, 1);
+    LayerControls controls;
+    controls.settings = layer;
+    controls.units = new wxChoice(page, wxID_ANY, wxDefaultPosition,
+                                  wxDefaultSize, unit_names);
+    controls.units->SetSelection(std::min<int>(
+        layer->units, static_cast<int>(unit_names.GetCount()) - 1));
+    AddRow(grid, page, "Units", controls.units);
+    controls.colour = new wxColourPickerCtrl(page, wxID_ANY, layer->colour);
+    AddRow(grid, page, "Display colour", controls.colour);
+    if (vector_kind != 0) {
+      controls.vectors =
+          new wxCheckBox(page, wxID_ANY,
+                         vector_kind == 1 ? "Display wind vectors"
+                                          : "Display direction arrows");
+      controls.vectors->SetValue(layer->vectors);
+      AddRow(grid, page, "Vectors", controls.vectors);
+      wxArrayString styles;
+      if (vector_kind == 1) {
+        styles.Add("Meteorological barbs");
+        styles.Add("Direction arrows");
+      } else {
+        styles.Add("Single arrows");
+        styles.Add("Double arrows");
+        styles.Add("Proportional arrows");
+      }
+      controls.vector_style = new wxChoice(page, wxID_ANY, wxDefaultPosition,
+                                           wxDefaultSize, styles);
+      controls.vector_style->SetSelection(std::min<int>(
+          layer->vector_style, static_cast<int>(styles.GetCount()) - 1));
+      AddRow(grid, page,
+             vector_kind == 1 ? "Wind vector style" : "Current arrow form",
+             controls.vector_style);
+      controls.vector_spacing = new wxSpinCtrl(
+          page, wxID_ANY, wxString::Format("%d", layer->vector_spacing),
+          wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 24, 120,
+          layer->vector_spacing);
+      AddRow(grid, page, "Vector spacing (pixels)", controls.vector_spacing);
+    }
+    controls.overlay =
+        new wxCheckBox(page, wxID_ANY, "Display colour overlay map");
+    controls.overlay->SetValue(layer->overlay);
+    AddRow(grid, page, "Overlay map", controls.overlay);
+    controls.numbers =
+        new wxCheckBox(page, wxID_ANY, "Display values on chart");
+    controls.numbers->SetValue(layer->numbers);
+    AddRow(grid, page, "Numbers", controls.numbers);
+    controls.number_spacing = new wxSpinCtrl(
+        page, wxID_ANY, wxString::Format("%d", layer->number_spacing),
+        wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 35, 160,
+        layer->number_spacing);
+    AddRow(grid, page, "Number spacing (pixels)", controls.number_spacing);
+    if (!contour_name.empty()) {
+      controls.contours =
+          new wxCheckBox(page, wxID_ANY, "Display " + contour_name);
+      controls.contours->SetValue(layer->contours);
+      AddRow(grid, page, contour_name, controls.contours);
+      controls.contour_spacing = new wxSpinCtrl(
+          page, wxID_ANY, wxString::Format("%d", layer->contour_spacing),
+          wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 1, 100,
+          layer->contour_spacing);
+      AddRow(grid, page, "Contour interval", controls.contour_spacing);
+    }
+    auto* page_root = new wxBoxSizer(wxVERTICAL);
+    page_root->Add(grid, 1, wxEXPAND | wxALL, 14);
+    page->SetSizer(page_root);
+    notebook->AddPage(page, title);
+    layer_controls.push_back(controls);
+  };
+
+  wxArrayString speed_units;
+  speed_units.Add("knots");
+  speed_units.Add("m/s");
+  speed_units.Add("mph");
+  speed_units.Add("km/h");
+  wxArrayString pressure_units;
+  pressure_units.Add("hPa");
+  pressure_units.Add("mmHg");
+  pressure_units.Add("inHg");
+  wxArrayString height_units;
+  height_units.Add("metres");
+  height_units.Add("feet");
+  wxArrayString temperature_units;
+  temperature_units.Add("°C");
+  temperature_units.Add("°F");
+  add_layer("Wind", &wind_display, speed_units, 1, "isotachs");
+  add_layer("Pressure", &pressure_display, pressure_units, 0, "isobars");
+  add_layer("Waves", &wave_display, height_units, 0, wxEmptyString);
+  add_layer("Current", &current_display, speed_units, 2, wxEmptyString);
+  add_layer("Air temperature", &temperature_display, temperature_units, 0,
+            "isotherms");
+
+  auto* playback_page = new wxPanel(notebook);
+  auto* playback_grid = new wxFlexGridSizer(2, 9, 12);
+  playback_grid->AddGrowableCol(1, 1);
   auto* opacity =
-      new wxSpinCtrl(&dialog, wxID_ANY, wxString::Format("%d", overlay_opacity),
-                     wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 20, 255,
-                     overlay_opacity);
+      new wxSpinCtrl(playback_page, wxID_ANY,
+                     wxString::Format("%d", overlay_opacity), wxDefaultPosition,
+                     wxDefaultSize, wxSP_ARROW_KEYS, 20, 255, overlay_opacity);
   auto* playback = new wxSpinCtrl(
-      &dialog, wxID_ANY, wxString::Format("%d", playback_interval_ms),
+      playback_page, wxID_ANY, wxString::Format("%d", playback_interval_ms),
       wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 200, 5000,
       playback_interval_ms);
-  auto* maps = new wxCheckBox(&dialog, wxID_ANY,
-                              "Draw scalar pressure/wave/temperature maps");
-  maps->SetValue(scalar_maps);
-  auto* loop = new wxCheckBox(&dialog, wxID_ANY, "Loop timeline playback");
+  auto* loop =
+      new wxCheckBox(playback_page, wxID_ANY, "Loop timeline playback");
   loop->SetValue(loop_playback);
-  AddRow(grid, &dialog, "Wind display", wind_style);
-  AddRow(grid, &dialog, "Vector spacing (pixels)", vector_density);
-  AddRow(grid, &dialog, "Scalar spacing (pixels)", scalar_density);
-  AddRow(grid, &dialog, "Overlay opacity (20–255)", opacity);
-  AddRow(grid, &dialog, "Playback interval (milliseconds)", playback);
-  AddRow(grid, &dialog, "Scalar overlays", maps);
-  AddRow(grid, &dialog, "Timeline", loop);
-  root->Add(grid, 1, wxEXPAND | wxALL, 12);
+  AddRow(playback_grid, playback_page, "Overlay opacity (20–255)", opacity);
+  AddRow(playback_grid, playback_page, "Playback interval (milliseconds)",
+         playback);
+  AddRow(playback_grid, playback_page, "Timeline", loop);
+  auto* playback_root = new wxBoxSizer(wxVERTICAL);
+  playback_root->Add(playback_grid, 1, wxEXPAND | wxALL, 14);
+  playback_page->SetSizer(playback_root);
+  notebook->AddPage(playback_page, "Playback");
+
+  root->Add(notebook, 1, wxEXPAND | wxALL, 8);
   root->Add(dialog.CreateSeparatedButtonSizer(wxOK | wxCANCEL), 0,
             wxEXPAND | wxALL, 10);
-  dialog.SetSizerAndFit(root);
+  dialog.SetSizer(root);
+  dialog.SetSize(wxSize(680, 520));
+  dialog.SetMinSize(wxSize(620, 460));
   if (dialog.ShowModal() != wxID_OK) return;
-  wind_barbs = wind_style->GetSelection() == 0;
-  vector_spacing = vector_density->GetValue();
-  scalar_spacing = scalar_density->GetValue();
+  for (const auto& controls : layer_controls) {
+    auto& layer = *controls.settings;
+    layer.units = controls.units->GetSelection();
+    layer.colour = controls.colour->GetColour();
+    if (controls.vectors) layer.vectors = controls.vectors->GetValue();
+    if (controls.vector_spacing)
+      layer.vector_spacing = controls.vector_spacing->GetValue();
+    layer.overlay = controls.overlay->GetValue();
+    layer.numbers = controls.numbers->GetValue();
+    layer.number_spacing = controls.number_spacing->GetValue();
+    if (controls.contours) layer.contours = controls.contours->GetValue();
+    if (controls.contour_spacing)
+      layer.contour_spacing = controls.contour_spacing->GetValue();
+    if (controls.vector_style)
+      layer.vector_style = controls.vector_style->GetSelection();
+  }
+  wind_barbs = wind_display.vector_style == 0;
   overlay_opacity = opacity->GetValue();
   playback_interval_ms = playback->GetValue();
-  scalar_maps = maps->GetValue();
   loop_playback = loop->GetValue();
   if (playback_timer.IsRunning()) playback_timer.Start(playback_interval_ms);
   SaveSettings();
@@ -845,7 +1087,7 @@ void PortableGribHost::Impl::HandleInspect(wxJSONValue& value) {
   for (int i = 0; i < value["times"].Size(); ++i) {
     if (!value["times"][i].IsString()) continue;
     times.push_back(value["times"][i].AsString());
-    timeline->Append(times.back());
+    timeline->Append(FormatGribTime(times.back()));
   }
   file_label->SetLabel("File: " + wxFileName(selected_file).GetFullName());
   data_status->SetLabel(wxString::Format(
@@ -883,7 +1125,7 @@ void PortableGribHost::Impl::HandleFrame(wxJSONValue& value) {
   }
   data_status->SetLabel(wxString::Format(
       "%s — %d samples retained by OpenCPN (not navigation-authoritative)",
-      value["time"].AsString(), value["sampleCount"].AsInt()));
+      FormatGribTime(value["time"].AsString()), value["sampleCount"].AsInt()));
   UpdateCursorStatus();
   if (top_frame::Get()) top_frame::Get()->RefreshAllCanvas(false);
 }
@@ -1342,40 +1584,159 @@ void PortableGribHost::Impl::UpdateCursorStatus() {
     }
     return best_distance < 4.0;
   };
-  wxArrayString values;
+  auto speed_value = [](double metres_per_second, int units) {
+    switch (units) {
+      case 1:
+        return wxString::Format("%.1f m/s", metres_per_second);
+      case 2:
+        return wxString::Format("%.1f mph", metres_per_second * 2.23693629);
+      case 3:
+        return wxString::Format("%.1f km/h", metres_per_second * 3.6);
+      default:
+        return wxString::Format("%.1f kt", metres_per_second * 1.94384449);
+    }
+  };
+  if (wind_value) wind_value->SetLabel("N/A");
+  if (pressure_value) pressure_value->SetLabel("N/A");
+  if (wave_value) wave_value->SetLabel("N/A");
+  if (current_value) current_value->SetLabel("N/A");
+  if (temperature_value) temperature_value->SetLabel("N/A");
   double u = 0.0, v = 0.0, value = 0.0;
   if (nearest("wind-u", &u) && nearest("wind-v", &v)) {
-    const double knots = std::hypot(u, v) * 1.94384449;
     double from = std::atan2(-u, -v) * 180.0 / kPi;
     if (from < 0.0) from += 360.0;
-    values.Add(wxString::Format("Wind %.1f kt %03.0f°", knots, from));
+    wind_value->SetLabel(speed_value(std::hypot(u, v), wind_display.units) +
+                         wxString::Format("  %03.0f° from", from));
   }
   if (nearest("pressure", &value)) {
-    if (std::abs(value) > 2000.0) value /= 100.0;
-    values.Add(wxString::Format("Pressure %.1f hPa", value));
+    const double hpa = PressureHpa(value);
+    if (pressure_display.units == 1)
+      pressure_value->SetLabel(
+          wxString::Format("%.1f mmHg", hpa * 0.750061683));
+    else if (pressure_display.units == 2)
+      pressure_value->SetLabel(
+          wxString::Format("%.2f inHg", hpa * 0.0295299831));
+    else
+      pressure_value->SetLabel(wxString::Format("%.1f hPa", hpa));
   }
-  if (nearest("wave-height", &value))
-    values.Add(wxString::Format("Waves %.2f m", value));
+  if (nearest("wave-height", &value)) {
+    wave_value->SetLabel(wave_display.units == 1
+                             ? wxString::Format("%.1f ft", value * 3.2808399)
+                             : wxString::Format("%.2f m", value));
+  }
   if (nearest("current-u", &u) && nearest("current-v", &v)) {
-    const double knots = std::hypot(u, v) * 1.94384449;
     double toward = std::atan2(u, v) * 180.0 / kPi;
     if (toward < 0.0) toward += 360.0;
-    values.Add(wxString::Format("Current %.2f kt → %03.0f°", knots, toward));
+    current_value->SetLabel(
+        speed_value(std::hypot(u, v), current_display.units) +
+        wxString::Format("  %03.0f° toward", toward));
   }
   if (nearest("air-temperature", &value)) {
-    if (value > 150.0) value -= 273.15;
-    values.Add(wxString::Format("Air %.1f °C", value));
+    const double celsius = TemperatureCelsius(value);
+    temperature_value->SetLabel(
+        temperature_display.units == 1
+            ? wxString::Format("%.1f °F", celsius * 9.0 / 5.0 + 32.0)
+            : wxString::Format("%.1f °C", celsius));
   }
-  cursor_status->SetLabel(values.empty() ? "No decoded data near cursor"
-                                         : wxJoin(values, ' '));
+  cursor_status->SetLabel(wxString::Format(
+      "Cursor %.4f° %c  %.4f° %c — model output; not navigation-authoritative",
+      std::abs(cursor_latitude), cursor_latitude >= 0 ? 'N' : 'S',
+      std::abs(cursor_longitude), cursor_longitude >= 0 ? 'E' : 'W'));
+  if (frame) frame->Layout();
 }
 
 bool PortableGribHost::Impl::Render(ocpnDC& dc, const ViewPort& viewport) {
   if (fields.empty()) return false;
   bool rendered = false;
   ViewPort projection = viewport;
+
+  auto vector_samples = [&](const wxString& u_name, const wxString& v_name) {
+    std::vector<Sample> output;
+    const auto u = fields.find(u_name);
+    const auto v = fields.find(v_name);
+    if (u == fields.end() || v == fields.end()) return output;
+    const size_t count = std::min(u->second.size(), v->second.size());
+    output.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+      const auto& us = u->second[i];
+      const auto& vs = v->second[i];
+      if (std::abs(us.latitude - vs.latitude) <= 0.001 &&
+          std::abs(us.longitude - vs.longitude) <= 0.001)
+        output.push_back(
+            {us.latitude, us.longitude, std::hypot(us.value, vs.value)});
+    }
+    return output;
+  };
+
+  auto draw_wind_barb = [&](const wxPoint& origin, double u, double v,
+                            bool southern_hemisphere, const wxColour& colour) {
+    const double speed = std::hypot(u, v);
+    const double knots = speed * 1.94384449;
+    dc.SetPen(wxPen(colour, 2, wxPENSTYLE_SOLID));
+    dc.SetBrush(wxBrush(colour));
+    if (knots < 2.5) {
+      dc.SetBrush(*wxTRANSPARENT_BRUSH);
+      dc.DrawCircle(origin, 4);
+      return;
+    }
+    // The staff points into the direction from which the wind arrives.
+    const double staff_x = -u / speed;
+    const double staff_y = v / speed;
+    const double hemisphere = southern_hemisphere ? -1.0 : 1.0;
+    const double perpendicular_x = -staff_y * hemisphere;
+    const double perpendicular_y = staff_x * hemisphere;
+    constexpr double length = 28.0;
+    const wxPoint tip(
+        origin.x + static_cast<int>(std::lround(staff_x * length)),
+        origin.y + static_cast<int>(std::lround(staff_y * length)));
+    dc.DrawLine(origin.x, origin.y, tip.x, tip.y);
+    int remaining = static_cast<int>(std::floor((knots + 2.5) / 5.0)) * 5;
+    double offset = 0.0;
+    while (remaining >= 50) {
+      const wxPoint first(
+          tip.x - static_cast<int>(std::lround(staff_x * offset)),
+          tip.y - static_cast<int>(std::lround(staff_y * offset)));
+      const wxPoint second(
+          tip.x - static_cast<int>(std::lround(staff_x * (offset + 6.0))),
+          tip.y - static_cast<int>(std::lround(staff_y * (offset + 6.0))));
+      wxPoint triangle[3] = {
+          first, second,
+          wxPoint(first.x + static_cast<int>(std::lround(
+                                perpendicular_x * 12.0 + staff_x * 4.0)),
+                  first.y + static_cast<int>(std::lround(
+                                perpendicular_y * 12.0 + staff_y * 4.0)))};
+      dc.DrawPolygon(3, triangle);
+      remaining -= 50;
+      offset += 8.0;
+    }
+    while (remaining >= 10) {
+      const wxPoint base(
+          tip.x - static_cast<int>(std::lround(staff_x * offset)),
+          tip.y - static_cast<int>(std::lround(staff_y * offset)));
+      dc.DrawLine(base.x, base.y,
+                  base.x + static_cast<int>(std::lround(perpendicular_x * 12.0 +
+                                                        staff_x * 4.0)),
+                  base.y + static_cast<int>(std::lround(perpendicular_y * 12.0 +
+                                                        staff_y * 4.0)));
+      remaining -= 10;
+      offset += 5.0;
+    }
+    if (remaining >= 5) {
+      const wxPoint base(
+          tip.x - static_cast<int>(std::lround(staff_x * (offset + 2.0))),
+          tip.y - static_cast<int>(std::lround(staff_y * (offset + 2.0))));
+      dc.DrawLine(base.x, base.y,
+                  base.x + static_cast<int>(std::lround(perpendicular_x * 7.0 +
+                                                        staff_x * 2.5)),
+                  base.y + static_cast<int>(std::lround(perpendicular_y * 7.0 +
+                                                        staff_y * 2.5)));
+    }
+  };
+
   auto draw_vectors = [&](const wxString& u_name, const wxString& v_name,
-                          const wxColour& colour, bool enabled) {
+                          const wxColour& colour, bool enabled,
+                          const LayerDisplaySettings& settings,
+                          bool meteorological) {
     if (!enabled) return;
     const auto u = fields.find(u_name);
     const auto v = fields.find(v_name);
@@ -1391,51 +1752,47 @@ bool PortableGribHost::Impl::Render(ocpnDC& dc, const ViewPort& viewport) {
         continue;
       const double magnitude = std::hypot(us.value, vs.value);
       if (magnitude < 0.01) continue;
-      const double length = std::clamp(7.0 + magnitude * 0.7, 8.0, 28.0);
       const wxPoint origin = projection.GetPixFromLL(us.latitude, us.longitude);
       if (origin.x < 0 || origin.y < 0 || origin.x >= viewport.pix_width ||
           origin.y >= viewport.pix_height)
         continue;
-      const auto cell =
-          std::make_pair(origin.x / vector_spacing, origin.y / vector_spacing);
+      const auto cell = std::make_pair(origin.x / settings.vector_spacing,
+                                       origin.y / settings.vector_spacing);
       if (!occupied.insert(cell).second) continue;
+      if (meteorological && settings.vector_style == 0) {
+        draw_wind_barb(origin, us.value, vs.value, us.latitude < 0.0, colour);
+        rendered = true;
+        continue;
+      }
+      const double length =
+          !meteorological && settings.vector_style != 2
+              ? 22.0
+              : std::clamp(11.0 + magnitude * 1.4, 12.0, 30.0);
       const double dx = us.value / magnitude * length;
       const double dy = -vs.value / magnitude * length;
       const wxPoint tip(origin.x + static_cast<int>(dx),
                         origin.y + static_cast<int>(dy));
       dc.DrawLine(origin.x, origin.y, tip.x, tip.y);
-      if (wind_barbs && u_name == "wind-u") {
-        const int feathers = std::clamp(
-            static_cast<int>(std::lround(magnitude * 1.94384449 / 5.0)), 1, 6);
-        for (int feather = 0; feather < feathers; ++feather) {
-          const double along = 0.25 + feather * 0.11;
-          const int x = tip.x - static_cast<int>(along * dx);
-          const int y = tip.y - static_cast<int>(along * dy);
-          dc.DrawLine(x, y, x - static_cast<int>(0.33 * dx - 0.28 * dy),
-                      y - static_cast<int>(0.33 * dy + 0.28 * dx));
-        }
-      } else {
-        dc.DrawLine(tip.x, tip.y,
-                    tip.x - static_cast<int>(0.35 * dx - 0.25 * dy),
-                    tip.y - static_cast<int>(0.35 * dy + 0.25 * dx));
-        dc.DrawLine(tip.x, tip.y,
-                    tip.x - static_cast<int>(0.35 * dx + 0.25 * dy),
-                    tip.y - static_cast<int>(0.35 * dy - 0.25 * dx));
+      dc.DrawLine(tip.x, tip.y, tip.x - static_cast<int>(0.35 * dx - 0.25 * dy),
+                  tip.y - static_cast<int>(0.35 * dy + 0.25 * dx));
+      dc.DrawLine(tip.x, tip.y, tip.x - static_cast<int>(0.35 * dx + 0.25 * dy),
+                  tip.y - static_cast<int>(0.35 * dy - 0.25 * dx));
+      if (!meteorological && settings.vector_style == 1) {
+        const wxPoint second(tip.x - static_cast<int>(0.30 * dx),
+                             tip.y - static_cast<int>(0.30 * dy));
+        dc.DrawLine(second.x, second.y,
+                    second.x - static_cast<int>(0.30 * dx - 0.22 * dy),
+                    second.y - static_cast<int>(0.30 * dy + 0.22 * dx));
+        dc.DrawLine(second.x, second.y,
+                    second.x - static_cast<int>(0.30 * dx + 0.22 * dy),
+                    second.y - static_cast<int>(0.30 * dy - 0.22 * dx));
       }
+      rendered = true;
     }
-    rendered = count != 0 || rendered;
   };
-  draw_vectors("wind-u", "wind-v", *wxBLACK,
-               show_wind && show_wind->GetValue());
-  draw_vectors("current-u", "current-v", wxColour(150, 90, 15),
-               show_current && show_current->GetValue());
-
-  auto draw_scalar = [&](const wxString& name, bool enabled,
+  auto draw_scalar = [&](const std::vector<Sample>& samples, bool enabled,
                          const wxColour& low, const wxColour& high) {
-    if (!enabled || !scalar_maps) return;
-    const auto found = fields.find(name);
-    if (found == fields.end() || found->second.empty()) return;
-    const auto& samples = found->second;
+    if (!enabled || samples.empty()) return;
     const auto limits =
         std::minmax_element(samples.begin(), samples.end(),
                             [](const Sample& left, const Sample& right) {
@@ -1462,20 +1819,212 @@ bool PortableGribHost::Impl::Render(ocpnDC& dc, const ViewPort& viewport) {
       if (point.x < 0 || point.y < 0 || point.x >= viewport.pix_width ||
           point.y >= viewport.pix_height)
         continue;
-      const auto cell =
-          std::make_pair(point.x / scalar_spacing, point.y / scalar_spacing);
+      const auto cell = std::make_pair(point.x / 18, point.y / 18);
       if (!occupied.insert(cell).second) continue;
-      dc.DrawCircle(point, 4);
+      dc.DrawCircle(point, 10);
     }
     rendered = true;
   };
-  draw_scalar("pressure", show_pressure && show_pressure->GetValue(),
-              wxColour(70, 120, 255), wxColour(220, 50, 50));
-  draw_scalar("wave-height", show_waves && show_waves->GetValue(),
-              wxColour(100, 220, 255), wxColour(20, 30, 170));
-  draw_scalar("air-temperature",
-              show_temperature && show_temperature->GetValue(),
-              wxColour(30, 80, 220), wxColour(250, 80, 30));
+
+  auto field_samples = [&](const wxString& name,
+                           double (*convert)(double) = nullptr) {
+    std::vector<Sample> output;
+    const auto found = fields.find(name);
+    if (found == fields.end()) return output;
+    output = found->second;
+    if (convert)
+      for (auto& sample : output) sample.value = convert(sample.value);
+    return output;
+  };
+  const auto wind_speed = vector_samples("wind-u", "wind-v");
+  const auto current_speed = vector_samples("current-u", "current-v");
+  const auto pressure = field_samples("pressure", PressureHpa);
+  const auto waves = field_samples("wave-height");
+  const auto temperature = field_samples("air-temperature", TemperatureCelsius);
+  auto pale = [](const wxColour& colour) {
+    return wxColour(static_cast<unsigned char>(190 + colour.Red() * 65 / 255),
+                    static_cast<unsigned char>(190 + colour.Green() * 65 / 255),
+                    static_cast<unsigned char>(190 + colour.Blue() * 65 / 255));
+  };
+  draw_scalar(wind_speed,
+              show_wind && show_wind->GetValue() && wind_display.overlay,
+              pale(wind_display.colour), wind_display.colour);
+  draw_scalar(
+      pressure,
+      show_pressure && show_pressure->GetValue() && pressure_display.overlay,
+      pale(pressure_display.colour), pressure_display.colour);
+  draw_scalar(waves,
+              show_waves && show_waves->GetValue() && wave_display.overlay,
+              pale(wave_display.colour), wave_display.colour);
+  draw_scalar(
+      current_speed,
+      show_current && show_current->GetValue() && current_display.overlay,
+      pale(current_display.colour), current_display.colour);
+  draw_scalar(temperature,
+              show_temperature && show_temperature->GetValue() &&
+                  temperature_display.overlay,
+              pale(temperature_display.colour), temperature_display.colour);
+
+  auto convert_display = [](double value, const LayerDisplaySettings& settings,
+                            int kind) {
+    if (kind == 0 || kind == 3) {
+      if (settings.units == 1) return value;
+      if (settings.units == 2) return value * 2.23693629;
+      if (settings.units == 3) return value * 3.6;
+      return value * 1.94384449;
+    }
+    if (kind == 1) {
+      if (settings.units == 1) return value * 0.750061683;
+      if (settings.units == 2) return value * 0.0295299831;
+      return value;
+    }
+    if (kind == 2) return settings.units == 1 ? value * 3.2808399 : value;
+    return settings.units == 1 ? value * 9.0 / 5.0 + 32.0 : value;
+  };
+  auto draw_numbers = [&](const std::vector<Sample>& samples, bool enabled,
+                          const LayerDisplaySettings& settings, int kind) {
+    if (!enabled || samples.empty()) return;
+    dc.SetTextForeground(settings.colour);
+    dc.SetFont(*wxSMALL_FONT);
+    std::set<std::pair<int, int>> occupied;
+    for (const auto& sample : samples) {
+      const wxPoint point =
+          projection.GetPixFromLL(sample.latitude, sample.longitude);
+      if (point.x < 0 || point.y < 0 || point.x >= viewport.pix_width ||
+          point.y >= viewport.pix_height)
+        continue;
+      const auto cell = std::make_pair(point.x / settings.number_spacing,
+                                       point.y / settings.number_spacing);
+      if (!occupied.insert(cell).second) continue;
+      const double value = convert_display(sample.value, settings, kind);
+      const int precision = kind == 1 || kind == 4 ? 1 : 1;
+      dc.DrawText(wxString::Format("%.*f", precision, value), point.x + 3,
+                  point.y + 3);
+      rendered = true;
+    }
+  };
+  draw_numbers(wind_speed,
+               show_wind && show_wind->GetValue() && wind_display.numbers,
+               wind_display, 0);
+  draw_numbers(
+      pressure,
+      show_pressure && show_pressure->GetValue() && pressure_display.numbers,
+      pressure_display, 1);
+  draw_numbers(waves,
+               show_waves && show_waves->GetValue() && wave_display.numbers,
+               wave_display, 2);
+  draw_numbers(
+      current_speed,
+      show_current && show_current->GetValue() && current_display.numbers,
+      current_display, 3);
+  draw_numbers(temperature,
+               show_temperature && show_temperature->GetValue() &&
+                   temperature_display.numbers,
+               temperature_display, 4);
+
+  auto draw_contours = [&](const std::vector<Sample>& samples, bool enabled,
+                           int interval, const wxColour& colour) {
+    if (!enabled || samples.empty() || interval <= 0) return;
+    struct CellValue {
+      double total = 0.0;
+      int count = 0;
+    };
+    constexpr int cell_size = 22;
+    std::map<std::pair<int, int>, CellValue> cells;
+    double minimum = std::numeric_limits<double>::max();
+    double maximum = std::numeric_limits<double>::lowest();
+    for (const auto& sample : samples) {
+      const wxPoint point =
+          projection.GetPixFromLL(sample.latitude, sample.longitude);
+      if (point.x < -cell_size || point.y < -cell_size ||
+          point.x > viewport.pix_width + cell_size ||
+          point.y > viewport.pix_height + cell_size)
+        continue;
+      auto& cell = cells[{point.x / cell_size, point.y / cell_size}];
+      cell.total += sample.value;
+      ++cell.count;
+      minimum = std::min(minimum, sample.value);
+      maximum = std::max(maximum, sample.value);
+    }
+    if (cells.size() < 4 || minimum >= maximum) return;
+    dc.SetPen(wxPen(colour, 2, wxPENSTYLE_SOLID));
+    const double first = std::ceil(minimum / interval) * interval;
+    for (double level = first; level <= maximum; level += interval) {
+      bool labelled = false;
+      for (int y = -1; y <= viewport.pix_height / cell_size; ++y) {
+        for (int x = -1; x <= viewport.pix_width / cell_size; ++x) {
+          const std::pair<int, int> keys[4] = {
+              {x, y}, {x + 1, y}, {x + 1, y + 1}, {x, y + 1}};
+          double values[4];
+          bool complete = true;
+          for (int corner = 0; corner < 4; ++corner) {
+            const auto found = cells.find(keys[corner]);
+            if (found == cells.end() || found->second.count == 0) {
+              complete = false;
+              break;
+            }
+            values[corner] = found->second.total / found->second.count;
+          }
+          if (!complete) continue;
+          const wxPoint points[4] = {{x * cell_size, y * cell_size},
+                                     {(x + 1) * cell_size, y * cell_size},
+                                     {(x + 1) * cell_size, (y + 1) * cell_size},
+                                     {x * cell_size, (y + 1) * cell_size}};
+          std::vector<wxPoint> crossings;
+          for (int edge = 0; edge < 4; ++edge) {
+            const int next = (edge + 1) % 4;
+            if ((values[edge] < level) == (values[next] < level) ||
+                values[edge] == values[next])
+              continue;
+            const double fraction =
+                (level - values[edge]) / (values[next] - values[edge]);
+            crossings.emplace_back(
+                points[edge].x +
+                    static_cast<int>(std::lround(
+                        fraction * (points[next].x - points[edge].x))),
+                points[edge].y +
+                    static_cast<int>(std::lround(
+                        fraction * (points[next].y - points[edge].y))));
+          }
+          if (crossings.size() == 2 || crossings.size() == 4) {
+            dc.DrawLine(crossings[0].x, crossings[0].y, crossings[1].x,
+                        crossings[1].y);
+            if (crossings.size() == 4)
+              dc.DrawLine(crossings[2].x, crossings[2].y, crossings[3].x,
+                          crossings[3].y);
+            if (!labelled && x > 1 && y > 1) {
+              dc.SetTextForeground(colour);
+              dc.SetFont(*wxSMALL_FONT);
+              dc.DrawText(wxString::Format("%.0f", level), crossings[0].x,
+                          crossings[0].y);
+              labelled = true;
+            }
+            rendered = true;
+          }
+        }
+      }
+    }
+  };
+  draw_contours(wind_speed,
+                show_wind && show_wind->GetValue() && wind_display.contours,
+                wind_display.contour_spacing, wind_display.colour);
+  draw_contours(
+      pressure,
+      show_pressure && show_pressure->GetValue() && pressure_display.contours,
+      pressure_display.contour_spacing, pressure_display.colour);
+  draw_contours(temperature,
+                show_temperature && show_temperature->GetValue() &&
+                    temperature_display.contours,
+                temperature_display.contour_spacing,
+                temperature_display.colour);
+  // Vectors are rendered last so translucent scalar maps cannot obscure them.
+  draw_vectors("wind-u", "wind-v", wind_display.colour,
+               show_wind && show_wind->GetValue() && wind_display.vectors,
+               wind_display, true);
+  draw_vectors(
+      "current-u", "current-v", current_display.colour,
+      show_current && show_current->GetValue() && current_display.vectors,
+      current_display, false);
   return rendered;
 }
 

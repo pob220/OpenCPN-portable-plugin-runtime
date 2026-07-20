@@ -20,10 +20,14 @@ default.
   retained geographic overlays, cancellable jobs, environmental viewer,
   chart-coverage batches, host HTTP-to-private-storage and bounded private
   reads. No pointers, wxWidgets objects or graphics handles cross the boundary.
-- Host-rendered declarative iGRIB surface with timeline navigation/playback,
-  chart-cursor values, persistent overlay/playback settings, toggles for
-  wind/current/pressure/waves/temperature, progress/cancellation,
-  open/settings/download/generate actions and native file pickers.
+- Host-rendered declarative iGRIB surface with readable UTC timeline
+  navigation/playback, chart-cursor values, progress/cancellation,
+  open/settings/download/generate actions and native file pickers. Persistent
+  per-field display profiles cover units, vectors, colour overlays, numeric
+  labels, spacing and relevant contours. Wind supports proper meteorological
+  barbs or direction arrows; currents support single, double or
+  magnitude-proportional arrows. Every field has an independently selectable
+  display colour.
 - Standalone ecCodes helper supporting bounded `inspect` and `frame` operations
   with structured result/error JSON and atomic result publication.
 - Environmental generator helper using versioned job/result/progress messages,
@@ -51,7 +55,7 @@ default.
 - Signed package install and replacement preserve executable helper modes and
   retain the previous version in `.rollback`.
 - A 44,865,184-byte real GRIB fixture was decoded as 465 messages, seven
-  supported environmental field groups and 81 forecast times. A conformance
+  supported environmental field groups and 94 forecast times. A conformance
   frame retained 5,960 samples. Timeline playback advanced and overlays
   remained responsive.
 - Malformed input returned a structured `environment-decode-failed` result and
@@ -84,6 +88,12 @@ default.
   Wasm trap was contained and OpenCPN continued operating.
 - Final GUI testing ran with native xGRIB absent from the Test plugin search
   path. iGRIB therefore has no enabled or loadable native xGRIB provider.
+- The installed Test-OpenCPN GUI exposed all 94 forecast steps as readable UTC
+  dates and retained 46,468 first-frame samples. Accessibility inspection
+  verified independent Wind, Pressure, Waves, Current and Air temperature
+  settings pages, five colour selectors, meteorological wind barbs and
+  proportional-current-arrow selection. The display settings survived a
+  close/reopen cycle in the isolated profile.
 
 Measured conformance values for this machine are recorded in
 `conformance-linux-x86_64.md`. Values are observations, not release budgets.
@@ -97,9 +107,9 @@ Measured conformance values for this machine are recorded in
   multi-target archive requires the central build service to add all signed
   target helpers; the Wasm component itself is unchanged across targets.
 - The UI is an xGRIB-style functional surface with the core bundled-GRIB
-  workflow, not a pixel-for-pixel port of every xGRIB preference, contour
-  option or provider dialog. Broader parity should be incremental, not an
-  expansion of the WIT boundary into wxWidgets.
+  display workflow, not a pixel-for-pixel port of every xGRIB preference,
+  particle-map mode or provider dialog. Broader parity should be incremental,
+  not an expansion of the WIT boundary into wxWidgets.
 - Chart coverage batching is real, but structured land/depth/drying/conflict
   safety evidence and route-shaped immutable caches are not yet implemented.
 - Production catalogue/TUF metadata, revocation, user permission-consent UI,
