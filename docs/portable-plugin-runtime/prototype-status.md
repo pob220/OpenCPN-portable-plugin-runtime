@@ -140,6 +140,12 @@ default.
   Atlantic point (water). Current and wave rendering/readouts are suppressed
   at classified land points; this display mask is explicitly not a
   hydrographic or navigation-safety result.
+- Routing frame decoding now uses a headless `posix_spawn`/`waitpid` path from
+  compute workers. It does not call synchronous `wxExecute`, which enters
+  `wxWindowDisabler` and GTK from the wrong thread in a wxGUI application.
+  The portable request also carries independent optional minimum and maximum
+  true-wind limits, validated by the host before dispatch and enforced by the
+  component during state expansion.
 
 Measured conformance values for this machine are recorded in
 `conformance-linux-x86_64.md`. Values are observations, not release budgets.

@@ -145,6 +145,9 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
                 .wind_u_knots
                 .unwrap_or(0.0)
                 .hypot(env.wind_v_knots.unwrap_or(0.0));
+            if request.min_wind_knots.is_some_and(|limit| wind < limit) {
+                continue;
+            }
             if request.max_wind_knots.is_some_and(|limit| wind > limit) {
                 continue;
             }

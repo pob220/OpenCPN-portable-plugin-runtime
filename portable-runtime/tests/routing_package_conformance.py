@@ -74,6 +74,8 @@ def main():
             "polar-reference-speed",
             "environment-provider",
             "avoid-unsafe",
+            "minimum-wind",
+            "maximum-wind",
             "compare-departures",
             "departure-window",
             "route-metrics",

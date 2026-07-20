@@ -8,6 +8,10 @@ route overlays. Forward departure comparisons run in up to four isolated
 Wasmtime Stores. Results are planning aids and are not
 navigation-authoritative.
 
+The vessel/safety surface supports independent optional minimum and maximum
+true-wind limits, plus a maximum significant-wave-height limit. Invalid ranges
+are rejected by the host before a portable route job starts.
+
 The host-rendered route form can resolve start and destination values from the
 live vessel position, OpenCPN waypoints (copied as stable GUID/name/coordinate
 records), the latest chart cursor position, or manually entered coordinates.

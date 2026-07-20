@@ -5,15 +5,25 @@
 #include "portable_grib_host.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <list>
 #include <map>
 #include <mutex>
 #include <set>
+#include <string>
 #include <utility>
 #include <vector>
+
+#if defined(__linux__)
+#include <spawn.h>
+#include <sys/wait.h>
+
+extern char** environ;
+#endif
 
 #include <wx/button.h>
 #include <wx/checkbox.h>
@@ -274,6 +284,68 @@ wxString MakeResultPath(const wxString& directory, const wxString& operation) {
   return directory + wxFILE_SEP_PATH +
          wxString::Format("%s-%lld.json", operation,
                           static_cast<long long>(ticks));
+}
+
+// wxExecute(wxEXEC_SYNC) uses wxGUIAppTraits in a GUI application. When it is
+// called by a routing worker this enters wxWindowDisabler and GTK from the
+// wrong thread. Routing helpers are already wrapped by prlimit and bubblewrap;
+// launch that argv directly without involving wxWidgets' GUI process layer.
+bool RunHeadlessProcess(const std::vector<wxString>& arguments, long* exit_code,
+                        wxString* error) {
+#if defined(__linux__)
+  if (arguments.empty() || !exit_code) {
+    if (error) *error = "invalid headless helper command";
+    return false;
+  }
+  std::vector<std::string> encoded;
+  encoded.reserve(arguments.size());
+  for (const auto& argument : arguments) {
+    const wxScopedCharBuffer utf8 = argument.ToUTF8();
+    if (!utf8.data()) {
+      if (error) *error = "helper argument is not valid UTF-8";
+      return false;
+    }
+    encoded.emplace_back(utf8.data());
+  }
+  std::vector<char*> argv;
+  argv.reserve(encoded.size() + 1);
+  for (auto& argument : encoded) argv.push_back(argument.data());
+  argv.push_back(nullptr);
+
+  pid_t child = -1;
+  const int spawn_error =
+      posix_spawn(&child, argv.front(), nullptr, nullptr, argv.data(), environ);
+  if (spawn_error != 0) {
+    if (error)
+      *error = "could not start supervised decoder: " +
+               wxString::FromUTF8(std::strerror(spawn_error));
+    return false;
+  }
+  int status = 0;
+  pid_t waited = -1;
+  do {
+    waited = waitpid(child, &status, 0);
+  } while (waited < 0 && errno == EINTR);
+  if (waited != child) {
+    if (error)
+      *error = "could not wait for supervised decoder: " +
+               wxString::FromUTF8(std::strerror(errno));
+    return false;
+  }
+  if (WIFEXITED(status))
+    *exit_code = WEXITSTATUS(status);
+  else if (WIFSIGNALED(status))
+    *exit_code = 128 + WTERMSIG(status);
+  else
+    *exit_code = -1;
+  return true;
+#else
+  static_cast<void>(arguments);
+  static_cast<void>(exit_code);
+  if (error)
+    *error = "headless helper supervision is not implemented for this host";
+  return false;
+#endif
 }
 
 void AddRow(wxFlexGridSizer* grid, wxWindow* parent, const wxString& label,
@@ -1359,12 +1431,8 @@ bool PortableGribHost::Impl::DecodeRoutingFrame(
     HelperSupervisionAvailable(error);
     return false;
   }
-  std::vector<const wchar_t*> argv;
-  argv.reserve(arguments.size() + 1);
-  for (const auto& argument : arguments) argv.push_back(argument.wc_str());
-  argv.push_back(nullptr);
-  const long exit_code =
-      wxExecute(argv.data(), wxEXEC_SYNC | wxEXEC_HIDE_CONSOLE);
+  long exit_code = -1;
+  if (!RunHeadlessProcess(arguments, &exit_code, error)) return false;
   wxJSONValue value;
   const bool read = ReadJson(result, &value, error);
   if (wxFileExists(result)) wxRemoveFile(result);

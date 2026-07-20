@@ -97,6 +97,7 @@ pub struct RouteRequest {
     avoid_unsafe_charts: u8,
     max_wind_knots: f64,
     max_wave_metres: f64,
+    min_wind_knots: f64,
     limits_available: u32,
 }
 
@@ -1066,6 +1067,7 @@ pub unsafe extern "C" fn ocpn_portable_runtime_calculate_route(
             max_hours: request.max_hours,
             max_states: request.max_states,
             avoid_unsafe_charts: request.avoid_unsafe_charts != 0,
+            min_wind_knots: (request.limits_available & 4 != 0).then_some(request.min_wind_knots),
             max_wind_knots: (request.limits_available & 1 != 0).then_some(request.max_wind_knots),
             max_wave_metres: (request.limits_available & 2 != 0).then_some(request.max_wave_metres),
         };

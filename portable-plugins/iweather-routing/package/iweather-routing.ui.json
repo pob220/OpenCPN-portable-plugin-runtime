@@ -17,6 +17,7 @@
     {"id": "polar-reference-speed", "tab": "Route and weather", "type": "number", "label": "Estimated polar speed at 15 kt wind"},
     {"id": "environment-provider", "tab": "Route and weather", "type": "status", "label": "Environmental provider"},
     {"id": "avoid-unsafe", "tab": "Vessel and safety", "type": "toggle", "label": "Reject unsafe or uncovered chart segments"},
+    {"id": "minimum-wind", "tab": "Vessel and safety", "type": "optional-number", "label": "Minimum true wind (kt)"},
     {"id": "maximum-wind", "tab": "Vessel and safety", "type": "optional-number", "label": "Maximum true wind (kt)"},
     {"id": "maximum-wave", "tab": "Vessel and safety", "type": "optional-number", "label": "Maximum significant wave height (m)"},
     {"id": "time-step", "tab": "Advanced", "type": "integer", "label": "Time step (seconds)"},

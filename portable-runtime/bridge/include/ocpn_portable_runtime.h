@@ -65,7 +65,8 @@ typedef struct ocpn_portable_route_request {
   uint8_t avoid_unsafe_charts;
   double max_wind_knots;
   double max_wave_metres;
-  uint32_t limits_available; /* bit 0 wind, bit 1 waves */
+  double min_wind_knots;
+  uint32_t limits_available; /* bit 0 max wind, bit 1 waves, bit 2 min wind */
 } ocpn_portable_route_request;
 
 typedef struct ocpn_portable_route_point {

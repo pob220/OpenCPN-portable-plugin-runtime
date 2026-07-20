@@ -100,6 +100,7 @@ bool LoadSurface(const wxString& package_root, wxString* title,
                                                 "polar-reference-speed",
                                                 "environment-provider",
                                                 "avoid-unsafe",
+                                                "minimum-wind",
                                                 "maximum-wind",
                                                 "maximum-wave",
                                                 "time-step",
@@ -224,9 +225,10 @@ private:
   wxSpinCtrl *time_step = nullptr, *heading_step = nullptr,
              *max_hours = nullptr, *max_states = nullptr,
              *departure_window = nullptr, *departure_spacing = nullptr;
-  wxCheckBox *avoid_land = nullptr, *limit_wind = nullptr,
-             *limit_waves = nullptr, *compare_departures = nullptr;
-  wxTextCtrl *max_wind = nullptr, *max_wave = nullptr;
+  wxCheckBox *avoid_land = nullptr, *limit_min_wind = nullptr,
+             *limit_wind = nullptr, *limit_waves = nullptr,
+             *compare_departures = nullptr;
+  wxTextCtrl *min_wind = nullptr, *max_wind = nullptr, *max_wave = nullptr;
   wxStaticText *provider = nullptr, *status = nullptr, *metrics = nullptr;
   wxGauge* gauge = nullptr;
   wxButton *calculate = nullptr, *cancel = nullptr, *export_gpx = nullptr;
@@ -431,6 +433,9 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateSafetyPanel(wxNotebook* book) {
   auto* root = new wxBoxSizer(wxVERTICAL);
   avoid_land = new wxCheckBox(panel, wxID_ANY, Label("avoid-unsafe"));
   avoid_land->SetValue(true);
+  limit_min_wind = new wxCheckBox(panel, wxID_ANY, Label("minimum-wind"));
+  limit_min_wind->SetValue(false);
+  min_wind = new wxTextCtrl(panel, wxID_ANY, "2");
   limit_wind = new wxCheckBox(panel, wxID_ANY, Label("maximum-wind"));
   limit_wind->SetValue(true);
   max_wind = new wxTextCtrl(panel, wxID_ANY, "35");
@@ -439,6 +444,8 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateSafetyPanel(wxNotebook* book) {
   max_wave = new wxTextCtrl(panel, wxID_ANY, "4.0");
   auto* grid = new wxFlexGridSizer(2, 8, 8);
   grid->AddGrowableCol(1);
+  grid->Add(limit_min_wind, 0, wxALIGN_CENTER_VERTICAL);
+  grid->Add(min_wind, 1, wxEXPAND);
   grid->Add(limit_wind, 0, wxALIGN_CENTER_VERTICAL);
   grid->Add(max_wind, 1, wxEXPAND);
   grid->Add(limit_waves, 0, wxALIGN_CENTER_VERTICAL);
@@ -596,10 +603,30 @@ void PortableWeatherRoutingHost::Impl::Start() {
   request.max_hours = max_hours->GetValue();
   request.max_states = max_states->GetValue();
   request.avoid_unsafe_charts = avoid_land->GetValue();
-  if (limit_wind->GetValue() && Number(max_wind, &request.max_wind_knots))
-    request.limits_available |= 1;
-  if (limit_waves->GetValue() && Number(max_wave, &request.max_wave_metres))
-    request.limits_available |= 2;
+  if (limit_min_wind->GetValue() &&
+      (!Number(min_wind, &request.min_wind_knots) ||
+       request.min_wind_knots < 0.0)) {
+    status->SetLabel("Minimum true wind must be a non-negative number");
+    return;
+  }
+  if (limit_wind->GetValue() && (!Number(max_wind, &request.max_wind_knots) ||
+                                 request.max_wind_knots < 0.0)) {
+    status->SetLabel("Maximum true wind must be a non-negative number");
+    return;
+  }
+  if (limit_min_wind->GetValue() && limit_wind->GetValue() &&
+      request.min_wind_knots > request.max_wind_knots) {
+    status->SetLabel("Minimum true wind cannot exceed maximum true wind");
+    return;
+  }
+  if (limit_waves->GetValue() && (!Number(max_wave, &request.max_wave_metres) ||
+                                  request.max_wave_metres < 0.0)) {
+    status->SetLabel("Maximum wave height must be a non-negative number");
+    return;
+  }
+  if (limit_min_wind->GetValue()) request.limits_available |= 4;
+  if (limit_wind->GetValue()) request.limits_available |= 1;
+  if (limit_waves->GetValue()) request.limits_available |= 2;
   const unsigned run_count =
       compare_departures->GetValue()
           ? static_cast<unsigned>(departure_window->GetValue() /

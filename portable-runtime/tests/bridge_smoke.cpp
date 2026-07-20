@@ -361,7 +361,7 @@ bool RoutingLifecycle(const char* component_path) {
        state.weather_routing_opened;
   ocpn_portable_route_request request{50.0, -4.0, 50.05, -3.95, 1780000000,
                                       7.0,  3600, 15,    24,    10000,
-                                      1,    35.0, 4.0,   3};
+                                      1,    35.0, 4.0,   2.0,   7};
   std::vector<ocpn_portable_route_point> points(1000);
   char diagnostic[4096] = {};
   ocpn_portable_route_result result{
@@ -374,6 +374,18 @@ bool RoutingLifecycle(const char* component_path) {
   ok = ok && result.point_count >= 2 && result.states_examined > 0 &&
        result.duration_seconds > 0 && result.diagnostic_len > 0 &&
        state.routing_progress_events > 0;
+
+  // The minimum and maximum wind bounds are independent option values in the
+  // portable request. An unrealistically high minimum must exhaust the search
+  // with a structured guest error rather than being ignored.
+  auto rejected_request = request;
+  rejected_request.min_wind_knots = 100.0;
+  rejected_request.limits_available |= 4;
+  std::memset(error, 0, sizeof(error));
+  const int32_t rejected = ocpn_portable_runtime_calculate_route(
+      runtime, &rejected_request, &result, error, sizeof(error));
+  ok = ok && rejected != 0 &&
+       std::strstr(error, "environmental limits") != nullptr;
 
   // Compute replicas share the compiled component and explicit host
   // capabilities, but own an independent Wasmtime Store. They do not repeat
