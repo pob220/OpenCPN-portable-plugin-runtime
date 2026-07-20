@@ -141,6 +141,11 @@ Use non-critical sample data and record each result:
 2. Open a valid GRIB and verify its forecast times appear.
 3. Toggle wind, pressure, waves, current and air-temperature layers. Move the
    chart cursor and verify that decoded values are shown in the iGRIB window.
+   Wave readouts include significant height, peak period and direction when
+   these fields are present. Some products publish waves every three hours
+   among hourly weather/current records; on an intervening timeline step,
+   verify that waves remain visible and iGRIB names the wave source time in its
+   status line.
 4. Open **Settings**. Exercise the separate Wind, Pressure, Waves, Current and
    Air temperature pages. Change units, each field's display colour, vectors,
    colour overlay, values, spacing and the available contour controls. Verify
@@ -148,8 +153,10 @@ Use non-critical sample data and record each result:
    proportional current arrow forms. For proportional arrows, adjust both the
    baseline size and pixels-per-knot growth; verify that weaker currents remain
    smaller than stronger currents and that spacing remains independently
-   adjustable. Also change opacity, playback speed and timeline looping, then
-   verify that all choices survive closing and reopening iGRIB.
+   adjustable. Currents default to arrows only; the optional current colour
+   overlay can be enabled deliberately if a magnitude map is wanted. Also
+   change opacity, playback speed and timeline looping, then verify that all
+   choices survive closing and reopening iGRIB.
 5. Step forward/backward and run timeline playback.
 6. Open **Generate GRIB**, request a very small GFS area and one or two time
    steps, select **Copernicus Marine North-West Shelf** currents, and enter a

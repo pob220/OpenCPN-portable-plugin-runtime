@@ -1,6 +1,6 @@
 # iGRIB conformance report: Linux x86-64
 
-Date: 2026-07-19
+Date: 2026-07-20
 
 Host: Linux 6.18.37-1-lts, x86-64, glibc 2.43. OpenCPN: isolated
 Test-OpenCPN 5.14.0 experimental build. Target identifier:
@@ -21,11 +21,11 @@ python3 portable-runtime/tests/conformance.py \
 |---|---:|---|
 | signed package verification/fresh install | pass | development Ed25519 key; complete digest inventory |
 | exact target helper selection | pass | `linux-gnu-x86_64` |
-| malformed input containment | pass | 4.076 ms; structured failure |
-| generator protocol negotiation | pass | schema 1; 9.586 ms |
-| real fixture inspection | pass | 186.103 ms; 44,821,471 bytes; 387 messages; 67 times |
-| first frame decode | pass | 185.944 ms; 5,960 retained samples |
-| real generator output | pass | 283.951 ms; validated 44,821,471-byte output using existing-file provider |
+| malformed input containment | pass | 4.498 ms; structured failure |
+| generator protocol negotiation | pass | schema 1; 8.029 ms |
+| real fixture inspection | pass | 249.251 ms; 44,865,184 bytes; 465 messages; 84 times |
+| first frame decode | pass | 467.954 ms; 7,760 retained samples |
+| real generator output | pass | 342.396 ms; validated 44,865,184-byte output using existing-file provider |
 
 These timings are one conformance observation, not statistically useful
 benchmarks. Run the repetition/percentile plan in `performance-plan.md` before
@@ -37,8 +37,12 @@ choosing service budgets.
   path.
 - The accessible UI exposed file/timeline/playback, five environmental layer
   toggles, settings, download, generation, progress and cancellation.
-- The 44.8 MB fixture opened through the native picker and rendered the first
-  retained frame; playback advanced to the next forecast time.
+- The 44.8 MB fixture opened through the native picker and rendered retained
+  frames. At the hourly 19:00 step, iGRIB retained 62,910 samples and reported
+  that the product's three-hourly wave height, peak period and direction fields
+  came from 18:00. Playback advanced to the next forecast time.
+- Existing display preferences migrated to current arrows without scalar
+  circles by default; the optional magnitude overlay remains user-selectable.
 - One batched request evaluated four chart-coverage segments.
 - The host HTTP test fetched 7,655 bytes and read them through plugin-private
   storage.

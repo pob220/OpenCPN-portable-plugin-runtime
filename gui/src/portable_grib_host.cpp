@@ -312,6 +312,7 @@ private:
   std::vector<wxString> times;
   std::map<wxString, std::vector<Sample>> fields;
   std::map<wxString, wxString> field_units;
+  std::map<wxString, wxString> field_source_times;
   double cursor_latitude = 0.0;
   double cursor_longitude = 0.0;
   bool have_cursor = false;
@@ -324,7 +325,7 @@ private:
   LayerDisplaySettings wave_display{
       0, false, true, false, false, 44, 70, 1, 0, wxColour(0, 180, 210)};
   LayerDisplaySettings current_display{
-      0, true, true, false, false, 44, 70, 1, 2, wxColour(30, 90, 220)};
+      0, true, false, false, false, 44, 70, 1, 2, wxColour(30, 90, 220)};
   LayerDisplaySettings temperature_display{
       0, false, true, false, false, 44, 70, 2, 0, wxColour(220, 65, 35)};
   int overlay_opacity = 145;
@@ -495,6 +496,8 @@ void PortableGribHost::Impl::CreateFrame() {
 void PortableGribHost::Impl::LoadSettings() {
   const wxString old_path = pConfig->GetPath();
   pConfig->SetPath("/PortablePlugins/org.opencpn.igrib/Display");
+  const long display_settings_schema =
+      pConfig->ReadLong("displaySettingsSchema", 1);
   wind_barbs = pConfig->ReadBool("windBarbs", true);
   loop_playback = pConfig->ReadBool("loopPlayback", true);
   const int legacy_vector_spacing =
@@ -541,8 +544,12 @@ void PortableGribHost::Impl::LoadSettings() {
     wind_display.vector_style = wind_barbs ? 0 : 1;
   if (!pConfig->HasEntry("WaveOverlay"))
     wave_display.overlay = legacy_scalar_maps;
-  if (!pConfig->HasEntry("CurrentOverlay"))
-    current_display.overlay = legacy_scalar_maps;
+  if (display_settings_schema < 2) {
+    current_display.overlay = false;
+    pConfig->Write("CurrentOverlay", false);
+    pConfig->Write("displaySettingsSchema", 2L);
+    pConfig->Flush();
+  }
   if (!pConfig->HasEntry("TemperatureOverlay"))
     temperature_display.overlay = legacy_scalar_maps;
   overlay_opacity =
@@ -557,6 +564,7 @@ void PortableGribHost::Impl::SaveSettings() {
   pConfig->SetPath("/PortablePlugins/org.opencpn.igrib/Display");
   pConfig->Write("windBarbs", wind_barbs);
   pConfig->Write("loopPlayback", loop_playback);
+  pConfig->Write("displaySettingsSchema", 2L);
   auto write_layer = [&](const wxString& name,
                          const LayerDisplaySettings& settings) {
     pConfig->Write(name + "Units", static_cast<long>(settings.units));
@@ -1155,6 +1163,7 @@ void PortableGribHost::Impl::HandleFrame(wxJSONValue& value) {
   }
   fields.clear();
   field_units.clear();
+  field_source_times.clear();
   for (int i = 0; i < value["fields"].Size(); ++i) {
     wxJSONValue field = value["fields"][i];
     if (!field.IsObject() || !field["kind"].IsString() ||
@@ -1163,6 +1172,8 @@ void PortableGribHost::Impl::HandleFrame(wxJSONValue& value) {
     const wxString kind = field["kind"].AsString();
     auto& output = fields[kind];
     field_units[kind] = field["unit"].AsString();
+    if (field["sourceTime"].IsString())
+      field_source_times[kind] = field["sourceTime"].AsString();
     output.reserve(field["samples"].Size());
     for (int j = 0; j < field["samples"].Size(); ++j) {
       wxJSONValue sample = field["samples"][j];
@@ -1175,9 +1186,17 @@ void PortableGribHost::Impl::HandleFrame(wxJSONValue& value) {
         output.push_back({latitude, longitude, sample_value});
     }
   }
-  data_status->SetLabel(wxString::Format(
-      "%s — %d samples retained by OpenCPN (not navigation-authoritative)",
-      FormatGribTime(value["time"].AsString()), value["sampleCount"].AsInt()));
+  wxString source_note;
+  const wxString requested_time = value["time"].AsString();
+  const auto wave_source = field_source_times.find("wave-height");
+  if (wave_source != field_source_times.end() &&
+      wave_source->second != requested_time)
+    source_note = " · waves sampled at " + FormatGribTime(wave_source->second);
+  data_status->SetLabel(
+      wxString::Format(
+          "%s — %d samples retained by OpenCPN (not navigation-authoritative)",
+          FormatGribTime(requested_time), value["sampleCount"].AsInt()) +
+      source_note);
   UpdateCursorStatus();
   if (top_frame::Get()) top_frame::Get()->RefreshAllCanvas(false);
 }
@@ -1672,9 +1691,16 @@ void PortableGribHost::Impl::UpdateCursorStatus() {
       pressure_value->SetLabel(wxString::Format("%.1f hPa", hpa));
   }
   if (nearest("wave-height", &value)) {
-    wave_value->SetLabel(wave_display.units == 1
-                             ? wxString::Format("%.1f ft", value * 3.2808399)
-                             : wxString::Format("%.2f m", value));
+    wxString label = wave_display.units == 1
+                         ? wxString::Format("%.1f ft", value * 3.2808399)
+                         : wxString::Format("%.2f m", value);
+    double period = 0.0;
+    double direction = 0.0;
+    if (nearest("wave-period", &period))
+      label += wxString::Format("  %.1f s", period);
+    if (nearest("wave-direction", &direction))
+      label += wxString::Format("  %03.0f° from", direction);
+    wave_value->SetLabel(label);
   }
   if (nearest("current-u", &u) && nearest("current-v", &v)) {
     double toward = std::atan2(u, v) * 180.0 / kPi;
@@ -2144,6 +2170,7 @@ void PortableGribHost::Impl::Shutdown() {
   }
   fields.clear();
   field_units.clear();
+  field_source_times.clear();
 }
 
 PortableGribHost::PortableGribHost(wxWindow* parent,

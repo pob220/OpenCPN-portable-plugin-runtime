@@ -66,6 +66,35 @@ std::string ValidTime(codes_handle* handle) {
   return result;
 }
 
+long long DaysFromCivil(int year, unsigned month, unsigned day) {
+  year -= month <= 2;
+  const int era = (year >= 0 ? year : year - 399) / 400;
+  const unsigned year_of_era = static_cast<unsigned>(year - era * 400);
+  const unsigned day_of_year =
+      (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+  const unsigned day_of_era =
+      year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+  return static_cast<long long>(era) * 146097 + day_of_era - 719468;
+}
+
+bool TimeMinutes(const std::string& value, long long* result) {
+  if (value.size() != 14 || value[8] != 'T' || value[13] != 'Z') return false;
+  for (size_t i = 0; i < value.size(); ++i) {
+    if (i == 8 || i == 13) continue;
+    if (value[i] < '0' || value[i] > '9') return false;
+  }
+  const int year = std::stoi(value.substr(0, 4));
+  const unsigned month = static_cast<unsigned>(std::stoi(value.substr(4, 2)));
+  const unsigned day = static_cast<unsigned>(std::stoi(value.substr(6, 2)));
+  const int hour = std::stoi(value.substr(9, 2));
+  const int minute = std::stoi(value.substr(11, 2));
+  if (month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 || hour > 23 ||
+      minute < 0 || minute > 59)
+    return false;
+  *result = DaysFromCivil(year, month, day) * 24 * 60 + hour * 60 + minute;
+  return true;
+}
+
 std::string FieldKind(codes_handle* handle) {
   const std::string short_name = GetString(handle, "shortName");
   const long parameter = GetLong(handle, "indicatorOfParameter");
@@ -76,6 +105,8 @@ std::string FieldKind(codes_handle* handle) {
   if (short_name == "msl" || short_name == "prmsl") return "pressure";
   if (short_name == "2t" || short_name == "t2m") return "air-temperature";
   if (short_name == "swh" || short_name == "htsgw") return "wave-height";
+  if (short_name == "perpw") return "wave-period";
+  if (short_name == "dirpw") return "wave-direction";
   return {};
 }
 
@@ -132,15 +163,51 @@ Json::Value DecodeFrame(const std::filesystem::path& path,
                         size_t maximum_points) {
   if (maximum_points < 16 || maximum_points > 100000)
     throw Error("max-points must be between 16 and 100000");
+  long long requested_minutes = 0;
+  if (!TimeMinutes(requested_time, &requested_minutes))
+    throw Error("requested time is invalid");
+  struct NearestTime {
+    std::string value;
+    long long minutes = 0;
+    long long distance = std::numeric_limits<long long>::max();
+  };
+  std::map<std::string, NearestTime> nearest_times;
+  {
+    auto metadata_file = Open(path);
+    size_t metadata_messages = 0;
+    while (auto handle = Next(metadata_file.get())) {
+      if (++metadata_messages > 100000)
+        throw Error("GRIB message limit exceeded");
+      const auto kind = FieldKind(handle.get());
+      if (kind.empty()) continue;
+      const auto time = ValidTime(handle.get());
+      long long minutes = 0;
+      if (!TimeMinutes(time, &minutes)) continue;
+      const long long distance = std::llabs(minutes - requested_minutes);
+      auto& nearest = nearest_times[kind];
+      if (distance < nearest.distance ||
+          (distance == nearest.distance && minutes < nearest.minutes))
+        nearest = {time, minutes, distance};
+    }
+  }
+  // Forecast products commonly publish waves at three-hour intervals while
+  // weather and currents are hourly. Select the closest field-specific frame
+  // within three hours and report its source time rather than silently making
+  // sparse fields disappear from the combined timeline.
+  constexpr long long kMaximumNearestMinutes = 180;
   auto file = Open(path);
   Json::Value fields(Json::arrayValue);
   size_t total_points = 0;
   size_t messages = 0;
   while (auto handle = Next(file.get())) {
     if (++messages > 100000) throw Error("GRIB message limit exceeded");
-    if (ValidTime(handle.get()) != requested_time) continue;
     const auto kind = FieldKind(handle.get());
     if (kind.empty()) continue;
+    const auto nearest = nearest_times.find(kind);
+    if (nearest == nearest_times.end() ||
+        nearest->second.distance > kMaximumNearestMinutes ||
+        ValidTime(handle.get()) != nearest->second.value)
+      continue;
 
     size_t value_count = 0;
     if (codes_get_size(handle.get(), "values", &value_count) != 0 ||
@@ -160,6 +227,9 @@ Json::Value DecodeFrame(const std::filesystem::path& path,
     field["kind"] = kind;
     field["unit"] = GetString(handle.get(), "units");
     field["shortName"] = GetString(handle.get(), "shortName");
+    field["sourceTime"] = nearest->second.value;
+    field["timeOffsetMinutes"] =
+        Json::Int64(nearest->second.minutes - requested_minutes);
     Json::Value samples(Json::arrayValue);
     double latitude = 0.0, longitude = 0.0, value = 0.0;
     size_t index = 0;

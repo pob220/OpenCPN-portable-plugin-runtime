@@ -28,9 +28,14 @@ default.
   barbs or direction arrows; currents support single, double or filled-head,
   tidal-stream-style magnitude-proportional arrows. The proportional baseline
   size and pixels-per-knot growth are independently adjustable from vector
-  spacing. Every field has an independently selectable display colour.
+  spacing. Currents default to arrows without the scalar spot layer, while the
+  magnitude overlay remains an explicit setting. Every field has an
+  independently selectable display colour.
 - Standalone ecCodes helper supporting bounded `inspect` and `frame` operations
-  with structured result/error JSON and atomic result publication.
+  with structured result/error JSON and atomic result publication. Sparse
+  three-hourly wave height/period/direction records are selected within a
+  bounded nearest-frame window on an hourly combined timeline, with their
+  actual source time carried across the boundary and shown by the host.
 - Environmental generator helper using versioned job/result/progress messages,
   GFS and UKMO providers, optional waves and authenticated Copernicus Marine
   North-West Shelf or global current inputs, optional local weather/current
@@ -55,10 +60,12 @@ default.
   and target package/helper conformance.
 - Signed package install and replacement preserve executable helper modes and
   retain the previous version in `.rollback`.
-- A 44,865,184-byte real GRIB fixture was decoded as 465 messages, seven
-  supported environmental field groups and 94 forecast times. A conformance
-  frame retained 5,960 samples. Timeline playback advanced and overlays
-  remained responsive.
+- A 44,865,184-byte real GRIB fixture was decoded as 465 messages, nine
+  supported environmental field groups and 84 forecast times. At its 19:00
+  hourly step, the installed GUI retained 62,910 samples and explicitly
+  reported that its sparse wave height, peak-period and direction records came
+  from 18:00. The bounded conformance frame retained 7,760 samples. Timeline
+  playback advanced and overlays remained responsive.
 - Malformed input returned a structured `environment-decode-failed` result and
   did not affect OpenCPN.
 - The generator helper copied/validated the 44.8 MB fixture under containment
@@ -89,12 +96,13 @@ default.
   Wasm trap was contained and OpenCPN continued operating.
 - Final GUI testing ran with native xGRIB absent from the Test plugin search
   path. iGRIB therefore has no enabled or loadable native xGRIB provider.
-- The installed Test-OpenCPN GUI exposed all 94 forecast steps as readable UTC
+- The installed Test-OpenCPN GUI exposed all 84 forecast steps as readable UTC
   dates and retained 46,468 first-frame samples. Accessibility inspection
   verified independent Wind, Pressure, Waves, Current and Air temperature
   settings pages, five colour selectors, meteorological wind barbs and
-  proportional-current-arrow selection. The display settings survived a
-  close/reopen cycle in the isolated profile.
+  proportional-current-arrow selection. The current display profile migrated
+  to arrow-only defaults without affecting the optional magnitude overlay.
+  The display settings survived a close/reopen cycle in the isolated profile.
 
 Measured conformance values for this machine are recorded in
 `conformance-linux-x86_64.md`. Values are observations, not release budgets.
