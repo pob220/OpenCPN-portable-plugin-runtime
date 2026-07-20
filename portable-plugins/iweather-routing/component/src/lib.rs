@@ -20,6 +20,8 @@ struct Node {
     time: i64,
     parent: Option<usize>,
     sailed_nm: f64,
+    tack: i8,
+    reached_destination: bool,
 }
 
 fn radians(value: f64) -> f64 {
@@ -39,6 +41,81 @@ fn bearing(a_lat: f64, a_lon: f64, b_lat: f64, b_lon: f64) -> f64 {
     let x = radians(a_lat).cos() * radians(b_lat).sin()
         - radians(a_lat).sin() * radians(b_lat).cos() * radians(b_lon - a_lon).cos();
     y.atan2(x).to_degrees().rem_euclid(360.0)
+}
+
+fn angular_difference(first: f64, second: f64) -> f64 {
+    (first - second + 540.0).rem_euclid(360.0) - 180.0
+}
+
+fn true_wind_angle(wind_u: f64, wind_v: f64, heading: f64) -> (f64, i8) {
+    let wind_to = wind_u.atan2(wind_v).to_degrees().rem_euclid(360.0);
+    let wind_from = (wind_to + 180.0).rem_euclid(360.0);
+    let signed = angular_difference(heading, wind_from);
+    (signed.abs(), if signed >= 0.0 { 1 } else { -1 })
+}
+
+struct Motion {
+    east_knots: f64,
+    north_knots: f64,
+    speed_through_water: f64,
+    tack: i8,
+}
+
+fn motion_for_heading(
+    request: &RouteRequest,
+    wind_u: f64,
+    wind_v: f64,
+    current_u: f64,
+    current_v: f64,
+    heading: f64,
+    previous_tack: i8,
+) -> Option<Motion> {
+    let wind = wind_u.hypot(wind_v);
+    let (twa, tack) = true_wind_angle(wind_u, wind_v, heading);
+    if twa + 1e-9 < request.min_true_wind_angle_degrees
+        || twa - 1e-9 > request.max_true_wind_angle_degrees
+    {
+        return None;
+    }
+    let angle_factor = twa.to_radians().sin().abs();
+    let wind_factor = (wind / 15.0).sqrt().clamp(0.2, 1.15);
+    let efficiency = if twa <= 90.0 {
+        request.upwind_efficiency
+    } else {
+        request.downwind_efficiency
+    };
+    let speed = request.boat_speed_knots * wind_factor * (0.32 + 0.68 * angle_factor) * efficiency;
+    let heading_rad = radians(heading);
+    let boat_east = speed * heading_rad.sin();
+    let boat_north = speed * heading_rad.cos();
+    if request
+        .max_apparent_wind_knots
+        .is_some_and(|limit| (wind_u - boat_east).hypot(wind_v - boat_north) > limit)
+    {
+        return None;
+    }
+    let penalty = if previous_tack != 0 && previous_tack != tack {
+        if twa <= 90.0 {
+            request.tack_penalty_seconds
+        } else {
+            request.gybe_penalty_seconds
+        }
+    } else {
+        0
+    };
+    if penalty >= request.time_step_seconds {
+        return None;
+    }
+    // Manoeuvre time reduces progress through the water while current still
+    // acts for the complete forecast step.
+    let moving_fraction =
+        (request.time_step_seconds - penalty) as f64 / request.time_step_seconds as f64;
+    Some(Motion {
+        east_knots: boat_east * moving_fraction + current_u,
+        north_knots: boat_north * moving_fraction + current_v,
+        speed_through_water: speed,
+        tack,
+    })
 }
 
 fn advance(lat: f64, lon: f64, east_knots: f64, north_knots: f64, seconds: u32) -> (f64, f64, f64) {
@@ -80,6 +157,41 @@ fn validate(request: &RouteRequest) -> Result<(), String> {
     {
         return Err("route calculation limits are outside the supported range".into());
     }
+    if !request.min_true_wind_angle_degrees.is_finite()
+        || !request.max_true_wind_angle_degrees.is_finite()
+        || !(0.0..=180.0).contains(&request.min_true_wind_angle_degrees)
+        || !(0.0..=180.0).contains(&request.max_true_wind_angle_degrees)
+        || request.min_true_wind_angle_degrees > request.max_true_wind_angle_degrees
+    {
+        return Err("true-wind-angle bounds must satisfy 0 <= minimum <= maximum <= 180".into());
+    }
+    if !(0.1..=1.5).contains(&request.upwind_efficiency)
+        || !(0.1..=1.5).contains(&request.downwind_efficiency)
+        || !(30.0..=180.0).contains(&request.maximum_search_angle_degrees)
+        || !(0.05..=20.0).contains(&request.destination_tolerance_nm)
+        || !(1.0..=90.0).contains(&request.maximum_latitude_degrees)
+        || request.require_current_data && !request.use_currents
+        || request.require_wave_data && !request.use_waves
+    {
+        return Err("route vessel, data-policy or search settings are invalid".into());
+    }
+    for limit in [
+        request.max_wind_knots,
+        request.max_apparent_wind_knots,
+        request.max_wave_metres,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !limit.is_finite() || limit < 0.0 {
+            return Err("route environmental limit is invalid".into());
+        }
+    }
+    if request.start_latitude.abs() > request.maximum_latitude_degrees
+        || request.destination_latitude.abs() > request.maximum_latitude_degrees
+    {
+        return Err("route endpoint exceeds the maximum latitude".into());
+    }
     Ok(())
 }
 
@@ -100,11 +212,11 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
         time: request.departure_unix_time,
         parent: None,
         sailed_nm: 0.0,
+        tack: 0,
+        reached_destination: false,
     }];
     let mut frontier = vec![0usize];
     let max_layers = request.max_hours.saturating_mul(3600) / request.time_step_seconds;
-    let reach =
-        (request.boat_speed_knots * request.time_step_seconds as f64 / 3600.0).max(0.5) * 1.25;
     let mut examined = 0u32;
     let mut winner = None;
 
@@ -141,54 +253,103 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
         for (frontier_index, &node_index) in frontier.iter().enumerate() {
             let node = &nodes[node_index];
             let env = &samples[frontier_index];
-            let wind = env
-                .wind_u_knots
-                .unwrap_or(0.0)
-                .hypot(env.wind_v_knots.unwrap_or(0.0));
-            if request.min_wind_knots.is_some_and(|limit| wind < limit) {
+            let (Some(wind_u), Some(wind_v)) = (env.wind_u_knots, env.wind_v_knots) else {
                 continue;
-            }
+            };
+            let wind = wind_u.hypot(wind_v);
             if request.max_wind_knots.is_some_and(|limit| wind > limit) {
                 continue;
             }
-            if request
-                .max_wave_metres
-                .is_some_and(|limit| env.wave_height_metres.is_some_and(|h| h > limit))
-            {
+            if request.use_waves {
+                if request.require_wave_data && env.wave_height_metres.is_none() {
+                    continue;
+                }
+                if request
+                    .max_wave_metres
+                    .is_some_and(|limit| env.wave_height_metres.is_some_and(|h| h > limit))
+                {
+                    continue;
+                }
+            }
+            let current_available = env.current_u_knots.is_some() && env.current_v_knots.is_some();
+            if request.use_currents && request.require_current_data && !current_available {
                 continue;
             }
+            let current_u = if request.use_currents {
+                env.current_u_knots.unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            let current_v = if request.use_currents {
+                env.current_v_knots.unwrap_or(0.0)
+            } else {
+                0.0
+            };
             let target = bearing(
                 node.lat,
                 node.lon,
                 request.destination_latitude,
                 request.destination_longitude,
             );
-            let step = request.heading_step_degrees as i32;
-            for offset in (-90..=90).step_by(step as usize) {
-                let heading = (target + offset as f64).rem_euclid(360.0);
-                let heading_rad = radians(heading);
-                let relative = if wind > 0.1 {
-                    let wind_to = env
-                        .wind_u_knots
-                        .unwrap_or(0.0)
-                        .atan2(env.wind_v_knots.unwrap_or(0.0))
-                        .to_degrees()
-                        .rem_euclid(360.0);
-                    radians((heading - wind_to).rem_euclid(360.0)).sin().abs()
+            let direct_distance = distance_nm(
+                node.lat,
+                node.lon,
+                request.destination_latitude,
+                request.destination_longitude,
+            );
+            if let Some(direct_motion) = motion_for_heading(
+                &request, wind_u, wind_v, current_u, current_v, target, node.tack,
+            ) {
+                let target_rad = radians(target);
+                let progress = direct_motion.east_knots * target_rad.sin()
+                    + direct_motion.north_knots * target_rad.cos();
+                let seconds = if progress > 0.05 {
+                    (direct_distance / progress * 3600.0).ceil() as u32
                 } else {
-                    1.0
+                    u32::MAX
                 };
-                // A conservative estimated polar: the user supplies reference
-                // speed at 15 kt TWS. Both wind strength and true-wind angle
-                // affect speed; close-hauled/dead-downwind performance is
-                // deliberately reduced.
-                let wind_factor = (wind / 15.0).sqrt().clamp(0.2, 1.15);
-                let boat = request.boat_speed_knots * wind_factor * (0.32 + 0.68 * relative);
-                let east = boat * heading_rad.sin() + env.current_u_knots.unwrap_or(0.0);
-                let north = boat * heading_rad.cos() + env.current_v_knots.unwrap_or(0.0);
-                let (lat, lon, sailed) =
-                    advance(node.lat, node.lon, east, north, request.time_step_seconds);
-                if !lat.is_finite() || !lon.is_finite() {
+                if seconds > 0 && seconds <= request.time_step_seconds {
+                    candidates.push(Node {
+                        lat: request.destination_latitude,
+                        lon: request.destination_longitude,
+                        time: node.time + seconds as i64,
+                        parent: Some(node_index),
+                        sailed_nm: node.sailed_nm + direct_distance,
+                        tack: direct_motion.tack,
+                        reached_destination: true,
+                    });
+                    segments.push(GeoSegment {
+                        start: GeoPoint {
+                            latitude: node.lat,
+                            longitude: node.lon,
+                        },
+                        end: GeoPoint {
+                            latitude: request.destination_latitude,
+                            longitude: request.destination_longitude,
+                        },
+                    });
+                }
+            }
+            let step = request.heading_step_degrees as i32;
+            let search = request.maximum_search_angle_degrees.round() as i32;
+            for offset in (-search..=search).step_by(step as usize) {
+                let heading = (target + offset as f64).rem_euclid(360.0);
+                let Some(motion) = motion_for_heading(
+                    &request, wind_u, wind_v, current_u, current_v, heading, node.tack,
+                ) else {
+                    continue;
+                };
+                let (lat, lon, sailed) = advance(
+                    node.lat,
+                    node.lon,
+                    motion.east_knots,
+                    motion.north_knots,
+                    request.time_step_seconds,
+                );
+                if !lat.is_finite()
+                    || !lon.is_finite()
+                    || lat.abs() > request.maximum_latitude_degrees
+                {
                     continue;
                 }
                 candidates.push(Node {
@@ -197,6 +358,8 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
                     time: node.time + request.time_step_seconds as i64,
                     parent: Some(node_index),
                     sailed_nm: node.sailed_nm + sailed,
+                    tack: motion.tack,
+                    reached_destination: false,
                 });
                 segments.push(GeoSegment {
                     start: GeoPoint {
@@ -221,7 +384,7 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
         if request.avoid_unsafe_charts && chart_results.len() != segments.len() {
             return Err("chart service returned the wrong batch length".into());
         }
-        let mut bucketed: HashMap<(i32, i32), (f64, usize)> = HashMap::new();
+        let mut bucketed: HashMap<(i32, i32, i8), (f64, usize)> = HashMap::new();
         for (candidate_index, candidate) in candidates.into_iter().enumerate() {
             examined = examined.saturating_add(1);
             if examined >= request.max_states {
@@ -240,13 +403,14 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
             );
             nodes.push(candidate);
             let index = nodes.len() - 1;
-            if remaining <= reach {
+            if nodes[index].reached_destination || remaining <= request.destination_tolerance_nm {
                 winner = Some(index);
                 break;
             }
             let key = (
                 (nodes[index].lat * 20.0).round() as i32,
                 (nodes[index].lon * 20.0).round() as i32,
+                nodes[index].tack,
             );
             let score = remaining + nodes[index].sailed_nm * 0.04;
             match bucketed.get(&key) {
@@ -285,6 +449,97 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
             request.max_hours, examined
         )
     })?;
+    // Re-sample and independently check the exact delivered final approach.
+    // A search-state constraint must not be treated as proof that the direct
+    // segment subsequently appended to the result is also feasible.
+    let winner_node = &nodes[winner];
+    if winner_node.reached_destination {
+        let mut chain = Vec::new();
+        let mut cursor = Some(winner);
+        while let Some(index) = cursor {
+            let node = &nodes[index];
+            chain.push(RoutePoint {
+                latitude: node.lat,
+                longitude: node.lon,
+                unix_time: node.time,
+            });
+            cursor = node.parent;
+        }
+        chain.reverse();
+        host::routing_progress(100, "Route complete and final approach validated");
+        return Ok(RouteResult {
+            distance_nautical_miles: winner_node.sailed_nm,
+            duration_seconds: (winner_node.time - request.departure_unix_time).max(0) as u64,
+            states_examined: examined,
+            diagnostic: "Adaptive time-layer routing completed using typed iGRIB samples and batched host chart checks. The destination leg was generated and checked inside the search. Model and chart results are advisory, not navigation-authoritative.".into(),
+            points: chain,
+        });
+    }
+    let final_samples = host::environment_sample_batch(&[EnvironmentSampleRequest {
+        latitude: winner_node.lat,
+        longitude: winner_node.lon,
+        unix_time: winner_node.time,
+    }])?;
+    let final_environment = final_samples
+        .first()
+        .ok_or_else(|| "environment provider omitted the final-approach sample".to_string())?;
+    let (Some(final_wind_u), Some(final_wind_v)) = (
+        final_environment.wind_u_knots,
+        final_environment.wind_v_knots,
+    ) else {
+        return Err("final approach has no wind coverage".into());
+    };
+    if request
+        .max_wind_knots
+        .is_some_and(|limit| final_wind_u.hypot(final_wind_v) > limit)
+    {
+        return Err("final approach exceeds the maximum true-wind speed".into());
+    }
+    if request.use_waves {
+        if request.require_wave_data && final_environment.wave_height_metres.is_none() {
+            return Err("final approach has no required wave coverage".into());
+        }
+        if request.max_wave_metres.is_some_and(|limit| {
+            final_environment
+                .wave_height_metres
+                .is_some_and(|height| height > limit)
+        }) {
+            return Err("final approach exceeds the maximum wave height".into());
+        }
+    }
+    let final_current_available =
+        final_environment.current_u_knots.is_some() && final_environment.current_v_knots.is_some();
+    if request.use_currents && request.require_current_data && !final_current_available {
+        return Err("final approach has no required current coverage".into());
+    }
+    let final_current_u = if request.use_currents {
+        final_environment.current_u_knots.unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    let final_current_v = if request.use_currents {
+        final_environment.current_v_knots.unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    let final_heading = bearing(
+        winner_node.lat,
+        winner_node.lon,
+        request.destination_latitude,
+        request.destination_longitude,
+    );
+    let final_motion = motion_for_heading(
+        &request,
+        final_wind_u,
+        final_wind_v,
+        final_current_u,
+        final_current_v,
+        final_heading,
+        winner_node.tack,
+    )
+    .ok_or_else(|| {
+        "final approach violates true-wind-angle, apparent-wind or manoeuvre limits".to_string()
+    })?;
     let mut chain = Vec::new();
     let mut cursor = Some(winner);
     while let Some(index) = cursor {
@@ -303,10 +558,16 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
         request.destination_latitude,
         request.destination_longitude,
     );
-    let final_seconds = ((request.time_step_seconds as f64
-        * (final_distance / reach).clamp(0.0, 1.0))
-    .ceil() as i64)
-        .max(1);
+    let final_heading_rad = radians(final_heading);
+    let final_progress = final_motion.east_knots * final_heading_rad.sin()
+        + final_motion.north_knots * final_heading_rad.cos();
+    if final_progress < 0.05 || !final_motion.speed_through_water.is_finite() {
+        return Err("final approach has no usable vessel progress".into());
+    }
+    let final_seconds = ((final_distance / final_progress * 3600.0).ceil() as i64).max(1);
+    if final_seconds > request.time_step_seconds as i64 {
+        return Err("final approach cannot reach the destination in one routing step".into());
+    }
     let arrival_time = chain
         .last()
         .map(|p| p.unix_time)

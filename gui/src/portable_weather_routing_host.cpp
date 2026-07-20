@@ -23,6 +23,7 @@
 #include <wx/jsonval.h>
 #include <wx/notebook.h>
 #include <wx/panel.h>
+#include <wx/scrolwin.h>
 #include <wx/sizer.h>
 #include <wx/spinctrl.h>
 #include <wx/statline.h>
@@ -33,6 +34,7 @@
 
 #include "ocpn_portable_runtime.h"
 #include "ocpndc.h"
+#include "navutil.h"
 #include "viewport.h"
 
 namespace {
@@ -100,16 +102,30 @@ bool LoadSurface(const wxString& package_root, wxString* title,
                                                 "polar-reference-speed",
                                                 "environment-provider",
                                                 "avoid-unsafe",
-                                                "minimum-wind",
-                                                "maximum-wind",
+                                                "minimum-wind-angle",
+                                                "maximum-wind-angle",
+                                                "maximum-true-wind",
+                                                "maximum-apparent-wind",
                                                 "maximum-wave",
+                                                "use-currents",
+                                                "require-current-data",
+                                                "use-waves",
+                                                "require-wave-data",
+                                                "maximum-latitude",
+                                                "upwind-efficiency",
+                                                "downwind-efficiency",
+                                                "tack-penalty",
+                                                "gybe-penalty",
                                                 "time-step",
                                                 "heading-step",
+                                                "maximum-search-angle",
+                                                "destination-tolerance",
                                                 "maximum-hours",
                                                 "maximum-states",
                                                 "compare-departures",
                                                 "departure-window",
                                                 "departure-spacing",
+                                                "departure-workers",
                                                 "route-metrics",
                                                 "export-gpx",
                                                 "calculate",
@@ -192,6 +208,8 @@ private:
   void RefreshNavigationPositions(bool initial = false);
   bool ApplyPositionSource(bool start, bool report_error = true);
   void UpdatePositionControls(bool start);
+  void LoadSettings();
+  void SaveSettings();
   void Start();
   void Finish(bool success, wxString message, RoutingOutcome selected,
               std::vector<std::vector<ocpn_portable_route_point>> alternatives,
@@ -224,11 +242,19 @@ private:
   wxButton* refresh_positions = nullptr;
   wxSpinCtrl *time_step = nullptr, *heading_step = nullptr,
              *max_hours = nullptr, *max_states = nullptr,
-             *departure_window = nullptr, *departure_spacing = nullptr;
-  wxCheckBox *avoid_land = nullptr, *limit_min_wind = nullptr,
-             *limit_wind = nullptr, *limit_waves = nullptr,
+             *departure_window = nullptr, *departure_spacing = nullptr,
+             *departure_workers = nullptr, *min_wind_angle = nullptr,
+             *max_wind_angle = nullptr, *maximum_latitude = nullptr,
+             *upwind_efficiency = nullptr, *downwind_efficiency = nullptr,
+             *tack_penalty = nullptr, *gybe_penalty = nullptr,
+             *maximum_search_angle = nullptr;
+  wxCheckBox *avoid_land = nullptr, *limit_true_wind = nullptr,
+             *limit_apparent_wind = nullptr, *limit_waves = nullptr,
+             *use_currents = nullptr, *require_current_data = nullptr,
+             *use_waves = nullptr, *require_wave_data = nullptr,
              *compare_departures = nullptr;
-  wxTextCtrl *min_wind = nullptr, *max_wind = nullptr, *max_wave = nullptr;
+  wxTextCtrl *max_true_wind = nullptr, *max_apparent_wind = nullptr,
+             *max_wave = nullptr, *destination_tolerance = nullptr;
   wxStaticText *provider = nullptr, *status = nullptr, *metrics = nullptr;
   wxGauge* gauge = nullptr;
   wxButton *calculate = nullptr, *cancel = nullptr, *export_gpx = nullptr;
@@ -429,28 +455,73 @@ void PortableWeatherRoutingHost::Impl::RefreshNavigationPositions(
 }
 
 wxPanel* PortableWeatherRoutingHost::Impl::CreateSafetyPanel(wxNotebook* book) {
-  auto* panel = new wxPanel(book);
+  auto* panel = new wxScrolledWindow(book);
+  panel->SetScrollRate(0, 12);
   auto* root = new wxBoxSizer(wxVERTICAL);
   avoid_land = new wxCheckBox(panel, wxID_ANY, Label("avoid-unsafe"));
   avoid_land->SetValue(true);
-  limit_min_wind = new wxCheckBox(panel, wxID_ANY, Label("minimum-wind"));
-  limit_min_wind->SetValue(false);
-  min_wind = new wxTextCtrl(panel, wxID_ANY, "2");
-  limit_wind = new wxCheckBox(panel, wxID_ANY, Label("maximum-wind"));
-  limit_wind->SetValue(true);
-  max_wind = new wxTextCtrl(panel, wxID_ANY, "35");
+  min_wind_angle = new wxSpinCtrl(panel, wxID_ANY);
+  min_wind_angle->SetRange(0, 180);
+  min_wind_angle->SetValue(40);
+  max_wind_angle = new wxSpinCtrl(panel, wxID_ANY);
+  max_wind_angle->SetRange(0, 180);
+  max_wind_angle->SetValue(160);
+  limit_true_wind =
+      new wxCheckBox(panel, wxID_ANY, Label("maximum-true-wind"));
+  limit_true_wind->SetValue(true);
+  max_true_wind = new wxTextCtrl(panel, wxID_ANY, "50");
+  limit_apparent_wind =
+      new wxCheckBox(panel, wxID_ANY, Label("maximum-apparent-wind"));
+  limit_apparent_wind->SetValue(true);
+  max_apparent_wind = new wxTextCtrl(panel, wxID_ANY, "50");
   limit_waves = new wxCheckBox(panel, wxID_ANY, Label("maximum-wave"));
   limit_waves->SetValue(true);
-  max_wave = new wxTextCtrl(panel, wxID_ANY, "4.0");
+  max_wave = new wxTextCtrl(panel, wxID_ANY, "8.0");
+  use_currents = new wxCheckBox(panel, wxID_ANY, Label("use-currents"));
+  use_currents->SetValue(true);
+  require_current_data =
+      new wxCheckBox(panel, wxID_ANY, Label("require-current-data"));
+  require_current_data->SetValue(false);
+  use_waves = new wxCheckBox(panel, wxID_ANY, Label("use-waves"));
+  use_waves->SetValue(true);
+  require_wave_data =
+      new wxCheckBox(panel, wxID_ANY, Label("require-wave-data"));
+  require_wave_data->SetValue(true);
+  maximum_latitude = new wxSpinCtrl(panel, wxID_ANY);
+  maximum_latitude->SetRange(1, 90);
+  maximum_latitude->SetValue(89);
+  upwind_efficiency = new wxSpinCtrl(panel, wxID_ANY);
+  upwind_efficiency->SetRange(10, 150);
+  upwind_efficiency->SetValue(100);
+  downwind_efficiency = new wxSpinCtrl(panel, wxID_ANY);
+  downwind_efficiency->SetRange(10, 150);
+  downwind_efficiency->SetValue(100);
+  tack_penalty = new wxSpinCtrl(panel, wxID_ANY);
+  tack_penalty->SetRange(0, 3600);
+  tack_penalty->SetValue(0);
+  gybe_penalty = new wxSpinCtrl(panel, wxID_ANY);
+  gybe_penalty->SetRange(0, 3600);
+  gybe_penalty->SetValue(0);
   auto* grid = new wxFlexGridSizer(2, 8, 8);
   grid->AddGrowableCol(1);
-  grid->Add(limit_min_wind, 0, wxALIGN_CENTER_VERTICAL);
-  grid->Add(min_wind, 1, wxEXPAND);
-  grid->Add(limit_wind, 0, wxALIGN_CENTER_VERTICAL);
-  grid->Add(max_wind, 1, wxEXPAND);
+  AddRow(grid, panel, Label("minimum-wind-angle"), min_wind_angle);
+  AddRow(grid, panel, Label("maximum-wind-angle"), max_wind_angle);
+  grid->Add(limit_true_wind, 0, wxALIGN_CENTER_VERTICAL);
+  grid->Add(max_true_wind, 1, wxEXPAND);
+  grid->Add(limit_apparent_wind, 0, wxALIGN_CENTER_VERTICAL);
+  grid->Add(max_apparent_wind, 1, wxEXPAND);
   grid->Add(limit_waves, 0, wxALIGN_CENTER_VERTICAL);
   grid->Add(max_wave, 1, wxEXPAND);
+  AddRow(grid, panel, Label("maximum-latitude"), maximum_latitude);
+  AddRow(grid, panel, Label("upwind-efficiency"), upwind_efficiency);
+  AddRow(grid, panel, Label("downwind-efficiency"), downwind_efficiency);
+  AddRow(grid, panel, Label("tack-penalty"), tack_penalty);
+  AddRow(grid, panel, Label("gybe-penalty"), gybe_penalty);
   root->Add(avoid_land, 0, wxALL, 12);
+  root->Add(use_currents, 0, wxLEFT | wxRIGHT | wxBOTTOM, 12);
+  root->Add(require_current_data, 0, wxLEFT | wxRIGHT | wxBOTTOM, 28);
+  root->Add(use_waves, 0, wxLEFT | wxRIGHT | wxBOTTOM, 12);
+  root->Add(require_wave_data, 0, wxLEFT | wxRIGHT | wxBOTTOM, 28);
   root->Add(grid, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 12);
   root->Add(new wxStaticText(panel, wxID_ANY,
                              "Safety responses distinguish covered, unsafe, "
@@ -458,6 +529,23 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateSafetyPanel(wxNotebook* book) {
                              "advisory and must be checked by the navigator."),
             0, wxEXPAND | wxALL, 12);
   panel->SetSizer(root);
+  use_currents->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
+    require_current_data->Enable(use_currents->GetValue());
+  });
+  use_waves->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
+    require_wave_data->Enable(use_waves->GetValue());
+    limit_waves->Enable(use_waves->GetValue());
+    max_wave->Enable(use_waves->GetValue() && limit_waves->GetValue());
+  });
+  limit_waves->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
+    max_wave->Enable(use_waves->GetValue() && limit_waves->GetValue());
+  });
+  limit_true_wind->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
+    max_true_wind->Enable(limit_true_wind->GetValue());
+  });
+  limit_apparent_wind->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
+    max_apparent_wind->Enable(limit_apparent_wind->GetValue());
+  });
   return panel;
 }
 
@@ -472,6 +560,10 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateAdvancedPanel(
   heading_step = new wxSpinCtrl(panel, wxID_ANY);
   heading_step->SetRange(5, 45);
   heading_step->SetValue(15);
+  maximum_search_angle = new wxSpinCtrl(panel, wxID_ANY);
+  maximum_search_angle->SetRange(30, 180);
+  maximum_search_angle->SetValue(120);
+  destination_tolerance = new wxTextCtrl(panel, wxID_ANY, "1.0");
   max_hours = new wxSpinCtrl(panel, wxID_ANY);
   max_hours->SetRange(6, 720);
   max_hours->SetValue(120);
@@ -486,18 +578,25 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateAdvancedPanel(
   departure_spacing = new wxSpinCtrl(panel, wxID_ANY);
   departure_spacing->SetRange(1, 12);
   departure_spacing->SetValue(1);
+  departure_workers = new wxSpinCtrl(panel, wxID_ANY);
+  departure_workers->SetRange(1, 8);
+  departure_workers->SetValue(4);
   AddRow(grid, panel, Label("time-step"), time_step);
   AddRow(grid, panel, Label("heading-step"), heading_step);
+  AddRow(grid, panel, Label("maximum-search-angle"), maximum_search_angle);
+  AddRow(grid, panel, Label("destination-tolerance"), destination_tolerance);
   AddRow(grid, panel, Label("maximum-hours"), max_hours);
   AddRow(grid, panel, Label("maximum-states"), max_states);
   AddRow(grid, panel, Label("departure-window"), departure_window);
   AddRow(grid, panel, Label("departure-spacing"), departure_spacing);
+  AddRow(grid, panel, Label("departure-workers"), departure_workers);
   auto* root = new wxBoxSizer(wxVERTICAL);
   root->Add(compare_departures, 0, wxLEFT | wxRIGHT | wxTOP, 12);
   root->Add(grid, 0, wxEXPAND | wxALL, 12);
   root->Add(new wxStaticText(
                 panel, wxID_ANY,
-                "Independent Wasm searches run in parallel (maximum four). "
+                "Independent Wasm searches run in parallel up to the selected "
+                "worker limit. "
                 "The earliest safe arrival is selected; other successful "
                 "routes remain as thin comparison overlays."),
             0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 12);
@@ -522,6 +621,105 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateResultsPanel(
   root->Add(export_gpx, 0, wxALL, 12);
   panel->SetSizer(root);
   return panel;
+}
+
+void PortableWeatherRoutingHost::Impl::LoadSettings() {
+  if (!pConfig) return;
+  const wxString old_path = pConfig->GetPath();
+  pConfig->SetPath("/PortablePlugins/org.opencpn.iweather-routing/Routing");
+  avoid_land->SetValue(pConfig->ReadBool("avoidUnsafeCharts", true));
+  min_wind_angle->SetValue(pConfig->ReadLong("minimumTrueWindAngle", 40));
+  max_wind_angle->SetValue(pConfig->ReadLong("maximumTrueWindAngle", 160));
+  limit_true_wind->SetValue(pConfig->ReadBool("limitTrueWind", true));
+  max_true_wind->SetValue(pConfig->Read("maximumTrueWind", "50"));
+  limit_apparent_wind->SetValue(
+      pConfig->ReadBool("limitApparentWind", true));
+  max_apparent_wind->SetValue(
+      pConfig->Read("maximumApparentWind", "50"));
+  limit_waves->SetValue(pConfig->ReadBool("limitWaves", true));
+  max_wave->SetValue(pConfig->Read("maximumWave", "8.0"));
+  use_currents->SetValue(pConfig->ReadBool("useCurrents", true));
+  require_current_data->SetValue(
+      pConfig->ReadBool("requireCurrentData", false));
+  use_waves->SetValue(pConfig->ReadBool("useWaves", true));
+  require_wave_data->SetValue(pConfig->ReadBool("requireWaveData", true));
+  maximum_latitude->SetValue(pConfig->ReadLong("maximumLatitude", 89));
+  upwind_efficiency->SetValue(pConfig->ReadLong("upwindEfficiency", 100));
+  downwind_efficiency->SetValue(
+      pConfig->ReadLong("downwindEfficiency", 100));
+  tack_penalty->SetValue(pConfig->ReadLong("tackPenaltySeconds", 0));
+  gybe_penalty->SetValue(pConfig->ReadLong("gybePenaltySeconds", 0));
+  time_step->SetValue(pConfig->ReadLong("timeStepSeconds", 3600));
+  heading_step->SetValue(pConfig->ReadLong("headingStepDegrees", 15));
+  maximum_search_angle->SetValue(
+      pConfig->ReadLong("maximumSearchAngleDegrees", 120));
+  destination_tolerance->SetValue(
+      pConfig->Read("destinationToleranceNm", "1.0"));
+  max_hours->SetValue(pConfig->ReadLong("maximumHours", 120));
+  max_states->SetValue(pConfig->ReadLong("maximumStates", 80000));
+  compare_departures->SetValue(
+      pConfig->ReadBool("compareDepartures", false));
+  departure_window->SetValue(pConfig->ReadLong("departureWindowHours", 6));
+  departure_spacing->SetValue(
+      pConfig->ReadLong("departureSpacingHours", 1));
+  departure_workers->SetValue(pConfig->ReadLong("departureWorkers", 4));
+  pConfig->SetPath(old_path);
+
+  require_current_data->Enable(use_currents->GetValue());
+  require_wave_data->Enable(use_waves->GetValue());
+  limit_waves->Enable(use_waves->GetValue());
+  max_wave->Enable(use_waves->GetValue() && limit_waves->GetValue());
+  max_true_wind->Enable(limit_true_wind->GetValue());
+  max_apparent_wind->Enable(limit_apparent_wind->GetValue());
+}
+
+void PortableWeatherRoutingHost::Impl::SaveSettings() {
+  if (!pConfig) return;
+  const wxString old_path = pConfig->GetPath();
+  pConfig->SetPath("/PortablePlugins/org.opencpn.iweather-routing/Routing");
+  pConfig->Write("settingsSchema", 2L);
+  pConfig->Write("avoidUnsafeCharts", avoid_land->GetValue());
+  pConfig->Write("minimumTrueWindAngle",
+                 static_cast<long>(min_wind_angle->GetValue()));
+  pConfig->Write("maximumTrueWindAngle",
+                 static_cast<long>(max_wind_angle->GetValue()));
+  pConfig->Write("limitTrueWind", limit_true_wind->GetValue());
+  pConfig->Write("maximumTrueWind", max_true_wind->GetValue());
+  pConfig->Write("limitApparentWind", limit_apparent_wind->GetValue());
+  pConfig->Write("maximumApparentWind", max_apparent_wind->GetValue());
+  pConfig->Write("limitWaves", limit_waves->GetValue());
+  pConfig->Write("maximumWave", max_wave->GetValue());
+  pConfig->Write("useCurrents", use_currents->GetValue());
+  pConfig->Write("requireCurrentData", require_current_data->GetValue());
+  pConfig->Write("useWaves", use_waves->GetValue());
+  pConfig->Write("requireWaveData", require_wave_data->GetValue());
+  pConfig->Write("maximumLatitude",
+                 static_cast<long>(maximum_latitude->GetValue()));
+  pConfig->Write("upwindEfficiency",
+                 static_cast<long>(upwind_efficiency->GetValue()));
+  pConfig->Write("downwindEfficiency",
+                 static_cast<long>(downwind_efficiency->GetValue()));
+  pConfig->Write("tackPenaltySeconds",
+                 static_cast<long>(tack_penalty->GetValue()));
+  pConfig->Write("gybePenaltySeconds",
+                 static_cast<long>(gybe_penalty->GetValue()));
+  pConfig->Write("timeStepSeconds", static_cast<long>(time_step->GetValue()));
+  pConfig->Write("headingStepDegrees",
+                 static_cast<long>(heading_step->GetValue()));
+  pConfig->Write("maximumSearchAngleDegrees",
+                 static_cast<long>(maximum_search_angle->GetValue()));
+  pConfig->Write("destinationToleranceNm", destination_tolerance->GetValue());
+  pConfig->Write("maximumHours", static_cast<long>(max_hours->GetValue()));
+  pConfig->Write("maximumStates", static_cast<long>(max_states->GetValue()));
+  pConfig->Write("compareDepartures", compare_departures->GetValue());
+  pConfig->Write("departureWindowHours",
+                 static_cast<long>(departure_window->GetValue()));
+  pConfig->Write("departureSpacingHours",
+                 static_cast<long>(departure_spacing->GetValue()));
+  pConfig->Write("departureWorkers",
+                 static_cast<long>(departure_workers->GetValue()));
+  pConfig->SetPath(old_path);
+  pConfig->Flush();
 }
 
 void PortableWeatherRoutingHost::Impl::CreateFrame() {
@@ -556,10 +754,13 @@ void PortableWeatherRoutingHost::Impl::CreateFrame() {
     if (worker.joinable()) {
       cancelled.store(true);
       event.Veto();
-    } else
+    } else {
+      SaveSettings();
       frame->Hide();
+    }
   });
   frame->SetSizer(root);
+  LoadSettings();
   RefreshNavigationPositions(true);
 }
 
@@ -603,30 +804,54 @@ void PortableWeatherRoutingHost::Impl::Start() {
   request.max_hours = max_hours->GetValue();
   request.max_states = max_states->GetValue();
   request.avoid_unsafe_charts = avoid_land->GetValue();
-  if (limit_min_wind->GetValue() &&
-      (!Number(min_wind, &request.min_wind_knots) ||
-       request.min_wind_knots < 0.0)) {
-    status->SetLabel("Minimum true wind must be a non-negative number");
+  request.min_true_wind_angle_degrees = min_wind_angle->GetValue();
+  request.max_true_wind_angle_degrees = max_wind_angle->GetValue();
+  if (request.min_true_wind_angle_degrees >
+      request.max_true_wind_angle_degrees) {
+    status->SetLabel(
+        "Minimum true-wind angle cannot exceed maximum true-wind angle");
     return;
   }
-  if (limit_wind->GetValue() && (!Number(max_wind, &request.max_wind_knots) ||
-                                 request.max_wind_knots < 0.0)) {
-    status->SetLabel("Maximum true wind must be a non-negative number");
+  if (limit_true_wind->GetValue() &&
+      (!Number(max_true_wind, &request.max_wind_knots) ||
+       request.max_wind_knots <= 0.0)) {
+    status->SetLabel("Maximum true-wind speed must be a positive number");
     return;
   }
-  if (limit_min_wind->GetValue() && limit_wind->GetValue() &&
-      request.min_wind_knots > request.max_wind_knots) {
-    status->SetLabel("Minimum true wind cannot exceed maximum true wind");
+  if (limit_apparent_wind->GetValue() &&
+      (!Number(max_apparent_wind, &request.max_apparent_wind_knots) ||
+       request.max_apparent_wind_knots <= 0.0)) {
+    status->SetLabel("Maximum apparent-wind speed must be a positive number");
     return;
   }
-  if (limit_waves->GetValue() && (!Number(max_wave, &request.max_wave_metres) ||
-                                  request.max_wave_metres < 0.0)) {
+  if (use_waves->GetValue() && limit_waves->GetValue() &&
+      (!Number(max_wave, &request.max_wave_metres) ||
+       request.max_wave_metres < 0.0)) {
     status->SetLabel("Maximum wave height must be a non-negative number");
     return;
   }
-  if (limit_min_wind->GetValue()) request.limits_available |= 4;
-  if (limit_wind->GetValue()) request.limits_available |= 1;
-  if (limit_waves->GetValue()) request.limits_available |= 2;
+  if (!Number(destination_tolerance, &request.destination_tolerance_nm) ||
+      request.destination_tolerance_nm < 0.05 ||
+      request.destination_tolerance_nm > 20.0) {
+    status->SetLabel("Destination tolerance must be between 0.05 and 20 NM");
+    return;
+  }
+  request.maximum_latitude_degrees = maximum_latitude->GetValue();
+  request.upwind_efficiency = upwind_efficiency->GetValue() / 100.0;
+  request.downwind_efficiency = downwind_efficiency->GetValue() / 100.0;
+  request.tack_penalty_seconds = tack_penalty->GetValue();
+  request.gybe_penalty_seconds = gybe_penalty->GetValue();
+  request.maximum_search_angle_degrees = maximum_search_angle->GetValue();
+  request.use_currents = use_currents->GetValue();
+  request.require_current_data =
+      use_currents->GetValue() && require_current_data->GetValue();
+  request.use_waves = use_waves->GetValue();
+  request.require_wave_data =
+      use_waves->GetValue() && require_wave_data->GetValue();
+  if (limit_true_wind->GetValue()) request.limits_available |= 1;
+  if (use_waves->GetValue() && limit_waves->GetValue())
+    request.limits_available |= 2;
+  if (limit_apparent_wind->GetValue()) request.limits_available |= 4;
   const unsigned run_count =
       compare_departures->GetValue()
           ? static_cast<unsigned>(departure_window->GetValue() /
@@ -635,6 +860,8 @@ void PortableWeatherRoutingHost::Impl::Start() {
           : 1;
   const int64_t departure_step_seconds =
       static_cast<int64_t>(departure_spacing->GetValue()) * 3600;
+  const unsigned parallel_worker_limit = departure_workers->GetValue();
+  SaveSettings();
   cancelled.store(false);
   calculate->Enable(false);
   cancel->Enable(true);
@@ -645,10 +872,11 @@ void PortableWeatherRoutingHost::Impl::Start() {
   status->SetLabel("Starting portable route engine…");
   departure_runs.store(run_count);
   departures_completed.store(0);
-  worker = std::thread([this, request, run_count, departure_step_seconds] {
+  worker = std::thread([this, request, run_count, departure_step_seconds,
+                        parallel_worker_limit] {
     std::vector<DepartureResult> results(run_count);
     std::atomic<unsigned> next_departure{0};
-    const unsigned parallelism = std::min(4u, run_count);
+    const unsigned parallelism = std::min(parallel_worker_limit, run_count);
     std::vector<std::thread> workers;
     workers.reserve(parallelism);
     for (unsigned worker_index = 0; worker_index < parallelism;
@@ -849,6 +1077,7 @@ void PortableWeatherRoutingHost::Impl::Shutdown() {
   cancelled.store(true);
   if (worker.joinable()) worker.join();
   if (frame) {
+    SaveSettings();
     frame->Destroy();
     frame = nullptr;
   }

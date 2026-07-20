@@ -108,9 +108,22 @@ interface plugin {
     max-hours: u32,
     max-states: u32,
     avoid-unsafe-charts: bool,
-    min-wind-knots: option<f64>,
+    min-true-wind-angle-degrees: f64,
+    max-true-wind-angle-degrees: f64,
     max-wind-knots: option<f64>,
+    max-apparent-wind-knots: option<f64>,
     max-wave-metres: option<f64>,
+    use-currents: bool,
+    require-current-data: bool,
+    use-waves: bool,
+    require-wave-data: bool,
+    maximum-latitude-degrees: f64,
+    upwind-efficiency: f64,
+    downwind-efficiency: f64,
+    tack-penalty-seconds: u32,
+    gybe-penalty-seconds: u32,
+    maximum-search-angle-degrees: f64,
+    destination-tolerance-nm: f64,
   }
 
   record route-point {

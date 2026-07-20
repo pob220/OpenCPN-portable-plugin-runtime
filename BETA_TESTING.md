@@ -223,10 +223,14 @@ After opening or generating a multi-time GRIB in iGRIB, select the
    duration and states examined. The magenta route should appear on the chart.
    The component requests forecast-time/position batches; iGRIB decodes the
    required frames in its bounded sidecar and keeps only a small LRU cache.
-4. Exercise the independent minimum and maximum true-wind limits, including a
-   minimum greater than the maximum (which must be rejected before starting),
-   then tighten the maximum wave limit. A rejected or exhausted search must
-   produce a structured failure without disabling either plugin.
+4. Set minimum and maximum true-wind angles (for example 40° and 160°), then
+   try a minimum greater than the maximum, which must be rejected before the
+   job starts. Exercise the separate true/apparent wind-speed and wave-height
+   limits, current/wave coverage policy, efficiency and manoeuvre controls.
+   A rejected or exhausted search must produce a structured failure without
+   disabling either plugin. Close and reopen the panel, then restart
+   Test-OpenCPN and confirm the settings persist across the application
+   session.
 5. Start a longer calculation and press **Cancel**. Cancellation must return
    control to the UI and OpenCPN must remain operational.
 6. Enable shoreline avoidance and try a route which crosses land. The host's

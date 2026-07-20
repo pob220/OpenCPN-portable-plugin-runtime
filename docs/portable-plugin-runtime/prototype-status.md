@@ -143,9 +143,12 @@ default.
 - Routing frame decoding now uses a headless `posix_spawn`/`waitpid` path from
   compute workers. It does not call synchronous `wxExecute`, which enters
   `wxWindowDisabler` and GTK from the wrong thread in a wxGUI application.
-  The portable request also carries independent optional minimum and maximum
-  true-wind limits, validated by the host before dispatch and enforced by the
-  component during state expansion.
+  The portable request carries minimum and maximum true-wind-angle bounds,
+  separate optional true/apparent wind-speed and wave-height limits, explicit
+  current/wave coverage policy, performance efficiencies, manoeuvre penalties
+  and bounded search controls. The host validates and persists these settings;
+  the component enforces them during expansion and rechecks the exact final
+  approach before returning a route.
 
 Measured conformance values for this machine are recorded in
 `conformance-linux-x86_64.md`. Values are observations, not release budgets.

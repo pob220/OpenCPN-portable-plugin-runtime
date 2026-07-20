@@ -63,10 +63,23 @@ typedef struct ocpn_portable_route_request {
   uint32_t max_hours;
   uint32_t max_states;
   uint8_t avoid_unsafe_charts;
+  double min_true_wind_angle_degrees;
+  double max_true_wind_angle_degrees;
   double max_wind_knots;
+  double max_apparent_wind_knots;
   double max_wave_metres;
-  double min_wind_knots;
-  uint32_t limits_available; /* bit 0 max wind, bit 1 waves, bit 2 min wind */
+  double maximum_latitude_degrees;
+  double upwind_efficiency;
+  double downwind_efficiency;
+  double maximum_search_angle_degrees;
+  double destination_tolerance_nm;
+  uint32_t tack_penalty_seconds;
+  uint32_t gybe_penalty_seconds;
+  uint8_t use_currents;
+  uint8_t require_current_data;
+  uint8_t use_waves;
+  uint8_t require_wave_data;
+  uint32_t limits_available; /* bit 0 true wind, bit 1 waves, bit 2 apparent */
 } ocpn_portable_route_request;
 
 typedef struct ocpn_portable_route_point {

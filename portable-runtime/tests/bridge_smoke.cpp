@@ -359,9 +359,35 @@ bool RoutingLifecycle(const char* component_path) {
        state.actions[0] == "iweather-routing.open" &&
        state.action_icons[0] == "resources/iweather-routing.svg" &&
        state.weather_routing_opened;
-  ocpn_portable_route_request request{50.0, -4.0, 50.05, -3.95, 1780000000,
-                                      7.0,  3600, 15,    24,    10000,
-                                      1,    35.0, 4.0,   2.0,   7};
+  ocpn_portable_route_request request{};
+  request.start_latitude = 50.0;
+  request.start_longitude = -4.0;
+  request.destination_latitude = 50.05;
+  request.destination_longitude = -3.95;
+  request.departure_unix_time = 1780000000;
+  request.boat_speed_knots = 7.0;
+  request.time_step_seconds = 3600;
+  request.heading_step_degrees = 15;
+  request.max_hours = 24;
+  request.max_states = 10000;
+  request.avoid_unsafe_charts = 1;
+  request.min_true_wind_angle_degrees = 40.0;
+  request.max_true_wind_angle_degrees = 160.0;
+  request.max_wind_knots = 35.0;
+  request.max_apparent_wind_knots = 50.0;
+  request.max_wave_metres = 4.0;
+  request.maximum_latitude_degrees = 89.0;
+  request.upwind_efficiency = 1.0;
+  request.downwind_efficiency = 1.0;
+  request.maximum_search_angle_degrees = 120.0;
+  request.destination_tolerance_nm = 1.0;
+  request.tack_penalty_seconds = 60;
+  request.gybe_penalty_seconds = 60;
+  request.use_currents = 1;
+  request.require_current_data = 1;
+  request.use_waves = 1;
+  request.require_wave_data = 1;
+  request.limits_available = 7;
   std::vector<ocpn_portable_route_point> points(1000);
   char diagnostic[4096] = {};
   ocpn_portable_route_result result{
@@ -375,17 +401,25 @@ bool RoutingLifecycle(const char* component_path) {
        result.duration_seconds > 0 && result.diagnostic_len > 0 &&
        state.routing_progress_events > 0;
 
-  // The minimum and maximum wind bounds are independent option values in the
-  // portable request. An unrealistically high minimum must exhaust the search
-  // with a structured guest error rather than being ignored.
+  // True-wind-angle bounds apply to candidate headings, not wind speed. This
+  // deliberately narrow sector excludes every heading in the search and must
+  // fail in the guest without trapping or affecting the host process.
   auto rejected_request = request;
-  rejected_request.min_wind_knots = 100.0;
-  rejected_request.limits_available |= 4;
+  rejected_request.min_true_wind_angle_degrees = 0.0;
+  rejected_request.max_true_wind_angle_degrees = 5.0;
   std::memset(error, 0, sizeof(error));
   const int32_t rejected = ocpn_portable_runtime_calculate_route(
       runtime, &rejected_request, &result, error, sizeof(error));
   ok = ok && rejected != 0 &&
        std::strstr(error, "environmental limits") != nullptr;
+
+  auto invalid_angles = request;
+  invalid_angles.min_true_wind_angle_degrees = 170.0;
+  invalid_angles.max_true_wind_angle_degrees = 40.0;
+  std::memset(error, 0, sizeof(error));
+  const int32_t invalid = ocpn_portable_runtime_calculate_route(
+      runtime, &invalid_angles, &result, error, sizeof(error));
+  ok = ok && invalid != 0 && std::strstr(error, "true-wind-angle") != nullptr;
 
   // Compute replicas share the compiled component and explicit host
   // capabilities, but own an independent Wasmtime Store. They do not repeat
