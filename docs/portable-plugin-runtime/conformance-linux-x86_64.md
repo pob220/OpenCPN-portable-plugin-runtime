@@ -21,11 +21,11 @@ python3 portable-runtime/tests/conformance.py \
 |---|---:|---|
 | signed package verification/fresh install | pass | development Ed25519 key; complete digest inventory |
 | exact target helper selection | pass | `linux-gnu-x86_64` |
-| malformed input containment | pass | 4.498 ms; structured failure |
-| generator protocol negotiation | pass | schema 1; 8.029 ms |
-| real fixture inspection | pass | 249.251 ms; 44,865,184 bytes; 465 messages; 84 times |
-| first frame decode | pass | 467.954 ms; 7,760 retained samples |
-| real generator output | pass | 342.396 ms; validated 44,865,184-byte output using existing-file provider |
+| malformed input containment | pass | 3.550 ms; structured failure |
+| generator protocol negotiation | pass | schema 1; 6.671 ms |
+| real fixture inspection | pass | 252.555 ms; 44,865,184 bytes; 465 messages; 84 times |
+| first/last frame decode | pass | 479.067/402.569 ms; two distinct frames; 7,760 bounded samples per frame |
+| real generator output | pass | 406.233 ms; validated 44,865,184-byte output using existing-file provider |
 
 These timings are one conformance observation, not statistically useful
 benchmarks. Run the repetition/percentile plan in `performance-plan.md` before
@@ -55,6 +55,22 @@ choosing service budgets.
   forecast times), reopened it and retained 75 samples for display.
 - A component trap and a malformed decoder input were contained. OpenCPN
   remained responsive and subsequently completed normal operations.
+
+## iWeatherRouting interoperability run
+
+- The signed iWeatherRouting package and its complete declarative control
+  schema passed package conformance. The exact final Test-OpenCPN executable
+  loaded both components in an isolated `/tmp` profile, discovered iGRIB's
+  `org.opencpn.environment.provider` service and opened the host-rendered
+  iWeatherRouting window with its Calculate and Cancel controls.
+- The runtime smoke test exercised typed environmental batches and chart
+  batches, calculated routes in four concurrently isolated Wasmtime Stores,
+  selected a result, contained cancellation and shut every replica down. A
+  replica does not rerun plugin lifecycle registration.
+- This is proof of the portable inter-plugin/service path, not a navigation
+  validation. The reference component uses a conservative estimated polar and
+  GSHHS shoreline screening; commissioned polars and structured hydrographic
+  safety evidence remain explicit later gates.
 
 ## Platform status
 

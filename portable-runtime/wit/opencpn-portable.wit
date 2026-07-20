@@ -35,6 +35,7 @@ interface host {
 
   enum chart-coverage-state {
     covered,
+    unsafe,
     missing-coverage,
     unknown,
   }
@@ -43,6 +44,20 @@ interface host {
     state: chart-coverage-state,
     charts-considered: u32,
     diagnostic: string,
+  }
+
+  record environment-sample-request {
+    latitude: f64,
+    longitude: f64,
+    unix-time: s64,
+  }
+
+  record environment-sample {
+    wind-u-knots: option<f64>,
+    wind-v-knots: option<f64>,
+    current-u-knots: option<f64>,
+    current-v-knots: option<f64>,
+    wave-height-metres: option<f64>,
   }
 
   log: func(level: log-level, message: string);
@@ -57,6 +72,10 @@ interface host {
   start-job: func(job-id: string, work-units: u32) -> result<_, string>;
   cancel-job: func(job-id: string) -> result<_, string>;
   open-environmental-viewer: func() -> result<_, string>;
+  open-weather-routing: func() -> result<_, string>;
+  environment-sample-batch: func(requests: list<environment-sample-request>) -> result<list<environment-sample>, string>;
+  routing-progress: func(percent: u8, message: string);
+  routing-cancelled: func() -> bool;
   charts-query-segments: func(segments: list<geo-segment>) -> result<list<chart-segment-result>, string>;
   network-get-to-private: func(request-id: string, url: string,
                                private-name: string, max-bytes: u64) -> result<_, string>;
@@ -77,11 +96,42 @@ interface plugin {
     failed(string),
   }
 
+  record route-request {
+    start-latitude: f64,
+    start-longitude: f64,
+    destination-latitude: f64,
+    destination-longitude: f64,
+    departure-unix-time: s64,
+    boat-speed-knots: f64,
+    time-step-seconds: u32,
+    heading-step-degrees: u16,
+    max-hours: u32,
+    max-states: u32,
+    avoid-unsafe-charts: bool,
+    max-wind-knots: option<f64>,
+    max-wave-metres: option<f64>,
+  }
+
+  record route-point {
+    latitude: f64,
+    longitude: f64,
+    unix-time: s64,
+  }
+
+  record route-result {
+    points: list<route-point>,
+    distance-nautical-miles: f64,
+    duration-seconds: u64,
+    states-examined: u32,
+    diagnostic: string,
+  }
+
   initialize: func() -> result<plugin-info, string>;
   enable: func() -> result<_, string>;
   disable: func();
   on-action: func(action-id: string) -> result<_, string>;
   on-job-event: func(job-id: string, event: job-event);
+  calculate-route: func(request: route-request) -> result<route-result, string>;
   test-trap: func();
 }
 

@@ -233,13 +233,32 @@ def main():
             frame = json.loads(frame_path.read_text())
             if frame.get("sampleCount", 0) < 1:
                 raise RuntimeError("fixture frame contained no supported samples")
+            decoded_frames = 1
+            last_frame_ms = None
+            if len(times) > 1:
+                last_frame_path = work / "last-frame.json"
+                _, last_frame_ms = run(
+                    [decoder, "frame", fixture, times[-1], "1500",
+                     last_frame_path],
+                    120,
+                )
+                last_frame = json.loads(last_frame_path.read_text())
+                if (last_frame.get("sampleCount", 0) < 1 or
+                        last_frame.get("time") != times[-1] or
+                        frame.get("time") == last_frame.get("time")):
+                    raise RuntimeError(
+                        "decoder did not resolve distinct forecast frames"
+                    )
+                decoded_frames = 2
             report["checks"]["real_grib_decode"] = {
                 "status": "passed",
                 "inspect_ms": inspect_ms,
                 "frame_ms": frame_ms,
+                "last_frame_ms": last_frame_ms,
                 "bytes": metadata.get("byteCount"),
                 "messages": metadata.get("messageCount"),
                 "times": len(times),
+                "decoded_frames": decoded_frames,
                 "samples": frame.get("sampleCount"),
             }
 

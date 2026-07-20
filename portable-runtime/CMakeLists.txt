@@ -214,6 +214,75 @@ set(OCPN_PORTABLE_IGRIB_PACKAGE "${_igrib_package}" CACHE INTERNAL
 set(OCPN_PORTABLE_IGRIB_ARCHIVE "${_igrib_archive}" CACHE INTERNAL
     "Build-tree iGRIB portable package archive")
 
+set(_iwr_source "${CMAKE_SOURCE_DIR}/portable-plugins/iweather-routing")
+set(_iwr_target_dir "${CMAKE_CURRENT_BINARY_DIR}/iwr-cargo-target")
+set(_iwr_package "${CMAKE_CURRENT_BINARY_DIR}/packages/iweather-routing")
+set(_iwr_component "${_iwr_package}/component/iweather-routing.wasm")
+set(_iwr_stamp "${CMAKE_CURRENT_BINARY_DIR}/packages/iweather-routing.assembled")
+file(GLOB_RECURSE _iwr_sources CONFIGURE_DEPENDS
+     "${_iwr_source}/component/src/*.rs")
+add_custom_command(
+  OUTPUT "${_iwr_stamp}"
+  BYPRODUCTS "${_iwr_component}"
+  COMMAND ${CMAKE_COMMAND} -E env ${_portable_env}
+          "CARGO_TARGET_DIR=${_iwr_target_dir}"
+          ${OCPN_PORTABLE_CARGO} build --locked --offline --release
+          --target wasm32-wasip2
+          --manifest-path "${_iwr_source}/component/Cargo.toml"
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+          "${_iwr_package}/component" "${_iwr_package}/resources"
+          "${_iwr_package}/interfaces" "${_iwr_package}/licenses"
+          "${_iwr_package}/ui"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${_iwr_target_dir}/wasm32-wasip2/release/iweather_routing_portable_component.wasm"
+          "${_iwr_component}"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${_iwr_source}/package/manifest.json" "${_iwr_package}/manifest.json"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${_iwr_source}/package/iweather-routing.svg"
+          "${_iwr_package}/resources/iweather-routing.svg"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${_iwr_source}/package/iweather-routing.ui.json"
+          "${_iwr_package}/ui/iweather-routing.ui.json"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${CMAKE_CURRENT_SOURCE_DIR}/wit/opencpn-portable.wit"
+          "${_iwr_package}/interfaces/opencpn-portable.wit"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${CMAKE_SOURCE_DIR}/COPYING.gplv2"
+          "${_iwr_package}/licenses/GPL-2.0.txt"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${_iwr_source}/README.md" "${_iwr_package}/README.md"
+  COMMAND ${CMAKE_COMMAND} -E touch "${_iwr_stamp}"
+  DEPENDS ${_iwr_sources} "${_iwr_source}/component/Cargo.toml"
+          "${_iwr_source}/component/Cargo.lock"
+          "${_iwr_source}/package/manifest.json"
+          "${_iwr_source}/package/iweather-routing.svg"
+          "${_iwr_source}/package/iweather-routing.ui.json"
+          "${_iwr_source}/README.md"
+          "${CMAKE_CURRENT_SOURCE_DIR}/wit/opencpn-portable.wit"
+  COMMENT "Building and assembling the portable iWeatherRouting package"
+  VERBATIM)
+set(_iwr_archive
+    "${CMAKE_CURRENT_BINARY_DIR}/packages/org.opencpn.iweather-routing-0.1.0.ocpnp")
+add_custom_command(
+  OUTPUT "${_iwr_archive}"
+  COMMAND "${Python3_EXECUTABLE}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tools/build_package.py"
+          --root "${_iwr_package}" --output "${_iwr_archive}"
+          --signing-key
+          "${CMAKE_CURRENT_SOURCE_DIR}/development-keys/igrib-ed25519-private.pem"
+          --key-id "org.opencpn.development.portable-reference-2026"
+  DEPENDS "${_iwr_stamp}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/build_package.py"
+          "${CMAKE_CURRENT_SOURCE_DIR}/development-keys/igrib-ed25519-private.pem"
+  COMMENT "Creating deterministic iWeatherRouting .ocpnp package"
+  VERBATIM)
+add_custom_target(portable_iweather_routing_package ALL
+                  DEPENDS "${_iwr_stamp}" "${_iwr_archive}")
+set(OCPN_PORTABLE_IWR_PACKAGE "${_iwr_package}" CACHE INTERNAL
+    "Build-tree iWeatherRouting portable package")
+set(OCPN_PORTABLE_IWR_ARCHIVE "${_iwr_archive}" CACHE INTERNAL
+    "Build-tree iWeatherRouting portable package archive")
+
 if (OCPN_BUILD_TEST)
   find_package(Threads REQUIRED)
   add_executable(portable_runtime_smoke_test tests/bridge_smoke.cpp)
@@ -229,10 +298,11 @@ if (OCPN_BUILD_TEST)
   if (UNIX AND NOT APPLE)
     target_link_libraries(portable_runtime_smoke_test PRIVATE m)
   endif ()
-  add_dependencies(portable_runtime_smoke_test portable_igrib_package)
+  add_dependencies(portable_runtime_smoke_test portable_igrib_package
+                    portable_iweather_routing_package)
   add_test(
     NAME portable_runtime_smoke
-    COMMAND portable_runtime_smoke_test "${_igrib_component}"
+    COMMAND portable_runtime_smoke_test "${_igrib_component}" "${_iwr_component}"
   )
   add_test(
     NAME portable_package_tools
@@ -254,4 +324,12 @@ if (OCPN_BUILD_TEST)
               "${CMAKE_CURRENT_SOURCE_DIR}/development-keys/igrib-ed25519-public.pem"
     )
   endif ()
+  add_test(
+    NAME portable_iweather_routing_conformance
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/routing_package_conformance.py"
+            --package "${_iwr_archive}"
+            --trusted-key
+            "${CMAKE_CURRENT_SOURCE_DIR}/development-keys/igrib-ed25519-public.pem"
+  )
 endif ()

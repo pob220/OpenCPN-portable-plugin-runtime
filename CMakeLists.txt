@@ -1072,8 +1072,10 @@ if (OCPN_ENABLE_PORTABLE_PLUGINS)
   endif ()
   list(APPEND GUI_HDRS ${GUI_HDR_DIR}/portable_plugin_manager.h)
   list(APPEND GUI_HDRS ${GUI_HDR_DIR}/portable_grib_host.h)
+  list(APPEND GUI_HDRS ${GUI_HDR_DIR}/portable_weather_routing_host.h)
   list(APPEND GUI_SRC ${GUI_SRC_DIR}/portable_plugin_manager.cpp
-                      ${GUI_SRC_DIR}/portable_grib_host.cpp)
+                      ${GUI_SRC_DIR}/portable_grib_host.cpp
+                      ${GUI_SRC_DIR}/portable_weather_routing_host.cpp)
   add_subdirectory(portable-runtime)
 endif ()
 
@@ -1132,6 +1134,13 @@ if ("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang|GNU" AND NOT OCPN_PEDANTIC)
   target_compile_options(
     ${PACKAGE_NAME} PUBLIC -Werror -Wno-unknown-warning-option
   )
+  # GCC 16 diagnoses a false-positive shared_ptr/mutex array bound in the
+  # unchanged chart database worker. Keep warnings-as-errors while allowing
+  # Linux beta testers to build this 5.14-based branch with that compiler.
+  if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+      CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 16)
+    target_compile_options(${PACKAGE_NAME} PUBLIC -Wno-error=array-bounds)
+  endif ()
 endif ()
 
 set_target_properties(

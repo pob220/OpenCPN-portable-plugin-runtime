@@ -12,7 +12,8 @@ cmake_generator="${OCPN_BETA_CMAKE_GENERATOR:-Ninja}"
 generator_source="$repo_root/portable-runtime/vendor/environmental-grib-generator"
 generator_commit="1c7cc0ce7f60a441ae52a82b28078b587410153e"
 generator_binary="$generator_build/environmental-grib"
-package="$opencpn_build/portable-runtime/packages/org.opencpn.igrib-0.1.0.ocpnp"
+igrib_package="$opencpn_build/portable-runtime/packages/org.opencpn.igrib-0.1.0.ocpnp"
+iwr_package="$opencpn_build/portable-runtime/packages/org.opencpn.iweather-routing-0.1.0.ocpnp"
 trusted_key="$repo_root/portable-runtime/development-keys/igrib-ed25519-public.pem"
 
 usage() {
@@ -97,6 +98,8 @@ if [[ "${OCPN_BETA_SKIP_FETCH:-0}" != 1 ]]; then
   cargo fetch --locked --manifest-path "$repo_root/portable-runtime/bridge/Cargo.toml"
   cargo fetch --locked --manifest-path \
     "$repo_root/portable-plugins/igrib/component/Cargo.toml"
+  cargo fetch --locked --manifest-path \
+    "$repo_root/portable-plugins/iweather-routing/component/Cargo.toml"
 elif ! rustup target list --installed | grep -Fxq wasm32-wasip2; then
   printf 'OCPN_BETA_SKIP_FETCH=1 but wasm32-wasip2 is not installed.\n' >&2
   exit 1
@@ -120,11 +123,33 @@ cmake --build "$opencpn_build" --parallel "$jobs"
 ctest --test-dir "$opencpn_build" --output-on-failure -R '^portable_'
 cmake --install "$opencpn_build" --prefix "$stage_root/app"
 
+# OpenCPN portable mode intentionally resolves immutable runtime data beside
+# the executable. Keep the staged install conventional, then add only missing
+# relative links into bin; existing files are never replaced.
+for source in "$stage_root/app/share/opencpn/"*; do
+  [[ -e "$source" ]] || continue
+  name="${source##*/}"
+  destination="$stage_root/app/bin/$name"
+  if [[ ! -e "$destination" && ! -L "$destination" ]]; then
+    ln -s "../share/opencpn/$name" "$destination"
+  fi
+done
+if [[ ! -e "$stage_root/app/bin/share" && \
+      ! -L "$stage_root/app/bin/share" ]]; then
+  ln -s ../share "$stage_root/app/bin/share"
+fi
+
 python3 "$repo_root/portable-runtime/tools/install_package.py" \
-  "$package" \
+  "$igrib_package" \
   --root "$stage_root/config/portable-plugins" \
   --trusted-key \
   "org.opencpn.development.igrib-2026=$trusted_key" \
+  --developer --replace
+python3 "$repo_root/portable-runtime/tools/install_package.py" \
+  "$iwr_package" \
+  --root "$stage_root/config/portable-plugins" \
+  --trusted-key \
+  "org.opencpn.development.portable-reference-2026=$trusted_key" \
   --developer --replace
 python3 "$script_dir/configure_profile.py" "$stage_root/config/opencpn.conf"
 
@@ -139,7 +164,8 @@ mkdir -p "$stage_root/home" "$stage_root/xdg-config" "$stage_root/xdg-data" \
   fi
   printf 'generator_commit=%s\n' "$(git -C "$generator_source" rev-parse HEAD)"
   printf 'opencpn_sha256=%s\n' "$(sha256sum "$stage_root/app/bin/opencpn" | awk '{print $1}')"
-  printf 'igrib_package_sha256=%s\n' "$(sha256sum "$package" | awk '{print $1}')"
+  printf 'igrib_package_sha256=%s\n' "$(sha256sum "$igrib_package" | awk '{print $1}')"
+  printf 'iweather_routing_package_sha256=%s\n' "$(sha256sum "$iwr_package" | awk '{print $1}')"
   printf 'rustc=%s\n' "$(rustc --version)"
   printf 'cmake=%s\n' "$(cmake --version | head -n 1)"
 } >"$stage_root/BUILD-IDENTITY.txt"

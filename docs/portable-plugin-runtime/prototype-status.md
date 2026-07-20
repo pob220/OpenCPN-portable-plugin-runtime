@@ -18,8 +18,19 @@ default.
   memory limit, finite fuel and epoch interruption.
 - Typed WIT services for actions, vessel-position values, namespaced settings,
   retained geographic overlays, cancellable jobs, environmental viewer,
+  time-indexed environmental sample batches, cancellable weather-routing,
   chart-coverage batches, host HTTP-to-private-storage and bounded private
   reads. No pointers, wxWidgets objects or graphics handles cross the boundary.
+- Manifest-declared, versioned service discovery connects iGRIB's
+  `org.opencpn.environment.provider` implementation to iWeatherRouting without
+  native-plugin broadcast strings. Missing providers fail closed.
+- iWeatherRouting's adaptive time-layer route search executes in the portable
+  Rust component. The host supplies a schema-validated declarative UI whose
+  tabs and required form controls are package metadata, typed
+  iGRIB samples, batched GSHHS checks, cancellation, progress, retained route
+  alternatives and user-selected GPX output. A bounded departure window uses
+  up to four independent Wasmtime Stores concurrently and selects the earliest
+  safe arrival.
 - Host-rendered declarative iGRIB surface with readable UTC timeline
   navigation/playback, chart-cursor values, progress/cancellation,
   open/settings/download/generate actions and native file pickers. Persistent
@@ -58,17 +69,24 @@ default.
 ## Linux x86-64 evidence
 
 - Full Test-OpenCPN links with `-Werror`.
-- Four CTests pass: real component lifecycle/trap/identity and typed service
-  exercise; package/signing/update security tests; beta-tool security checks;
-  and target package/helper conformance.
+- Five CTests pass: real component lifecycle/trap/identity and typed service
+  exercise (including four concurrent compute replicas and cancellation);
+  package/signing/update security tests; beta-tool security checks; iGRIB
+  target package/helper conformance; and iWeatherRouting package/UI/service
+  conformance.
+- The exact final executable and signed packages were launched again in a
+  fresh isolated `/tmp` profile. Both components loaded, the broker discovered
+  iGRIB's environmental-provider service, and the schema-rendered
+  iWeatherRouting window opened without affecting either installed OpenCPN.
 - Signed package install and replacement preserve executable helper modes and
   retain the previous version in `.rollback`.
 - A 44,865,184-byte real GRIB fixture was decoded as 465 messages, nine
   supported environmental field groups and 84 forecast times. At its 19:00
   hourly step, the installed GUI retained 62,910 samples and explicitly
   reported that its sparse wave height, peak-period and direction records came
-  from 18:00. The bounded conformance frame retained 7,760 samples. Timeline
-  playback advanced and overlays remained responsive.
+  from 18:00. The bounded conformance frame retained 7,760 samples. Both the
+  first and last of the 84 distinct forecast frames were decoded and verified.
+  Timeline playback advanced and overlays remained responsive.
 - Malformed input returned a structured `environment-decode-failed` result and
   did not affect OpenCPN.
 - The generator helper copied/validated the 44.8 MB fixture under containment
@@ -127,6 +145,10 @@ Measured conformance values for this machine are recorded in
   not an expansion of the WIT boundary into wxWidgets.
 - Chart coverage batching is real, but structured land/depth/drying/conflict
   safety evidence and route-shaped immutable caches are not yet implemented.
+- iWeatherRouting currently supports a start/destination route and a
+  conservative estimated sailing polar. Full polar-file interpolation,
+  intermediate waypoints and OpenCPN route-object publication remain later,
+  separately versioned services; exported GPX and overlays are implemented.
 - Production catalogue/TUF metadata, revocation, user permission-consent UI,
   cross-platform credential-store conformance, state migrations and a
   security-response ownership agreement remain absent.
@@ -145,7 +167,8 @@ Measured conformance values for this machine are recorded in
    Flatpak policy tests; add Linux seccomp/cgroup controls where deployable.
 3. Move runtime entry to a serial supervisor executor and add shutdown/leak
    soak tests.
-4. Add immutable environment dataset handles plus sample batches, then the
-   structured chart-safety service and routing reference component.
+4. Replace the prototype GSHHS screen with structured chart-safety evidence,
+   then add immutable dataset handles, polar profiles and waypoint sequences
+   without changing the existing environmental batch contract.
 5. Complete catalogue trust/revocation/consent and select an owned Wasmtime LTS
    before any production enablement.

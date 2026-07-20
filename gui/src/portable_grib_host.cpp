@@ -8,7 +8,9 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <list>
 #include <map>
+#include <mutex>
 #include <set>
 #include <utility>
 #include <vector>
@@ -67,6 +69,47 @@ struct Sample {
   double longitude = 0.0;
   double value = 0.0;
 };
+
+struct DecodedEnvironmentFrame {
+  std::map<wxString, std::vector<Sample>> fields;
+  std::map<wxString, wxString> units;
+  std::map<wxString, wxString> source_times;
+};
+
+bool ParseDecodedFrame(wxJSONValue& value,
+                       DecodedEnvironmentFrame* decoded, wxString* error) {
+  if (!decoded || !value["fields"].IsArray()) {
+    if (error) *error = "decoder returned an incompatible frame schema";
+    return false;
+  }
+  for (int i = 0; i < value["fields"].Size(); ++i) {
+    wxJSONValue field = value["fields"][i];
+    if (!field.IsObject() || !field["kind"].IsString() ||
+        !field["samples"].IsArray())
+      continue;
+    const wxString kind = field["kind"].AsString();
+    auto& output = decoded->fields[kind];
+    decoded->units[kind] = field["unit"].AsString();
+    if (field["sourceTime"].IsString())
+      decoded->source_times[kind] = field["sourceTime"].AsString();
+    output.reserve(field["samples"].Size());
+    for (int j = 0; j < field["samples"].Size(); ++j) {
+      wxJSONValue sample = field["samples"][j];
+      if (!sample.IsArray() || sample.Size() != 3) continue;
+      const double latitude = sample[0].AsDouble();
+      const double longitude = sample[1].AsDouble();
+      const double sample_value = sample[2].AsDouble();
+      if (std::isfinite(latitude) && std::isfinite(longitude) &&
+          std::isfinite(sample_value))
+        output.push_back({latitude, longitude, sample_value});
+    }
+  }
+  if (decoded->fields.empty()) {
+    if (error) *error = "decoded frame contains no supported fields";
+    return false;
+  }
+  return true;
+}
 
 struct LayerDisplaySettings {
   int units = 0;
@@ -240,6 +283,10 @@ public:
 
   bool Show(wxString* error);
   bool Render(ocpnDC& dc, const ViewPort& viewport);
+  bool SampleBatch(const std::vector<PortableEnvironmentRequest>& requests,
+                   std::vector<PortableEnvironmentSample>* results,
+                   wxString* error) const;
+  wxString DatasetSummary() const;
   void SetCursorPosition(double latitude, double longitude);
   void Shutdown();
 
@@ -272,6 +319,11 @@ private:
   void HandleInspect(wxJSONValue& value);
   void HandleFrame(wxJSONValue& value);
   void HandleGenerate(wxJSONValue& value);
+  bool DecodeRoutingFrame(const wxString& source, const wxString& time,
+                          DecodedEnvironmentFrame* decoded,
+                          wxString* error) const;
+  void CacheRoutingFrame(const wxString& time,
+                         const DecodedEnvironmentFrame& decoded) const;
   void SetBusy(bool busy, const wxString& status);
   wxString DecoderHelper() const;
   wxString GeneratorHelper() const;
@@ -314,6 +366,10 @@ private:
   std::map<wxString, std::vector<Sample>> fields;
   std::map<wxString, wxString> field_units;
   std::map<wxString, wxString> field_source_times;
+  mutable std::mutex field_mutex;
+  mutable std::mutex routing_decode_mutex;
+  mutable std::map<wxString, DecodedEnvironmentFrame> routing_frames;
+  mutable std::list<wxString> routing_frame_lru;
   double cursor_latitude = 0.0;
   double cursor_longitude = 0.0;
   bool have_cursor = false;
@@ -1071,7 +1127,17 @@ bool PortableGribHost::Impl::Launch(const std::vector<wxString>& arguments,
 
 void PortableGribHost::Impl::StartInspect(const wxString& path) {
   if (process) return;
-  selected_file = path;
+  {
+    std::lock_guard<std::mutex> decode_lock(routing_decode_mutex);
+    std::lock_guard<std::mutex> field_lock(field_mutex);
+    routing_frames.clear();
+    routing_frame_lru.clear();
+    fields.clear();
+    field_units.clear();
+    field_source_times.clear();
+    times.clear();
+    selected_file = path;
+  }
   const wxString result = MakeResultPath(private_directory, "inspect");
   Launch(DecoderCommand("inspect", path, wxEmptyString, result),
          Operation::Inspect, result, "Inspecting GRIB metadata…");
@@ -1174,12 +1240,17 @@ void PortableGribHost::Impl::HandleInspect(wxJSONValue& value) {
     data_status->SetLabel("Decoder returned an incompatible metadata schema");
     return;
   }
-  times.clear();
+  std::vector<wxString> decoded_times;
   timeline->Clear();
   for (int i = 0; i < value["times"].Size(); ++i) {
     if (!value["times"][i].IsString()) continue;
-    times.push_back(value["times"][i].AsString());
-    timeline->Append(FormatGribTime(times.back()));
+    decoded_times.push_back(value["times"][i].AsString());
+    timeline->Append(FormatGribTime(decoded_times.back()));
+  }
+  {
+    std::lock_guard<std::mutex> decode_lock(routing_decode_mutex);
+    std::lock_guard<std::mutex> field_lock(field_mutex);
+    times = decoded_times;
   }
   file_label->SetLabel("File: " + wxFileName(selected_file).GetFullName());
   const wxString opened_directory = wxFileName(selected_file).GetPath();
@@ -1190,42 +1261,25 @@ void PortableGribHost::Impl::HandleInspect(wxJSONValue& value) {
   }
   data_status->SetLabel(wxString::Format(
       "%d GRIB messages; %zu forecast times; decoded out of process",
-      value["messageCount"].AsInt(), times.size()));
-  if (!times.empty()) StartFrame(0);
+      value["messageCount"].AsInt(), decoded_times.size()));
+  if (!decoded_times.empty()) StartFrame(0);
 }
 
 void PortableGribHost::Impl::HandleFrame(wxJSONValue& value) {
-  if (!value["fields"].IsArray()) {
-    data_status->SetLabel("Decoder returned an incompatible frame schema");
+  DecodedEnvironmentFrame decoded;
+  wxString error;
+  if (!ParseDecodedFrame(value, &decoded, &error)) {
+    data_status->SetLabel(error);
     return;
   }
-  fields.clear();
-  field_units.clear();
-  field_source_times.clear();
-  for (int i = 0; i < value["fields"].Size(); ++i) {
-    wxJSONValue field = value["fields"][i];
-    if (!field.IsObject() || !field["kind"].IsString() ||
-        !field["samples"].IsArray())
-      continue;
-    const wxString kind = field["kind"].AsString();
-    auto& output = fields[kind];
-    field_units[kind] = field["unit"].AsString();
-    if (field["sourceTime"].IsString())
-      field_source_times[kind] = field["sourceTime"].AsString();
-    output.reserve(field["samples"].Size());
-    for (int j = 0; j < field["samples"].Size(); ++j) {
-      wxJSONValue sample = field["samples"][j];
-      if (!sample.IsArray() || sample.Size() != 3) continue;
-      const double latitude = sample[0].AsDouble();
-      const double longitude = sample[1].AsDouble();
-      const double sample_value = sample[2].AsDouble();
-      if (std::isfinite(latitude) && std::isfinite(longitude) &&
-          std::isfinite(sample_value))
-        output.push_back({latitude, longitude, sample_value});
-    }
-  }
-  wxString source_note;
   const wxString requested_time = value["time"].AsString();
+  std::lock_guard<std::mutex> decode_lock(routing_decode_mutex);
+  std::lock_guard<std::mutex> lock(field_mutex);
+  fields = decoded.fields;
+  field_units = decoded.units;
+  field_source_times = decoded.source_times;
+  CacheRoutingFrame(requested_time, decoded);
+  wxString source_note;
   const auto wave_source = field_source_times.find("wave-height");
   if (wave_source != field_source_times.end() &&
       wave_source->second != requested_time)
@@ -1237,6 +1291,46 @@ void PortableGribHost::Impl::HandleFrame(wxJSONValue& value) {
       source_note);
   UpdateCursorStatus();
   if (top_frame::Get()) top_frame::Get()->RefreshAllCanvas(false);
+}
+
+void PortableGribHost::Impl::CacheRoutingFrame(
+    const wxString& time, const DecodedEnvironmentFrame& decoded) const {
+  if (time.empty()) return;
+  routing_frames[time] = decoded;
+  routing_frame_lru.remove(time);
+  routing_frame_lru.push_front(time);
+  constexpr size_t kRoutingFrameCacheLimit = 6;
+  while (routing_frame_lru.size() > kRoutingFrameCacheLimit) {
+    routing_frames.erase(routing_frame_lru.back());
+    routing_frame_lru.pop_back();
+  }
+}
+
+bool PortableGribHost::Impl::DecodeRoutingFrame(
+    const wxString& source, const wxString& time,
+    DecodedEnvironmentFrame* decoded, wxString* error) const {
+  const wxString result = MakeResultPath(private_directory, "routing-frame");
+  const auto arguments = DecoderCommand("frame", source, time, result);
+  if (arguments.empty()) {
+    HelperSupervisionAvailable(error);
+    return false;
+  }
+  std::vector<const wchar_t*> argv;
+  argv.reserve(arguments.size() + 1);
+  for (const auto& argument : arguments) argv.push_back(argument.wc_str());
+  argv.push_back(nullptr);
+  const long exit_code =
+      wxExecute(argv.data(), wxEXEC_SYNC | wxEXEC_HIDE_CONSOLE);
+  wxJSONValue value;
+  const bool read = ReadJson(result, &value, error);
+  if (wxFileExists(result)) wxRemoveFile(result);
+  if (exit_code != 0) {
+    if (error && error->empty())
+      *error = wxString::Format(
+          "supervised decoder exited with status %ld", exit_code);
+    return false;
+  }
+  return read && ParseDecodedFrame(value, decoded, error);
 }
 
 void PortableGribHost::Impl::HandleGenerate(wxJSONValue& value) {
@@ -1762,6 +1856,7 @@ void PortableGribHost::Impl::UpdateCursorStatus() {
 }
 
 bool PortableGribHost::Impl::Render(ocpnDC& dc, const ViewPort& viewport) {
+  std::lock_guard<std::mutex> lock(field_mutex);
   if (fields.empty()) return false;
   bool rendered = false;
   ViewPort projection = viewport;
@@ -2307,9 +2402,155 @@ void PortableGribHost::Impl::Shutdown() {
     frame->Destroy();
     frame = nullptr;
   }
+  std::lock_guard<std::mutex> decode_lock(routing_decode_mutex);
+  std::lock_guard<std::mutex> lock(field_mutex);
   fields.clear();
   field_units.clear();
   field_source_times.clear();
+  routing_frames.clear();
+  routing_frame_lru.clear();
+}
+
+bool PortableGribHost::Impl::SampleBatch(
+    const std::vector<PortableEnvironmentRequest>& requests,
+    std::vector<PortableEnvironmentSample>* results, wxString* error) const {
+  if (!results || requests.size() > 100000) {
+    if (error) *error = "invalid environmental sample batch";
+    return false;
+  }
+  std::lock_guard<std::mutex> decode_lock(routing_decode_mutex);
+  wxString source;
+  std::vector<wxString> forecast_times;
+  {
+    std::lock_guard<std::mutex> field_lock(field_mutex);
+    source = selected_file;
+    forecast_times = times;
+  }
+  if (source.empty() || forecast_times.empty()) {
+    if (error)
+      *error = "iGRIB has no time-indexed environmental dataset; open or "
+               "generate a GRIB first";
+    return false;
+  }
+
+  struct ForecastTime {
+    wxString key;
+    time_t epoch = 0;
+  };
+  std::vector<ForecastTime> parsed_times;
+  parsed_times.reserve(forecast_times.size());
+  for (const auto& key : forecast_times) {
+    wxDateTime parsed;
+    if (!ParseGribTime(key, &parsed)) continue;
+    parsed.MakeFromTimezone(wxDateTime::UTC);
+    parsed_times.push_back({key, parsed.GetTicks()});
+  }
+  if (parsed_times.empty()) {
+    if (error) *error = "iGRIB forecast timeline contains no valid UTC times";
+    return false;
+  }
+  std::sort(parsed_times.begin(), parsed_times.end(),
+            [](const ForecastTime& left, const ForecastTime& right) {
+              return left.epoch < right.epoch;
+            });
+  time_t minimum_step = 3600;
+  if (parsed_times.size() > 1) {
+    minimum_step = std::numeric_limits<time_t>::max();
+    for (size_t i = 1; i < parsed_times.size(); ++i) {
+      const time_t step = parsed_times[i].epoch - parsed_times[i - 1].epoch;
+      if (step > 0) minimum_step = std::min(minimum_step, step);
+    }
+    if (minimum_step == std::numeric_limits<time_t>::max()) minimum_step = 3600;
+  }
+  const time_t tolerance = std::max<time_t>(1800, minimum_step / 2 + 60);
+  std::vector<wxString> request_times;
+  request_times.reserve(requests.size());
+  std::set<wxString> needed_times;
+  for (const auto& request : requests) {
+    const auto closest = std::min_element(
+        parsed_times.begin(), parsed_times.end(),
+        [&](const ForecastTime& left, const ForecastTime& right) {
+          return std::abs(left.epoch - request.unix_time) <
+                 std::abs(right.epoch - request.unix_time);
+        });
+    if (closest == parsed_times.end() ||
+        std::abs(closest->epoch - request.unix_time) > tolerance) {
+      request_times.emplace_back();
+      continue;
+    }
+    request_times.push_back(closest->key);
+    needed_times.insert(closest->key);
+  }
+  for (const auto& time : needed_times) {
+    if (routing_frames.count(time)) continue;
+    DecodedEnvironmentFrame decoded;
+    if (!DecodeRoutingFrame(source, time, &decoded, error)) return false;
+    CacheRoutingFrame(time, decoded);
+  }
+
+  auto nearest = [](const DecodedEnvironmentFrame& frame,
+                    const wxString& name, double latitude, double longitude,
+                    double* output) {
+    const auto found = frame.fields.find(name);
+    if (found == frame.fields.end() || found->second.empty()) return false;
+    const Sample* best = nullptr;
+    double best_distance = std::numeric_limits<double>::max();
+    const double lon_scale = std::max(0.1, std::cos(latitude * kPi / 180.0));
+    for (const auto& sample : found->second) {
+      const double dy = sample.latitude - latitude;
+      const double dx = (sample.longitude - longitude) * lon_scale;
+      const double distance = dx * dx + dy * dy;
+      if (distance < best_distance) {
+        best_distance = distance;
+        best = &sample;
+      }
+    }
+    if (!best || best_distance > 4.0) return false;
+    *output = best->value;
+    return true;
+  };
+  results->clear();
+  results->reserve(requests.size());
+  for (size_t index = 0; index < requests.size(); ++index) {
+    const auto& request = requests[index];
+    PortableEnvironmentSample sample;
+    if (request_times[index].empty()) {
+      results->push_back(sample);
+      continue;
+    }
+    const auto cached = routing_frames.find(request_times[index]);
+    if (cached == routing_frames.end()) {
+      if (error) *error = "iGRIB routing frame cache became inconsistent";
+      return false;
+    }
+    const auto& frame = cached->second;
+    double u = 0.0, v = 0.0;
+    if (nearest(frame, "wind-u", request.latitude, request.longitude, &u) &&
+        nearest(frame, "wind-v", request.latitude, request.longitude, &v)) {
+      sample.wind_u_knots = u * 1.94384449;
+      sample.wind_v_knots = v * 1.94384449;
+      sample.available |= 1;
+    }
+    if (nearest(frame, "current-u", request.latitude, request.longitude, &u) &&
+        nearest(frame, "current-v", request.latitude, request.longitude, &v)) {
+      sample.current_u_knots = u * 1.94384449;
+      sample.current_v_knots = v * 1.94384449;
+      sample.available |= 2;
+    }
+    if (nearest(frame, "wave-height", request.latitude, request.longitude,
+                &sample.wave_height_metres))
+      sample.available |= 4;
+    results->push_back(sample);
+  }
+  return true;
+}
+
+wxString PortableGribHost::Impl::DatasetSummary() const {
+  std::lock_guard<std::mutex> lock(field_mutex);
+  if (selected_file.empty()) return "No iGRIB dataset is open";
+  return wxString::Format("iGRIB: %s (%zu forecast times; %zu displayed fields)",
+                          wxFileName(selected_file).GetFullName(), times.size(),
+                          fields.size());
 }
 
 PortableGribHost::PortableGribHost(wxWindow* parent,
@@ -2327,6 +2568,16 @@ bool PortableGribHost::Render(ocpnDC& dc, const ViewPort& viewport) {
 
 void PortableGribHost::SetCursorPosition(double latitude, double longitude) {
   m_impl->SetCursorPosition(latitude, longitude);
+}
+
+bool PortableGribHost::SampleBatch(
+    const std::vector<PortableEnvironmentRequest>& requests,
+    std::vector<PortableEnvironmentSample>* results, wxString* error) const {
+  return m_impl->SampleBatch(requests, results, error);
+}
+
+wxString PortableGribHost::DatasetSummary() const {
+  return m_impl->DatasetSummary();
 }
 
 void PortableGribHost::Shutdown() { m_impl->Shutdown(); }

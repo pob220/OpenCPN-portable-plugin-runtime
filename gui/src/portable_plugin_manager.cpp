@@ -19,6 +19,7 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <thread>
@@ -38,6 +39,7 @@
 
 #include "ocpn_portable_runtime.h"
 #include "portable_grib_host.h"
+#include "portable_weather_routing_host.h"
 
 #include "model/base_platform.h"
 #include "model/svg_utils.h"
@@ -45,6 +47,7 @@
 #include "chartdb.h"
 #include "navutil.h"
 #include "ocpndc.h"
+#include "ocpn_plugin.h"
 #include "pluginmanager.h"
 #include "top_frame.h"
 #include "viewport.h"
@@ -167,12 +170,16 @@ public:
     wxString package_root;
     wxString private_root;
     std::set<wxString> permissions;
+    std::set<wxString> provides;
+    std::set<wxString> required_services;
     ocpn_portable_runtime* runtime = nullptr;
+    std::shared_ptr<std::mutex> runtime_mutex = std::make_shared<std::mutex>();
     bool enabled = false;
     bool failed = false;
     std::map<wxString, Scene> scenes;
     std::map<wxString, std::shared_ptr<Job>> jobs;
     std::unique_ptr<PortableGribHost> environmental_host;
+    std::unique_ptr<PortableWeatherRoutingHost> weather_routing_host;
   };
 
   struct Action {
@@ -238,6 +245,14 @@ public:
   static int32_t CancelJob(void* user_data, const char* job_id,
                            size_t job_id_len);
   static int32_t OpenEnvironmentalViewer(void* user_data);
+  static int32_t OpenWeatherRouting(void* user_data);
+  static int32_t EnvironmentSampleBatch(
+      void* user_data, const ocpn_portable_environment_sample_request* requests,
+      size_t request_count, ocpn_portable_environment_sample* results,
+      size_t result_count);
+  static void RoutingProgress(void* user_data, uint8_t percent,
+                              const char* message, size_t message_len);
+  static uint8_t RoutingCancelled(void* user_data);
   static int32_t ChartsQuerySegments(
       void* user_data, const ocpn_portable_geo_segment* segments,
       size_t segment_count, ocpn_portable_chart_segment_result* results,
@@ -510,6 +525,86 @@ int32_t PortablePluginManager::Impl::OpenEnvironmentalViewer(void* user_data) {
   return 0;
 }
 
+int32_t PortablePluginManager::Impl::OpenWeatherRouting(void* user_data) {
+  auto* instance = static_cast<Instance*>(user_data);
+  if (!instance || !instance->owner ||
+      !instance->owner->HasPermission(*instance, "weather-routing.compute"))
+    return -1;
+  if (!instance->weather_routing_host) {
+    auto summary = [owner = instance->owner]() {
+      for (const auto& candidate : owner->instances) {
+        if (candidate->enabled && !candidate->failed &&
+            candidate->provides.count("org.opencpn.environment.provider") &&
+            candidate->environmental_host) {
+          const wxString value = candidate->environmental_host->DatasetSummary();
+          if (!value.StartsWith("No iGRIB")) return value;
+        }
+      }
+      return wxString("No decoded iGRIB dataset is available");
+    };
+    const double latitude = std::isfinite(gLat) ? gLat : 53.0;
+    const double longitude = std::isfinite(gLon) ? gLon : -5.0;
+    instance->weather_routing_host =
+        std::make_unique<PortableWeatherRoutingHost>(
+            instance->owner->plugin_manager->GetParentFrame(),
+            instance->runtime, instance->runtime_mutex, instance->package_root,
+            std::move(summary), latitude, longitude);
+  }
+  wxString error;
+  return instance->weather_routing_host->Show(&error) ? 0 : -2;
+}
+
+int32_t PortablePluginManager::Impl::EnvironmentSampleBatch(
+    void* user_data, const ocpn_portable_environment_sample_request* requests,
+    size_t request_count, ocpn_portable_environment_sample* results,
+    size_t result_count) {
+  auto* instance = static_cast<Instance*>(user_data);
+  if (!instance || !instance->owner ||
+      !instance->owner->HasPermission(*instance, "environment.consume") ||
+      request_count != result_count || (!requests && request_count) ||
+      (!results && result_count) || request_count > 100000)
+    return -1;
+  std::vector<PortableEnvironmentRequest> input;
+  input.reserve(request_count);
+  for (size_t i = 0; i < request_count; ++i)
+    input.push_back({requests[i].latitude, requests[i].longitude,
+                     requests[i].unix_time});
+  for (const auto& provider : instance->owner->instances) {
+    if (!provider->enabled || provider->failed ||
+        !provider->provides.count("org.opencpn.environment.provider") ||
+        !provider->environmental_host)
+      continue;
+    std::vector<PortableEnvironmentSample> sampled;
+    wxString error;
+    if (!provider->environmental_host->SampleBatch(input, &sampled, &error) ||
+        sampled.size() != result_count)
+      continue;
+    for (size_t i = 0; i < result_count; ++i) {
+      results[i] = {sampled[i].wind_u_knots, sampled[i].wind_v_knots,
+                    sampled[i].current_u_knots, sampled[i].current_v_knots,
+                    sampled[i].wave_height_metres, sampled[i].available};
+    }
+    return 0;
+  }
+  return -2;
+}
+
+void PortablePluginManager::Impl::RoutingProgress(
+    void* user_data, uint8_t percent, const char* message, size_t message_len) {
+  auto* instance = static_cast<Instance*>(user_data);
+  if (instance && instance->weather_routing_host)
+    instance->weather_routing_host->ReportProgress(
+        percent, FromUtf8(message, message_len));
+}
+
+uint8_t PortablePluginManager::Impl::RoutingCancelled(void* user_data) {
+  auto* instance = static_cast<Instance*>(user_data);
+  return instance && instance->weather_routing_host &&
+                 instance->weather_routing_host->Cancelled()
+             ? 1
+             : 0;
+}
+
 int32_t PortablePluginManager::Impl::ChartsQuerySegments(
     void* user_data, const ocpn_portable_geo_segment* segments,
     size_t segment_count, ocpn_portable_chart_segment_result* results,
@@ -526,28 +621,19 @@ int32_t PortablePluginManager::Impl::ChartsQuerySegments(
            point.longitude >= -180.0 && point.longitude <= 180.0;
   };
   for (size_t i = 0; i < segment_count; ++i) {
-    results[i] = {2, 0};
-    if (!valid_point(segments[i].start) || !valid_point(segments[i].end) ||
-        !ChartData)
+    results[i] = {3, 0};
+    if (!valid_point(segments[i].start) || !valid_point(segments[i].end))
       continue;
-    const std::array<ocpn_portable_geo_point, 3> samples = {
-        segments[i].start,
-        ocpn_portable_geo_point{
-            (segments[i].start.latitude + segments[i].end.latitude) / 2.0,
-            (segments[i].start.longitude + segments[i].end.longitude) / 2.0},
-        segments[i].end};
-    bool covered = true;
-    uint32_t maximum_charts = 0;
-    for (const auto& sample : samples) {
-      ChartStack stack;
-      ChartData->BuildChartStack(&stack, static_cast<float>(sample.latitude),
-                                 static_cast<float>(sample.longitude), 0);
-      covered = covered && stack.nEntry > 0;
-      maximum_charts =
-          std::max(maximum_charts, static_cast<uint32_t>(stack.nEntry));
-    }
-    results[i].state = covered ? 0 : 1;
-    results[i].charts_considered = maximum_charts;
+    static std::mutex gshhs_mutex;
+    std::lock_guard<std::mutex> lock(gshhs_mutex);
+    results[i].state = PlugIn_GSHHS_CrossesLand(
+                           segments[i].start.latitude,
+                           segments[i].start.longitude,
+                           segments[i].end.latitude,
+                           segments[i].end.longitude)
+                           ? 1
+                           : 0;
+    results[i].charts_considered = 1;
   }
   return 0;
 }
@@ -706,6 +792,7 @@ void PortablePluginManager::Impl::Fail(Instance& instance,
   instance.failed = true;
   instance.enabled = false;
   instance.scenes.clear();
+  if (instance.weather_routing_host) instance.weather_routing_host->Shutdown();
   if (instance.environmental_host) instance.environmental_host->Shutdown();
   for (auto& [id, job] : instance.jobs) job->cancel.store(true);
   wxLogError("Portable plugin %s failed during %s; failure contained: %s",
@@ -751,7 +838,10 @@ bool PortablePluginManager::Impl::Load() {
                                                 "charts.coverage",
                                                 "network.http",
                                                 "storage.private",
-                                                "credentials.provider"};
+                                                "credentials.provider",
+                                                "weather-routing.compute",
+                                                "environment.consume",
+                                                "navigation.routes.write"};
   wxString entry;
   bool more = directory.GetFirst(&entry, wxEmptyString, wxDIR_DIRS);
   while (more) {
@@ -831,6 +921,33 @@ bool PortablePluginManager::Impl::Load() {
       more = directory.GetNext(&entry);
       continue;
     }
+    const std::set<wxString> known_services = {
+        "org.opencpn.environment.provider"};
+    auto read_services = [&](const char* member, const char* version_member,
+                             std::set<wxString>* output) {
+      wxJSONValue services = manifest[member];
+      if (!services.IsArray()) return true;
+      bool valid = true;
+      for (int i = 0; i < services.Size(); ++i) {
+        wxJSONValue service = services[i];
+        const wxString interface = service["interface"].AsString();
+        const wxString service_version = service[version_member].AsString();
+        if (!service.IsObject() || !known_services.count(interface) ||
+            service_version.empty()) {
+          wxLogError("Portable plugin %s has invalid %s service metadata",
+                     id, member);
+          valid = false;
+        } else {
+          output->insert(interface);
+        }
+      }
+      return valid;
+    };
+    if (!read_services("provides", "version", &instance->provides) ||
+        !read_services("requires", "range", &instance->required_services)) {
+      more = directory.GetNext(&entry);
+      continue;
+    }
 
     const wxString component_path = root_path + wxFILE_SEP_PATH + component;
     if (!wxFileExists(component_path)) {
@@ -851,6 +968,10 @@ bool PortablePluginManager::Impl::Load() {
     callbacks.start_job = StartJob;
     callbacks.cancel_job = CancelJob;
     callbacks.open_environmental_viewer = OpenEnvironmentalViewer;
+    callbacks.open_weather_routing = OpenWeatherRouting;
+    callbacks.environment_sample_batch = EnvironmentSampleBatch;
+    callbacks.routing_progress = RoutingProgress;
+    callbacks.routing_cancelled = RoutingCancelled;
     callbacks.charts_query_segments = ChartsQuerySegments;
     callbacks.network_get_to_private = NetworkGetToPrivate;
     callbacks.storage_private_read = StoragePrivateRead;
@@ -889,6 +1010,22 @@ bool PortablePluginManager::Impl::Load() {
     instances.push_back(std::move(instance));
     more = directory.GetNext(&entry);
   }
+  std::set<wxString> available_services;
+  for (const auto& instance : instances)
+    if (instance->enabled && !instance->failed)
+      available_services.insert(instance->provides.begin(),
+                                instance->provides.end());
+  for (const auto& instance : instances) {
+    for (const auto& required : instance->required_services) {
+      if (!available_services.count(required))
+        wxLogWarning("Portable plugin %s has no provider for runtime service %s; "
+                     "dependent operations will fail closed",
+                     instance->id, required);
+      else
+        wxLogMessage("Portable plugin %s discovered service %s",
+                     instance->id, required);
+    }
+  }
   if (!actions.empty())
     plugin_manager->GetParentFrame()->RequestNewToolbars(true);
   if (developer_mode && !developer_startup_action.empty()) {
@@ -919,7 +1056,14 @@ void PortablePluginManager::Impl::Shutdown() {
   alive->store(false);
   for (auto& instance : instances) {
     StopJobs(*instance);
+    if (instance->weather_routing_host)
+      instance->weather_routing_host->Shutdown();
+  }
+  for (auto& instance : instances) {
     if (instance->environmental_host) instance->environmental_host->Shutdown();
+  }
+  for (auto& instance : instances) {
+    std::lock_guard<std::mutex> lock(*instance->runtime_mutex);
     if (instance->runtime && instance->enabled && !instance->failed) {
       char error[kErrorBufferSize] = {};
       if (ocpn_portable_runtime_disable(instance->runtime, error,
@@ -951,6 +1095,12 @@ bool PortablePluginManager::Impl::HandleToolbarAction(int toolbar_id) {
                found->second.action_id);
   char error[kErrorBufferSize] = {};
   const auto action = found->second.action_id.utf8_str();
+  std::unique_lock<std::mutex> lock(*instance.runtime_mutex, std::try_to_lock);
+  if (!lock.owns_lock()) {
+    wxLogMessage("Portable plugin %s is busy; action %s was not re-entered",
+                 instance.id, found->second.action_id);
+    return true;
+  }
   if (ocpn_portable_runtime_on_action(instance.runtime, action.data(),
                                       action.length(), error,
                                       sizeof(error)) != 0)
@@ -980,6 +1130,9 @@ bool PortablePluginManager::Impl::Render(ocpnDC& dc, const ViewPort& viewport,
     }
     if (instance->environmental_host &&
         instance->environmental_host->Render(dc, viewport))
+      rendered = true;
+    if (instance->weather_routing_host &&
+        instance->weather_routing_host->Render(dc, viewport))
       rendered = true;
   }
   return rendered;

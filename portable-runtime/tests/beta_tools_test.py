@@ -83,6 +83,13 @@ class BetaToolsTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Usage:", result.stdout)
 
+    def test_beta_build_creates_portable_data_layout_and_both_plugins(self):
+        source = (BETA / "build-linux.sh").read_text()
+        self.assertIn('share/opencpn/"*', source)
+        self.assertIn('ln -s "../share/opencpn/$name"', source)
+        self.assertIn("org.opencpn.igrib-0.1.0.ocpnp", source)
+        self.assertIn("org.opencpn.iweather-routing-0.1.0.ocpnp", source)
+
 
 if __name__ == "__main__":
     unittest.main()

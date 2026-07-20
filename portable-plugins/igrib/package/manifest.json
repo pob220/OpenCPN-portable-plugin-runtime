@@ -7,11 +7,10 @@
   "component": "component/igrib.wasm",
   "runtime": ">=0.1.0 <0.2.0",
   "portable_api": ">=0.1.0 <0.2.0",
-  "services": [
+  "provides": [
     {
-      "interface": "org.opencpn.environment.viewer",
-      "range": ">=0.1.0 <0.2.0",
-      "provider": "OpenCPN host environmental service"
+      "interface": "org.opencpn.environment.provider",
+      "version": "0.1.0"
     }
   ],
   "permissions": [

@@ -7,6 +7,8 @@
 .vs
 .vscode
 .portable-toolchain/
+portable-runtime/bridge/target/
+portable-plugins/*/component/target/
 __pycache__/
 *.pyc
 build

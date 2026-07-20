@@ -6,6 +6,7 @@ repo_root="$(cd "$script_dir/../.." && pwd)"
 build_root="${OCPN_BETA_BUILD_ROOT:-$repo_root/build-portable-beta}"
 opencpn_build="${OCPN_BETA_OPENCPN_BUILD_DIR:-$build_root/opencpn}"
 package="$opencpn_build/portable-runtime/packages/org.opencpn.igrib-0.1.0.ocpnp"
+routing_package="$opencpn_build/portable-runtime/packages/org.opencpn.iweather-routing-0.1.0.ocpnp"
 trusted_key="$repo_root/portable-runtime/development-keys/igrib-ed25519-public.pem"
 
 if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
@@ -21,6 +22,11 @@ if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
 fi
 if [[ ! -f "$package" ]]; then
   printf 'Built iGRIB package not found: %s\n' "$package" >&2
+  exit 1
+fi
+if [[ ! -f "$routing_package" ]]; then
+  printf 'Built iWeatherRouting package not found: %s\n' \
+    "$routing_package" >&2
   exit 1
 fi
 
@@ -49,3 +55,5 @@ if [[ -n "$fixture" ]]; then
   arguments+=(--fixture "$fixture" --full-generator)
 fi
 python3 "$repo_root/portable-runtime/tests/conformance.py" "${arguments[@]}"
+python3 "$repo_root/portable-runtime/tests/routing_package_conformance.py" \
+  --package "$routing_package" --trusted-key "$trusted_key"

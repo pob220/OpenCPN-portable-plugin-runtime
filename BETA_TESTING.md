@@ -1,8 +1,9 @@
-# Linux beta testing: portable runtime and iGRIB
+# Linux beta testing: portable runtime, iGRIB and iWeatherRouting
 
 This branch is a source-level beta kit for OpenCPN 5.14.0 with the experimental
-portable-plugin runtime and standalone iGRIB demonstration plugin. The build
-and launcher deliberately use an isolated directory. They do not install into
+portable-plugin runtime plus the iGRIB provider and iWeatherRouting consumer
+demonstration plugins. The build and launcher deliberately use an isolated
+directory. They do not install into
 `/usr`, do not use a normal `~/.opencpn` profile and do not require removal of
 another OpenCPN version.
 
@@ -17,6 +18,8 @@ and chart-coverage observations are not authoritative navigation products.
   `OCPN_ENABLE_PORTABLE_PLUGINS`;
 - Wasmtime Component Model host and typed WIT interfaces;
 - the iGRIB WebAssembly component, declarative UI and manifest;
+- the iWeatherRouting WebAssembly component, declarative UI and manifest;
+- typed, batched environmental exchange between the two portable plugins;
 - standalone ecCodes decoding and environmental-generation helpers;
 - the exact tested generator source revision as a Git submodule;
 - deterministic developer-signed `.ocpnp` packaging and verification;
@@ -86,10 +89,10 @@ The script performs the complete reproducible workflow:
 2. installs the `wasm32-wasip2` Rust target and fetches locked crates;
 3. builds and tests the pinned environmental generator;
 4. configures OpenCPN with the experimental feature and test flags;
-5. builds OpenCPN, the Wasmtime bridge, iGRIB component and both helpers;
+5. builds OpenCPN, the Wasmtime bridge, both components and iGRIB's helpers;
 6. runs the portable CTest suite;
 7. installs OpenCPN below `build-portable-beta/stage/app`;
-8. verifies and installs the signed iGRIB package into the isolated profile;
+8. verifies and installs both signed packages into the isolated profile;
 9. writes a build-identity record.
 
 Nothing is installed system-wide and `sudo` is not used by the build script.
@@ -126,7 +129,8 @@ shell. To pass an OpenCPN option, append it after `--`, for example:
 portable-runtime/beta/launch-linux.sh -- --fullscreen
 ```
 
-iGRIB should load and open automatically. A separate toolbar action remains
+iGRIB should load and open automatically. iWeatherRouting has its own route
+toolbar icon. A separate iGRIB toolbar action remains
 available if the window is closed. The three portable actions use distinct
 icons: the blue **i** and wave icon opens iGRIB, the warning icon deliberately
 tests Wasm trap containment, and the download icon tests the permission-gated
@@ -197,7 +201,45 @@ file or plugin settings. If no credential store is available, the password is
 used for that generation only. North-West Shelf currents cover 20 W to 13 E
 and 40 N to 65 N; select the global current model outside that area.
 
-## 6. Conformance tests
+## 6. Exercise portable-plugin interoperability
+
+After opening or generating a multi-time GRIB in iGRIB, select the
+**iWeatherRouting** toolbar action:
+
+1. Confirm the forecast summary names the iGRIB file and reports its forecast
+   time count. This is service discovery through the host broker; no native
+   xGRIB message strings are involved.
+2. Enter a short start/destination pair entirely inside the GRIB and GSHHS
+   coverage. Keep the first run below roughly 30 NM, use the default one-hour
+   step and press **Calculate route**.
+3. Verify progress remains responsive and the result reports points, distance,
+   duration and states examined. The magenta route should appear on the chart.
+   The component requests forecast-time/position batches; iGRIB decodes the
+   required frames in its bounded sidecar and keeps only a small LRU cache.
+4. Repeat with maximum wind or wave limits tightened. A rejected or exhausted
+   search must produce a structured failure without disabling either plugin.
+5. Start a longer calculation and press **Cancel**. Cancellation must return
+   control to the UI and OpenCPN must remain operational.
+6. Enable shoreline avoidance and try a route which crosses land. The host's
+   batched GSHHS screening should reject those candidate segments. This is an
+   experimental shoreline screen, not a hydrographic or passage-safety claim.
+7. Export a completed result as GPX, inspect it, and confirm it contains route
+   points with UTC timestamps. Treat it as advisory output only.
+8. On the Advanced page, enable the forward departure window. Verify up to
+   four isolated Wasm stores run concurrently, the earliest safe arrival is
+   selected and the other successful departures remain as thin comparison
+   overlays. Cancel this run and confirm every active store stops.
+9. Remove iGRIB from a fresh test profile and confirm routing fails clearly
+   with no provider rather than substituting fabricated weather.
+
+The present component uses a deliberately conservative estimated sailing
+polar controlled by the reference-speed field. The Advanced page can compare
+a bounded forward departure window in a four-worker component-instance pool
+and retain alternatives. Loading full vessel polar profiles and route
+waypoints are explicit follow-on interfaces; testers should not interpret
+this reference engine as a replacement for a commissioned vessel model.
+
+## 7. Conformance tests
 
 Run the package/helper checks without a fixture:
 
@@ -234,7 +276,7 @@ This is an explicit network test. It downloads one hour over a small Irish Sea
 box, validates the generated GRIB stream and verifies both current-vector
 components. The report contains no username or password.
 
-## 7. Reporting a result
+## 8. Reporting a result
 
 Create a privacy-reviewed diagnostic archive:
 

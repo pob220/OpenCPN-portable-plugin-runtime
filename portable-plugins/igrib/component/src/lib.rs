@@ -197,6 +197,12 @@ impl exports::opencpn::portable::plugin::Guest for IGrib {
         }
     }
 
+    fn calculate_route(
+        _request: exports::opencpn::portable::plugin::RouteRequest,
+    ) -> Result<exports::opencpn::portable::plugin::RouteResult, String> {
+        Err("iGRIB is an environmental-data provider, not a routing engine".into())
+    }
+
     fn test_trap() {
         panic!("intentional portable component conformance trap");
     }

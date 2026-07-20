@@ -1,0 +1,30 @@
+{
+  "schema": "org.opencpn.portable-ui/0.1",
+  "surface": "weather-routing",
+  "title": "iWeatherRouting — Portable Weather Routing",
+  "tabs": ["Route and weather", "Vessel and safety", "Advanced", "Results"],
+  "controls": [
+    {"id": "start-latitude", "tab": "Route and weather", "type": "number", "label": "Start latitude"},
+    {"id": "start-longitude", "tab": "Route and weather", "type": "number", "label": "Start longitude"},
+    {"id": "destination-latitude", "tab": "Route and weather", "type": "number", "label": "Destination latitude"},
+    {"id": "destination-longitude", "tab": "Route and weather", "type": "number", "label": "Destination longitude"},
+    {"id": "departure-utc", "tab": "Route and weather", "type": "utc-time", "label": "Departure UTC"},
+    {"id": "polar-reference-speed", "tab": "Route and weather", "type": "number", "label": "Estimated polar speed at 15 kt wind"},
+    {"id": "environment-provider", "tab": "Route and weather", "type": "status", "label": "Environmental provider"},
+    {"id": "avoid-unsafe", "tab": "Vessel and safety", "type": "toggle", "label": "Reject unsafe or uncovered chart segments"},
+    {"id": "maximum-wind", "tab": "Vessel and safety", "type": "optional-number", "label": "Maximum true wind (kt)"},
+    {"id": "maximum-wave", "tab": "Vessel and safety", "type": "optional-number", "label": "Maximum significant wave height (m)"},
+    {"id": "time-step", "tab": "Advanced", "type": "integer", "label": "Time step (seconds)"},
+    {"id": "heading-step", "tab": "Advanced", "type": "integer", "label": "Heading resolution (degrees)"},
+    {"id": "maximum-hours", "tab": "Advanced", "type": "integer", "label": "Maximum duration (hours)"},
+    {"id": "maximum-states", "tab": "Advanced", "type": "integer", "label": "Maximum route states"},
+    {"id": "compare-departures", "tab": "Advanced", "type": "toggle", "label": "Compare a forward departure-time window"},
+    {"id": "departure-window", "tab": "Advanced", "type": "integer", "label": "Departure window (hours)"},
+    {"id": "departure-spacing", "tab": "Advanced", "type": "integer", "label": "Departure spacing (hours)"},
+    {"id": "route-metrics", "tab": "Results", "type": "status", "label": "Route metrics"},
+    {"id": "export-gpx", "tab": "Results", "type": "file-save", "label": "Export route as GPX…"},
+    {"id": "calculate", "tab": "Results", "type": "button", "label": "Calculate route"},
+    {"id": "cancel", "tab": "Results", "type": "cancel", "label": "Cancel"},
+    {"id": "progress", "tab": "Results", "type": "progress", "label": "Progress"}
+  ]
+}

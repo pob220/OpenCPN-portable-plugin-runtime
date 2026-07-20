@@ -1,11 +1,11 @@
-use std::ffi::{c_char, c_void, CStr};
+use std::ffi::{CStr, c_char, c_void};
 use std::fs;
 use std::path::Path;
 use std::ptr;
 use std::slice;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 use std::thread;
 use std::time::Duration;
@@ -22,11 +22,12 @@ wasmtime::component::bindgen!({
     world: "plugin-world",
 });
 
-const HOST_ABI_VERSION: u32 = 4;
+const HOST_ABI_VERSION: u32 = 6;
 const ERROR_TEXT_LIMIT: usize = 4096;
 const SETTINGS_VALUE_LIMIT: usize = 64 * 1024;
 const OVERLAY_POINT_LIMIT: usize = 1_000_000;
 const CHART_SEGMENT_LIMIT: usize = 10_000;
+const ENVIRONMENT_SAMPLE_LIMIT: usize = 100_000;
 const PRIVATE_READ_LIMIT: usize = 8 * 1024 * 1024;
 const EPOCH_TICK: Duration = Duration::from_millis(100);
 const CALL_EPOCH_DEADLINE: u64 = 50;
@@ -60,6 +61,63 @@ pub struct GeoSegment {
 pub struct ChartSegmentResult {
     state: u32,
     charts_considered: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct EnvironmentSampleRequest {
+    latitude: f64,
+    longitude: f64,
+    unix_time: i64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct EnvironmentSample {
+    wind_u_knots: f64,
+    wind_v_knots: f64,
+    current_u_knots: f64,
+    current_v_knots: f64,
+    wave_height_metres: f64,
+    available: u32,
+}
+
+#[repr(C)]
+pub struct RouteRequest {
+    start_latitude: f64,
+    start_longitude: f64,
+    destination_latitude: f64,
+    destination_longitude: f64,
+    departure_unix_time: i64,
+    boat_speed_knots: f64,
+    time_step_seconds: u32,
+    heading_step_degrees: u16,
+    max_hours: u32,
+    max_states: u32,
+    avoid_unsafe_charts: u8,
+    max_wind_knots: f64,
+    max_wave_metres: f64,
+    limits_available: u32,
+}
+
+#[repr(C)]
+pub struct RoutePoint {
+    latitude: f64,
+    longitude: f64,
+    unix_time: i64,
+}
+
+#[repr(C)]
+pub struct RouteResult {
+    points: *mut RoutePoint,
+    point_capacity: usize,
+    point_count: usize,
+    distance_nautical_miles: f64,
+    duration_seconds: u64,
+    states_examined: u32,
+    diagnostic: *mut c_char,
+    diagnostic_capacity: usize,
+    diagnostic_len: usize,
 }
 
 #[repr(C)]
@@ -121,6 +179,18 @@ pub struct HostCallbacks {
     start_job: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize, u32) -> i32>,
     cancel_job: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> i32>,
     open_environmental_viewer: Option<unsafe extern "C" fn(*mut c_void) -> i32>,
+    open_weather_routing: Option<unsafe extern "C" fn(*mut c_void) -> i32>,
+    environment_sample_batch: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            *const EnvironmentSampleRequest,
+            usize,
+            *mut EnvironmentSample,
+            usize,
+        ) -> i32,
+    >,
+    routing_progress: Option<unsafe extern "C" fn(*mut c_void, u8, *const c_char, usize)>,
+    routing_cancelled: Option<unsafe extern "C" fn(*mut c_void) -> u8>,
     charts_query_segments: Option<
         unsafe extern "C" fn(
             *mut c_void,
@@ -165,20 +235,70 @@ impl WasiView for HostState {
     }
 }
 
-pub struct Runtime {
-    store: Store<HostState>,
-    bindings: PluginWorld,
-    epoch_ticker_stop: Arc<AtomicBool>,
-    epoch_ticker: Option<thread::JoinHandle<()>>,
+struct EpochTicker {
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
 }
 
-impl Drop for Runtime {
+impl Drop for EpochTicker {
     fn drop(&mut self) {
-        self.epoch_ticker_stop.store(true, Ordering::Release);
-        if let Some(ticker) = self.epoch_ticker.take() {
+        self.stop.store(true, Ordering::Release);
+        if let Some(ticker) = self.thread.take() {
             let _ = ticker.join();
         }
     }
+}
+
+pub struct Runtime {
+    engine: Engine,
+    component: Component,
+    callbacks: HostCallbacks,
+    store: Store<HostState>,
+    bindings: PluginWorld,
+    _epoch_ticker: Arc<EpochTicker>,
+}
+
+fn instantiate_runtime(
+    engine: Engine,
+    component: Component,
+    callbacks: HostCallbacks,
+    epoch_ticker: Arc<EpochTicker>,
+) -> anyhow::Result<Runtime> {
+    let mut linker = Linker::new(&engine);
+    // Supply only WASI's inert defaults. In particular, do not inherit
+    // environment variables, arguments, stdio, filesystem preopens or
+    // network access. OpenCPN capabilities are the only authority source.
+    wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+    PluginWorld::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)?;
+
+    let limits = StoreLimitsBuilder::new()
+        .memory_size(256 * 1024 * 1024)
+        .table_elements(100_000)
+        .instances(4)
+        .memories(4)
+        .tables(8)
+        .build();
+    let mut store = Store::new(
+        &engine,
+        HostState {
+            callbacks,
+            limits,
+            wasi: WasiCtx::builder().build(),
+            table: ResourceTable::new(),
+        },
+    );
+    store.limiter(|state| &mut state.limits);
+    store.set_fuel(100_000_000)?;
+    store.set_epoch_deadline(CALL_EPOCH_DEADLINE);
+    let bindings = PluginWorld::instantiate(&mut store, &component, &linker)?;
+    Ok(Runtime {
+        engine,
+        component,
+        callbacks,
+        store,
+        bindings,
+        _epoch_ticker: epoch_ticker,
+    })
 }
 
 fn prepare_call(runtime: &mut Runtime) -> anyhow::Result<()> {
@@ -189,6 +309,12 @@ fn prepare_call(runtime: &mut Runtime) -> anyhow::Result<()> {
     // wall-clock ceiling even if compiled guest code does not consume fuel as
     // expected; host services apply their own, shorter operation deadlines.
     runtime.store.set_epoch_deadline(CALL_EPOCH_DEADLINE);
+    Ok(())
+}
+
+fn prepare_routing_call(runtime: &mut Runtime) -> anyhow::Result<()> {
+    runtime.store.set_fuel(2_000_000_000)?;
+    runtime.store.set_epoch_deadline(3_000); // five minutes; cancellation is cooperative
     Ok(())
 }
 
@@ -441,6 +567,82 @@ impl opencpn::portable::host::Host for HostState {
             .ok_or_else(|| callback_error("open-environmental-viewer", code))
     }
 
+    fn open_weather_routing(&mut self) -> Result<(), String> {
+        let callback = self
+            .callbacks
+            .open_weather_routing
+            .ok_or_else(|| "open-weather-routing service unavailable".to_string())?;
+        let code = unsafe { callback(self.callbacks.user_data) };
+        (code == 0)
+            .then_some(())
+            .ok_or_else(|| callback_error("open-weather-routing", code))
+    }
+
+    fn environment_sample_batch(
+        &mut self,
+        requests: Vec<opencpn::portable::host::EnvironmentSampleRequest>,
+    ) -> Result<Vec<opencpn::portable::host::EnvironmentSample>, String> {
+        if requests.len() > ENVIRONMENT_SAMPLE_LIMIT {
+            return Err("environment sample batch limit exceeded".to_string());
+        }
+        let callback = self
+            .callbacks
+            .environment_sample_batch
+            .ok_or_else(|| "environment-sample-batch service unavailable".to_string())?;
+        let input: Vec<EnvironmentSampleRequest> = requests
+            .into_iter()
+            .map(|request| EnvironmentSampleRequest {
+                latitude: request.latitude,
+                longitude: request.longitude,
+                unix_time: request.unix_time,
+            })
+            .collect();
+        let mut output = vec![EnvironmentSample::default(); input.len()];
+        let code = unsafe {
+            callback(
+                self.callbacks.user_data,
+                input.as_ptr(),
+                input.len(),
+                output.as_mut_ptr(),
+                output.len(),
+            )
+        };
+        if code != 0 {
+            return Err(callback_error("environment-sample-batch", code));
+        }
+        Ok(output
+            .into_iter()
+            .map(|sample| opencpn::portable::host::EnvironmentSample {
+                wind_u_knots: (sample.available & 1 != 0).then_some(sample.wind_u_knots),
+                wind_v_knots: (sample.available & 1 != 0).then_some(sample.wind_v_knots),
+                current_u_knots: (sample.available & 2 != 0).then_some(sample.current_u_knots),
+                current_v_knots: (sample.available & 2 != 0).then_some(sample.current_v_knots),
+                wave_height_metres: (sample.available & 4 != 0)
+                    .then_some(sample.wave_height_metres),
+            })
+            .collect())
+    }
+
+    fn routing_progress(&mut self, percent: u8, message: String) {
+        if let Some(callback) = self.callbacks.routing_progress {
+            unsafe {
+                callback(
+                    self.callbacks.user_data,
+                    percent,
+                    message.as_ptr().cast(),
+                    message.len(),
+                )
+            }
+        }
+    }
+
+    fn routing_cancelled(&mut self) -> bool {
+        self.callbacks
+            .routing_cancelled
+            .map(|callback| unsafe { callback(self.callbacks.user_data) != 0 })
+            .unwrap_or(false)
+    }
+
     fn charts_query_segments(
         &mut self,
         segments: Vec<opencpn::portable::host::GeoSegment>,
@@ -487,6 +689,10 @@ impl opencpn::portable::host::Host for HostState {
                         "chart coverage exists at sampled segment points",
                     ),
                     1 => (
+                        opencpn::portable::host::ChartCoverageState::Unsafe,
+                        "segment intersects host chart-safety exclusion",
+                    ),
+                    2 => (
                         opencpn::portable::host::ChartCoverageState::MissingCoverage,
                         "one or more sampled points lack chart coverage",
                     ),
@@ -621,34 +827,6 @@ pub unsafe extern "C" fn ocpn_portable_runtime_create(
         config.cranelift_nan_canonicalization(true);
         let engine = Engine::new(&config)?;
         let component = Component::new(&engine, bytes)?;
-        let mut linker = Linker::new(&engine);
-        // Supply only WASI's inert defaults.  In particular, do not inherit
-        // environment variables, arguments, stdio, filesystem preopens or
-        // network access. OpenCPN capabilities are the only authority source.
-        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
-        PluginWorld::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)?;
-
-        let limits = StoreLimitsBuilder::new()
-            .memory_size(256 * 1024 * 1024)
-            .table_elements(100_000)
-            .instances(4)
-            .memories(4)
-            .tables(8)
-            .build();
-        let mut store = Store::new(
-            &engine,
-            HostState {
-                callbacks,
-                limits,
-                wasi: WasiCtx::builder().build(),
-                table: ResourceTable::new(),
-            },
-        );
-        store.limiter(|state| &mut state.limits);
-        store.set_fuel(100_000_000)?;
-        store.set_epoch_deadline(CALL_EPOCH_DEADLINE);
-
-        let bindings = PluginWorld::instantiate(&mut store, &component, &linker)?;
         let epoch_ticker_stop = Arc::new(AtomicBool::new(false));
         let ticker_stop = Arc::clone(&epoch_ticker_stop);
         let ticker_engine = engine.clone();
@@ -660,16 +838,43 @@ pub unsafe extern "C" fn ocpn_portable_runtime_create(
                     ticker_engine.increment_epoch();
                 }
             })?;
-        Ok(Runtime {
-            store,
-            bindings,
-            epoch_ticker_stop,
-            epoch_ticker: Some(epoch_ticker),
-        })
+        let epoch_ticker = Arc::new(EpochTicker {
+            stop: epoch_ticker_stop,
+            thread: Some(epoch_ticker),
+        });
+        instantiate_runtime(engine, component, callbacks, epoch_ticker)
     })();
 
     match result {
         Ok(runtime) => Box::into_raw(Box::new(runtime)),
+        Err(err) => {
+            write_error(error, error_capacity, &format!("{err:#}"));
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Create a fresh, isolated Store for a long-running compute export while
+/// sharing the compiled Component, Engine epoch clock and host capabilities.
+/// The replica deliberately does not execute plugin lifecycle methods: those
+/// methods can register UI and must remain confined to the primary instance.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ocpn_portable_runtime_clone_compute(
+    runtime: *const Runtime,
+    error: *mut c_char,
+    error_capacity: usize,
+) -> *mut Runtime {
+    let Some(runtime) = (unsafe { runtime.as_ref() }) else {
+        write_error(error, error_capacity, "runtime is null");
+        return ptr::null_mut();
+    };
+    match instantiate_runtime(
+        runtime.engine.clone(),
+        runtime.component.clone(),
+        runtime.callbacks,
+        Arc::clone(&runtime._epoch_ticker),
+    ) {
+        Ok(replica) => Box::into_raw(Box::new(replica)),
         Err(err) => {
             write_error(error, error_capacity, &format!("{err:#}"));
             ptr::null_mut()
@@ -825,6 +1030,87 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_job_event(
         Ok(())
     })();
     ffi_result(result, error, error_capacity)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ocpn_portable_runtime_calculate_route(
+    runtime: *mut Runtime,
+    request: *const RouteRequest,
+    result: *mut RouteResult,
+    error: *mut c_char,
+    error_capacity: usize,
+) -> i32 {
+    let Some(runtime) = (unsafe { runtime.as_mut() }) else {
+        write_error(error, error_capacity, "runtime is null");
+        return -1;
+    };
+    let Some(request) = (unsafe { request.as_ref() }) else {
+        write_error(error, error_capacity, "route request is null");
+        return -1;
+    };
+    let Some(output) = (unsafe { result.as_mut() }) else {
+        write_error(error, error_capacity, "route result is null");
+        return -1;
+    };
+    let calculated = (|| -> anyhow::Result<()> {
+        prepare_routing_call(runtime)?;
+        let request = exports::opencpn::portable::plugin::RouteRequest {
+            start_latitude: request.start_latitude,
+            start_longitude: request.start_longitude,
+            destination_latitude: request.destination_latitude,
+            destination_longitude: request.destination_longitude,
+            departure_unix_time: request.departure_unix_time,
+            boat_speed_knots: request.boat_speed_knots,
+            time_step_seconds: request.time_step_seconds,
+            heading_step_degrees: request.heading_step_degrees,
+            max_hours: request.max_hours,
+            max_states: request.max_states,
+            avoid_unsafe_charts: request.avoid_unsafe_charts != 0,
+            max_wind_knots: (request.limits_available & 1 != 0).then_some(request.max_wind_knots),
+            max_wave_metres: (request.limits_available & 2 != 0).then_some(request.max_wave_metres),
+        };
+        let route = runtime
+            .bindings
+            .opencpn_portable_plugin()
+            .call_calculate_route(&mut runtime.store, request)?
+            .map_err(anyhow::Error::msg)?;
+        output.point_count = route.points.len();
+        if route.points.len() > output.point_capacity
+            || (!route.points.is_empty() && output.points.is_null())
+        {
+            anyhow::bail!(
+                "route result requires {} points, capacity is {}",
+                route.points.len(),
+                output.point_capacity
+            );
+        }
+        for (index, point) in route.points.into_iter().enumerate() {
+            unsafe {
+                *output.points.add(index) = RoutePoint {
+                    latitude: point.latitude,
+                    longitude: point.longitude,
+                    unix_time: point.unix_time,
+                };
+            }
+        }
+        output.distance_nautical_miles = route.distance_nautical_miles;
+        output.duration_seconds = route.duration_seconds;
+        output.states_examined = route.states_examined;
+        output.diagnostic_len = route.diagnostic.len();
+        if route.diagnostic.len() >= output.diagnostic_capacity || output.diagnostic.is_null() {
+            anyhow::bail!("route diagnostic exceeded output capacity");
+        }
+        unsafe {
+            ptr::copy_nonoverlapping(
+                route.diagnostic.as_ptr(),
+                output.diagnostic.cast(),
+                route.diagnostic.len(),
+            );
+            *output.diagnostic.add(route.diagnostic.len()) = 0;
+        }
+        Ok(())
+    })();
+    ffi_result(calculated, error, error_capacity)
 }
 
 #[unsafe(no_mangle)]
