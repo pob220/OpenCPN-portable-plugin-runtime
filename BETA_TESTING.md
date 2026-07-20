@@ -213,17 +213,25 @@ After opening or generating a multi-time GRIB in iGRIB, select the
 1. Confirm the forecast summary names the iGRIB file and reports its forecast
    time count. This is service discovery through the host broker; no native
    xGRIB message strings are involved.
-2. Choose each supported position source in turn: live vessel position,
+2. Confirm the bundled **Nicholson35_Mk1_cruising_realistic.pol** model is
+   reported as loaded. Use the vessel-performance picker to select another
+   OpenCPN weather-routing `.pol` file, or a boat `.xml` containing up to eight
+   `Polar FileName` entries. For XML, referenced polars must be in the same
+   directory as the XML or its sibling `polars` directory. Close and reopen
+   the panel, then restart Test-OpenCPN and confirm the selected model is
+   remembered and revalidated. An invalid/missing model must prevent routing
+   with a clear error; it must never fall back to fabricated performance.
+3. Choose each supported position source in turn: live vessel position,
    OpenCPN waypoint, latest chart-cursor position and manual coordinates.
    **Refresh OpenCPN positions** must update the waypoint lists after marks are
    created or imported. Choose a short start/destination pair entirely inside
    the GRIB and GSHHS coverage. Keep the first run below roughly 30 NM, use the
    default one-hour step and press **Calculate route**.
-3. Verify progress remains responsive and the result reports points, distance,
+4. Verify progress remains responsive and the result reports points, distance,
    duration and states examined. The magenta route should appear on the chart.
    The component requests forecast-time/position batches; iGRIB decodes the
    required frames in its bounded sidecar and keeps only a small LRU cache.
-4. Set minimum and maximum true-wind angles (for example 40° and 160°), then
+5. Set minimum and maximum true-wind angles (for example 40° and 160°), then
    try a minimum greater than the maximum, which must be rejected before the
    job starts. Exercise the separate true/apparent wind-speed and wave-height
    limits, current/wave coverage policy, efficiency and manoeuvre controls.
@@ -231,27 +239,28 @@ After opening or generating a multi-time GRIB in iGRIB, select the
    disabling either plugin. Close and reopen the panel, then restart
    Test-OpenCPN and confirm the settings persist across the application
    session.
-5. Start a longer calculation and press **Cancel**. Cancellation must return
+6. Start a longer calculation and press **Cancel**. Cancellation must return
    control to the UI and OpenCPN must remain operational.
-6. Enable shoreline avoidance and try a route which crosses land. The host's
+7. Enable shoreline avoidance and try a route which crosses land. The host's
    batched GSHHS screening should reject those candidate segments. This is an
    experimental shoreline screen, not a hydrographic or passage-safety claim.
-7. Export a completed result as GPX, inspect it, and confirm it contains route
+8. Export a completed result as GPX, inspect it, and confirm it contains route
    points with UTC timestamps. Treat it as advisory output only.
-8. On the Advanced page, enable the forward departure window. Verify up to
+9. On the Advanced page, enable the forward departure window. Verify up to
    four isolated Wasm stores run concurrently, the earliest safe arrival is
    selected and the other successful departures remain as thin comparison
    overlays. Cancel this run and confirm every active store stops.
-9. Remove iGRIB from a fresh test profile and confirm routing fails clearly
+10. Remove iGRIB from a fresh test profile and confirm routing fails clearly
    with no provider rather than substituting fabricated weather.
 
-The present component uses a deliberately conservative estimated sailing
-polar controlled by the reference-speed field. The Advanced page can compare
-a bounded forward departure window in a four-worker component-instance pool
-and retain alternatives. Loading full vessel polar profiles and ordered
-intermediate-waypoint sequences are explicit follow-on interfaces; testers
-should not interpret this reference engine as a replacement for a commissioned
-vessel model.
+The component interpolates actual tabulated boat speed by true wind speed and
+angle. For a multi-polar boat XML it currently selects the fastest applicable
+table; native Weather Routing crossover contours and sail-change hysteresis
+are not yet represented. The Advanced page can compare a bounded forward
+departure window in a four-worker component-instance pool and retain
+alternatives. Ordered intermediate-waypoint sequences remain a follow-on
+interface. Testers should validate their own polar independently and must not
+interpret this experimental engine as a commissioned vessel model.
 
 ## 7. Conformance tests
 

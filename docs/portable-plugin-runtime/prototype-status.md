@@ -167,12 +167,14 @@ Measured conformance values for this machine are recorded in
   not an expansion of the WIT boundary into wxWidgets.
 - Chart coverage batching is real, but structured land/depth/drying/conflict
   safety evidence and route-shaped immutable caches are not yet implemented.
-- iWeatherRouting currently supports start/destination selection from live
-  position, OpenCPN waypoint snapshots, chart cursor or manual coordinates and
-  a conservative estimated sailing polar. Full polar-file interpolation,
-  ordered intermediate waypoints and OpenCPN route-object publication remain
-  later, separately versioned services; exported GPX and overlays are
-  implemented.
+- iWeatherRouting supports start/destination selection from live position,
+  OpenCPN waypoint snapshots, chart cursor or manual coordinates. It loads
+  bounded OpenCPN `.pol` tables and boat `.xml` manifests, transfers typed
+  value grids, and interpolates actual TWS/TWA performance in Wasm; a
+  conservative Nicholson 35 Mk1 model is bundled. Multi-table selection uses
+  the fastest applicable table, while native crossover contours, ordered
+  intermediate waypoints and OpenCPN route-object publication remain later,
+  separately versioned services; exported GPX and overlays are implemented.
 - Production catalogue/TUF metadata, revocation, user permission-consent UI,
   cross-platform credential-store conformance, state migrations and a
   security-response ownership agreement remain absent.
@@ -192,7 +194,8 @@ Measured conformance values for this machine are recorded in
 3. Move runtime entry to a serial supervisor executor and add shutdown/leak
    soak tests.
 4. Replace the prototype GSHHS screen with structured chart-safety evidence,
-   then add immutable dataset handles, polar profiles and waypoint sequences
-   without changing the existing environmental batch contract.
+   then add immutable dataset handles, crossover-aware multi-polar selection
+   and waypoint sequences without changing the existing environmental batch
+   contract.
 5. Complete catalogue trust/revocation/consent and select an owned Wasmtime LTS
    before any production enablement.

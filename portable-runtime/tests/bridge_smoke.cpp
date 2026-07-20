@@ -360,12 +360,23 @@ bool RoutingLifecycle(const char* component_path) {
        state.action_icons[0] == "resources/iweather-routing.svg" &&
        state.weather_routing_opened;
   ocpn_portable_route_request request{};
+  const std::string polar_identity = "Nicholson 35 Mk1 test subset";
+  const std::array<double, 4> polar_winds = {0.0, 10.0, 20.0, 40.0};
+  const std::array<double, 5> polar_angles = {0.0, 40.0, 90.0, 160.0, 180.0};
+  const std::array<double, 20> polar_speeds = {
+      0.0, 0.0,  0.0, 0.0,  0.0, 0.0, 3.86, 5.47, 3.92, 3.76,
+      0.0, 3.98, 6.18, 5.30, 4.90, 0.0, 2.33, 3.99, 3.60, 3.33};
+  ocpn_portable_polar_grid polar{
+      polar_identity.data(), polar_identity.size(), polar_winds.data(),
+      polar_winds.size(),    polar_angles.data(),  polar_angles.size(),
+      polar_speeds.data(),   polar_speeds.size()};
   request.start_latitude = 50.0;
   request.start_longitude = -4.0;
   request.destination_latitude = 50.05;
   request.destination_longitude = -3.95;
   request.departure_unix_time = 1780000000;
-  request.boat_speed_knots = 7.0;
+  request.polars = &polar;
+  request.polar_count = 1;
   request.time_step_seconds = 3600;
   request.heading_step_degrees = 15;
   request.max_hours = 24;
@@ -400,6 +411,22 @@ bool RoutingLifecycle(const char* component_path) {
   ok = ok && result.point_count >= 2 && result.states_examined > 0 &&
        result.duration_seconds > 0 && result.diagnostic_len > 0 &&
        state.routing_progress_events > 0;
+
+  // The guest must use the supplied polar rather than a synthetic reference
+  // speed. A conservative factor must produce a later arrival for the same
+  // route and environmental samples.
+  const uint64_t normal_duration = result.duration_seconds;
+  auto conservative_speeds = polar_speeds;
+  for (double& speed : conservative_speeds) speed *= 0.5;
+  polar.boat_speeds_knots = conservative_speeds.data();
+  result.point_count = 0;
+  result.diagnostic_len = 0;
+  ok = ok && CallSucceeded(ocpn_portable_runtime_calculate_route(
+                               runtime, &request, &result, error,
+                               sizeof(error)),
+                           "calculate route with conservative polar", error);
+  ok = ok && result.duration_seconds > normal_duration;
+  polar.boat_speeds_knots = polar_speeds.data();
 
   // True-wind-angle bounds apply to candidate headings, not wind speed. This
   // deliberately narrow sector excludes every heading in the search and must

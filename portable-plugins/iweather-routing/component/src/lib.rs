@@ -3,7 +3,7 @@ wit_bindgen::generate!({
     world: "plugin-world",
 });
 
-use exports::opencpn::portable::plugin::{RoutePoint, RouteRequest, RouteResult};
+use exports::opencpn::portable::plugin::{PolarGrid, RoutePoint, RouteRequest, RouteResult};
 use opencpn::portable::host::{
     self, ChartCoverageState, EnvironmentSampleRequest, GeoPoint, GeoSegment, LogLevel,
 };
@@ -54,6 +54,56 @@ fn true_wind_angle(wind_u: f64, wind_v: f64, heading: f64) -> (f64, i8) {
     (signed.abs(), if signed >= 0.0 { 1 } else { -1 })
 }
 
+fn bounds(values: &[f64], target: f64) -> (usize, usize) {
+    match values.binary_search_by(|value| value.total_cmp(&target)) {
+        Ok(index) => (index, index),
+        Err(0) => (0, 0),
+        Err(index) if index >= values.len() => (values.len() - 1, values.len() - 1),
+        Err(index) => (index - 1, index),
+    }
+}
+
+fn interpolate_polar(grid: &PolarGrid, tws: f64, twa: f64) -> Option<f64> {
+    if twa < *grid.true_wind_angles_degrees.first()?
+        || twa > *grid.true_wind_angles_degrees.last()?
+    {
+        return None;
+    }
+    let (w0, w1) = bounds(&grid.true_wind_speeds_knots, tws);
+    let (a0, a1) = bounds(&grid.true_wind_angles_degrees, twa.clamp(0.0, 180.0));
+    let angles = grid.true_wind_angles_degrees.len();
+    let speed = |wind: usize, angle: usize| grid.boat_speeds_knots[wind * angles + angle];
+    let q00 = speed(w0, a0);
+    let q01 = speed(w0, a1);
+    let q10 = speed(w1, a0);
+    let q11 = speed(w1, a1);
+    let angle_factor = if a0 == a1 {
+        0.0
+    } else {
+        (twa - grid.true_wind_angles_degrees[a0])
+            / (grid.true_wind_angles_degrees[a1] - grid.true_wind_angles_degrees[a0])
+    };
+    let wind_factor = if w0 == w1 {
+        0.0
+    } else {
+        (tws - grid.true_wind_speeds_knots[w0])
+            / (grid.true_wind_speeds_knots[w1] - grid.true_wind_speeds_knots[w0])
+    };
+    let low = q00 + angle_factor * (q01 - q00);
+    let high = q10 + angle_factor * (q11 - q10);
+    let value = low + wind_factor * (high - low);
+    value.is_finite().then_some(value)
+}
+
+fn polar_speed(request: &RouteRequest, tws: f64, twa: f64) -> Option<f64> {
+    request
+        .polars
+        .iter()
+        .filter_map(|grid| interpolate_polar(grid, tws, twa))
+        .filter(|speed| *speed > 0.05)
+        .max_by(f64::total_cmp)
+}
+
 struct Motion {
     east_knots: f64,
     north_knots: f64,
@@ -77,14 +127,12 @@ fn motion_for_heading(
     {
         return None;
     }
-    let angle_factor = twa.to_radians().sin().abs();
-    let wind_factor = (wind / 15.0).sqrt().clamp(0.2, 1.15);
     let efficiency = if twa <= 90.0 {
         request.upwind_efficiency
     } else {
         request.downwind_efficiency
     };
-    let speed = request.boat_speed_knots * wind_factor * (0.32 + 0.68 * angle_factor) * efficiency;
+    let speed = polar_speed(request, wind, twa)? * efficiency;
     let heading_rad = radians(heading);
     let boat_east = speed * heading_rad.sin();
     let boat_north = speed * heading_rad.cos();
@@ -149,13 +197,59 @@ fn validate(request: &RouteRequest) -> Result<(), String> {
             return Err("route longitude is invalid".into());
         }
     }
-    if !(0.2..=80.0).contains(&request.boat_speed_knots)
-        || !(60..=21600).contains(&request.time_step_seconds)
+    if !(60..=21600).contains(&request.time_step_seconds)
         || !(2..=90).contains(&request.heading_step_degrees)
         || !(1..=720).contains(&request.max_hours)
         || !(100..=1_000_000).contains(&request.max_states)
     {
         return Err("route calculation limits are outside the supported range".into());
+    }
+    if request.polars.is_empty() || request.polars.len() > 8 {
+        return Err("route request needs 1-8 polar grids".into());
+    }
+    let mut total_cells = 0usize;
+    for polar in &request.polars {
+        if polar.identity.is_empty()
+            || polar.true_wind_speeds_knots.len() < 2
+            || polar.true_wind_speeds_knots.len() > 200
+            || polar.true_wind_angles_degrees.len() < 2
+            || polar.true_wind_angles_degrees.len() > 200
+        {
+            return Err("polar identity or axes are invalid".into());
+        }
+        if !polar
+            .true_wind_speeds_knots
+            .windows(2)
+            .all(|pair| pair[0].is_finite() && pair[0] >= 0.0 && pair[0] < pair[1])
+            || !polar
+                .true_wind_speeds_knots
+                .last()
+                .is_some_and(|value| value.is_finite() && *value <= 200.0)
+            || !polar.true_wind_angles_degrees.windows(2).all(|pair| {
+                pair[0].is_finite() && pair[0] >= 0.0 && pair[0] < pair[1] && pair[1] <= 180.0
+            })
+        {
+            return Err("polar axes must be finite and strictly increasing".into());
+        }
+        let expected = polar
+            .true_wind_speeds_knots
+            .len()
+            .checked_mul(polar.true_wind_angles_degrees.len())
+            .ok_or_else(|| "polar dimensions overflow".to_string())?;
+        if polar.boat_speeds_knots.len() != expected
+            || polar
+                .boat_speeds_knots
+                .iter()
+                .any(|speed| !speed.is_finite() || !(0.0..=100.0).contains(speed))
+        {
+            return Err("polar dimensions or boat speeds are invalid".into());
+        }
+        total_cells = total_cells
+            .checked_add(expected)
+            .ok_or_else(|| "polar cell count overflow".to_string())?;
+    }
+    if total_cells > 200_000 {
+        return Err("route polar data exceeds the cell limit".into());
     }
     if !request.min_true_wind_angle_degrees.is_finite()
         || !request.max_true_wind_angle_degrees.is_finite()

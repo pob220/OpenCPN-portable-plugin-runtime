@@ -67,10 +67,16 @@ choosing service budgets.
   batches, calculated routes in four concurrently isolated Wasmtime Stores,
   selected a result, contained cancellation and shut every replica down. A
   replica does not rerun plugin lifecycle registration.
+- The host polar parser loaded the bundled 15-by-16 Nicholson 35 Mk1 `.pol`,
+  resolved it through an OpenCPN boat `.xml`, rejected malformed axes and sent
+  only bounded typed grids to the component. The routing smoke test verified
+  that reducing the supplied grid speeds produces a later arrival, proving the
+  guest calculation uses the selected polar values.
 - This is proof of the portable inter-plugin/service path, not a navigation
-  validation. The reference component uses a conservative estimated polar and
-  GSHHS shoreline screening; commissioned polars and structured hydrographic
-  safety evidence remain explicit later gates.
+  validation. The reference component uses a bundled conservative polar and
+  GSHHS shoreline screening; commissioned polar validation, XML crossover
+  contours and structured hydrographic safety evidence remain explicit later
+  gates.
 
 ## Platform status
 

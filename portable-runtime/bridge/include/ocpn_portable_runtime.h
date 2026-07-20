@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define OCPN_PORTABLE_HOST_ABI_VERSION 6u
+#define OCPN_PORTABLE_HOST_ABI_VERSION 7u
 
 typedef struct ocpn_portable_runtime ocpn_portable_runtime;
 
@@ -51,13 +51,26 @@ typedef struct ocpn_portable_environment_sample {
   uint32_t available; /* bit 0 wind, bit 1 current, bit 2 waves */
 } ocpn_portable_environment_sample;
 
+typedef struct ocpn_portable_polar_grid {
+  const char* identity;
+  size_t identity_len;
+  const double* true_wind_speeds_knots;
+  size_t true_wind_speed_count;
+  const double* true_wind_angles_degrees;
+  size_t true_wind_angle_count;
+  /* Wind-speed-major: wind index * angle count + angle index. */
+  const double* boat_speeds_knots;
+  size_t boat_speed_count;
+} ocpn_portable_polar_grid;
+
 typedef struct ocpn_portable_route_request {
   double start_latitude;
   double start_longitude;
   double destination_latitude;
   double destination_longitude;
   int64_t departure_unix_time;
-  double boat_speed_knots;
+  const ocpn_portable_polar_grid* polars;
+  size_t polar_count;
   uint32_t time_step_seconds;
   uint16_t heading_step_degrees;
   uint32_t max_hours;

@@ -13,7 +13,9 @@
   "permissions": ["ui.commands", "navigation.position.read", "navigation.objects.read",
                   "weather-routing.compute", "environment.consume",
                   "charts.coverage", "storage.user-selected"],
-  "resources": ["resources/iweather-routing.svg", "ui/iweather-routing.ui.json"],
+  "resources": ["resources/iweather-routing.svg",
+                "resources/Nicholson35_Mk1_cruising_realistic.pol",
+                "ui/iweather-routing.ui.json"],
   "licenses": ["GPL-2.0-or-later"],
   "development": true
 }

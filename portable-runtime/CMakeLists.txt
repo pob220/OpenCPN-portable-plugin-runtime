@@ -242,6 +242,9 @@ add_custom_command(
           "${_iwr_source}/package/iweather-routing.svg"
           "${_iwr_package}/resources/iweather-routing.svg"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${_iwr_source}/package/Nicholson35_Mk1_cruising_realistic.pol"
+          "${_iwr_package}/resources/Nicholson35_Mk1_cruising_realistic.pol"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
           "${_iwr_source}/package/iweather-routing.ui.json"
           "${_iwr_package}/ui/iweather-routing.ui.json"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -257,6 +260,7 @@ add_custom_command(
           "${_iwr_source}/component/Cargo.lock"
           "${_iwr_source}/package/manifest.json"
           "${_iwr_source}/package/iweather-routing.svg"
+          "${_iwr_source}/package/Nicholson35_Mk1_cruising_realistic.pol"
           "${_iwr_source}/package/iweather-routing.ui.json"
           "${_iwr_source}/README.md"
           "${CMAKE_CURRENT_SOURCE_DIR}/wit/opencpn-portable.wit"
@@ -285,6 +289,24 @@ set(OCPN_PORTABLE_IWR_ARCHIVE "${_iwr_archive}" CACHE INTERNAL
 
 if (OCPN_BUILD_TEST)
   find_package(Threads REQUIRED)
+  add_executable(
+    portable_polar_test
+    tests/portable_polar_test.cpp
+    "${CMAKE_SOURCE_DIR}/gui/src/portable_polar.cpp"
+    "${CMAKE_SOURCE_DIR}/libs/pugixml/pugixml.cpp"
+  )
+  target_compile_features(portable_polar_test PRIVATE cxx_std_17)
+  target_compile_options(portable_polar_test PRIVATE -Wall -Wextra -Wpedantic)
+  target_include_directories(
+    portable_polar_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/gui/include/gui"
+    "${CMAKE_SOURCE_DIR}/libs/pugixml"
+  )
+  add_test(
+    NAME portable_polar
+    COMMAND portable_polar_test
+            "${_iwr_source}/package/Nicholson35_Mk1_cruising_realistic.pol"
+  )
   add_executable(portable_runtime_smoke_test tests/bridge_smoke.cpp)
   target_compile_features(portable_runtime_smoke_test PRIVATE cxx_std_17)
   target_include_directories(

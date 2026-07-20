@@ -96,13 +96,20 @@ interface plugin {
     failed(string),
   }
 
+  record polar-grid {
+    identity: string,
+    true-wind-speeds-knots: list<f64>,
+    true-wind-angles-degrees: list<f64>,
+    boat-speeds-knots: list<f64>,
+  }
+
   record route-request {
     start-latitude: f64,
     start-longitude: f64,
     destination-latitude: f64,
     destination-longitude: f64,
     departure-unix-time: s64,
-    boat-speed-knots: f64,
+    polars: list<polar-grid>,
     time-step-seconds: u32,
     heading-step-degrees: u16,
     max-hours: u32,

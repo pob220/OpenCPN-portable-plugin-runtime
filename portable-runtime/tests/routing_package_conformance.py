@@ -52,6 +52,12 @@ def main():
         component = destination / manifest["component"]
         if component.read_bytes()[:4] != b"\0asm":
             raise RuntimeError("routing component is not WebAssembly")
+        bundled_polar = (
+            destination / "resources" / "Nicholson35_Mk1_cruising_realistic.pol"
+        )
+        header = bundled_polar.read_text().splitlines()[0].lower()
+        if not header.startswith("twa/tws"):
+            raise RuntimeError("routing package omits its valid demonstration polar")
         surface = json.loads(
             (destination / "ui" / "iweather-routing.ui.json").read_text()
         )
@@ -71,7 +77,8 @@ def main():
             "destination-waypoint",
             "refresh-positions",
             "departure-utc",
-            "polar-reference-speed",
+            "vessel-performance-file",
+            "vessel-performance-status",
             "environment-provider",
             "avoid-unsafe",
             "minimum-wind-angle",

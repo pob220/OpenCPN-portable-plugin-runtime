@@ -16,6 +16,7 @@
 #include <wx/choice.h>
 #include <wx/datetime.h>
 #include <wx/filedlg.h>
+#include <wx/filepicker.h>
 #include <wx/filename.h>
 #include <wx/frame.h>
 #include <wx/gauge.h>
@@ -35,6 +36,7 @@
 #include "ocpn_portable_runtime.h"
 #include "ocpndc.h"
 #include "navutil.h"
+#include "portable_polar.h"
 #include "viewport.h"
 
 namespace {
@@ -99,7 +101,8 @@ bool LoadSurface(const wxString& package_root, wxString* title,
                                                 "destination-longitude",
                                                 "refresh-positions",
                                                 "departure-utc",
-                                                "polar-reference-speed",
+                                                "vessel-performance-file",
+                                                "vessel-performance-status",
                                                 "environment-provider",
                                                 "avoid-unsafe",
                                                 "minimum-wind-angle",
@@ -208,6 +211,7 @@ private:
   void RefreshNavigationPositions(bool initial = false);
   bool ApplyPositionSource(bool start, bool report_error = true);
   void UpdatePositionControls(bool start);
+  bool LoadVesselPerformance(const wxString& path, bool report_error = true);
   void LoadSettings();
   void SaveSettings();
   void Start();
@@ -236,10 +240,11 @@ private:
   double initial_longitude = 0.0;
   wxFrame* frame = nullptr;
   wxTextCtrl *start_lat = nullptr, *start_lon = nullptr, *dest_lat = nullptr,
-             *dest_lon = nullptr, *departure = nullptr, *boat_speed = nullptr;
+             *dest_lon = nullptr, *departure = nullptr;
   wxChoice *start_source = nullptr, *start_waypoint = nullptr,
            *dest_source = nullptr, *dest_waypoint = nullptr;
   wxButton* refresh_positions = nullptr;
+  wxFilePickerCtrl* vessel_performance_file = nullptr;
   wxSpinCtrl *time_step = nullptr, *heading_step = nullptr,
              *max_hours = nullptr, *max_states = nullptr,
              *departure_window = nullptr, *departure_spacing = nullptr,
@@ -255,7 +260,8 @@ private:
              *compare_departures = nullptr;
   wxTextCtrl *max_true_wind = nullptr, *max_apparent_wind = nullptr,
              *max_wave = nullptr, *destination_tolerance = nullptr;
-  wxStaticText *provider = nullptr, *status = nullptr, *metrics = nullptr;
+  wxStaticText *provider = nullptr, *vessel_performance_status = nullptr,
+               *status = nullptr, *metrics = nullptr;
   wxGauge* gauge = nullptr;
   wxButton *calculate = nullptr, *cancel = nullptr, *export_gpx = nullptr;
   std::atomic<bool> cancelled{false};
@@ -266,6 +272,7 @@ private:
   std::thread worker;
   std::vector<ocpn_portable_route_point> route;
   std::vector<std::vector<ocpn_portable_route_point>> alternative_routes;
+  std::shared_ptr<const PortablePolarSet> vessel_performance;
   std::atomic<bool> stopped{false};
 };
 
@@ -284,7 +291,11 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateRoutePanel(wxNotebook* book) {
                             wxString::Format("%.6f", initial_longitude + 1.5));
   departure = new wxTextCtrl(
       panel, wxID_ANY, wxDateTime::Now().ToUTC().Format("%Y-%m-%dT%H:%MZ"));
-  boat_speed = new wxTextCtrl(panel, wxID_ANY, "7.0");
+  vessel_performance_file = new wxFilePickerCtrl(
+      panel, wxID_ANY, wxEmptyString, Label("vessel-performance-file"),
+      "OpenCPN boat or polar (*.xml;*.pol)|*.xml;*.pol|All files|*",
+      wxDefaultPosition, wxDefaultSize,
+      wxFLP_OPEN | wxFLP_FILE_MUST_EXIST | wxFLP_USE_TEXTCTRL);
   const wxArrayString position_sources = {
       "Current vessel position", "OpenCPN waypoint",
       "Latest chart cursor position", "Manual coordinates"};
@@ -304,10 +315,15 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateRoutePanel(wxNotebook* book) {
   AddRow(grid, panel, Label("destination-latitude"), dest_lat);
   AddRow(grid, panel, Label("destination-longitude"), dest_lon);
   AddRow(grid, panel, Label("departure-utc"), departure);
-  AddRow(grid, panel, Label("polar-reference-speed"), boat_speed);
+  AddRow(grid, panel, Label("vessel-performance-file"),
+         vessel_performance_file);
+  vessel_performance_status =
+      new wxStaticText(panel, wxID_ANY, Label("vessel-performance-status"));
   provider = new wxStaticText(panel, wxID_ANY, dataset_summary());
   root->Add(grid, 0, wxEXPAND | wxALL, 12);
   root->Add(refresh_positions, 0, wxLEFT | wxRIGHT | wxBOTTOM, 12);
+  root->Add(vessel_performance_status, 0,
+            wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 12);
   root->Add(new wxStaticLine(panel), 0, wxEXPAND | wxLEFT | wxRIGHT, 12);
   root->Add(provider, 0, wxEXPAND | wxALL, 12);
   root->Add(
@@ -330,7 +346,44 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateRoutePanel(wxNotebook* book) {
                       [this](wxCommandEvent&) { ApplyPositionSource(false); });
   refresh_positions->Bind(
       wxEVT_BUTTON, [this](wxCommandEvent&) { RefreshNavigationPositions(); });
+  vessel_performance_file->Bind(
+      wxEVT_FILEPICKER_CHANGED, [this](wxFileDirPickerEvent&) {
+        LoadVesselPerformance(vessel_performance_file->GetPath());
+      });
   return panel;
+}
+
+bool PortableWeatherRoutingHost::Impl::LoadVesselPerformance(
+    const wxString& path, bool report_error) {
+  const wxScopedCharBuffer encoded = path.ToUTF8();
+  PortablePolarSet loaded;
+  std::string failure;
+  if (path.empty() || !encoded.data() ||
+      !LoadPortablePolarSet(std::filesystem::u8path(encoded.data()), &loaded,
+                            &failure)) {
+    vessel_performance.reset();
+    if (vessel_performance_status)
+      vessel_performance_status->SetLabel(
+          "No usable vessel polar loaded" +
+          (failure.empty() ? wxString() : ": " + wxString::FromUTF8(failure)));
+    if (report_error && status)
+      status->SetLabel("Vessel performance failed: " +
+                       wxString::FromUTF8(failure));
+    return false;
+  }
+  size_t cells = 0;
+  for (const auto& grid : loaded.grids)
+    cells += grid.boat_speeds_knots.size();
+  vessel_performance =
+      std::make_shared<const PortablePolarSet>(std::move(loaded));
+  if (vessel_performance_status)
+    vessel_performance_status->SetLabel(wxString::Format(
+        "Loaded %zu polar table(s), %zu performance cells — %s",
+        vessel_performance->grids.size(), cells,
+        wxFileName(path).GetFullName()));
+  if (report_error && status)
+    status->SetLabel("Vessel performance loaded and validated");
+  return true;
 }
 
 void PortableWeatherRoutingHost::Impl::UpdatePositionControls(bool start) {
@@ -624,9 +677,20 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateResultsPanel(
 }
 
 void PortableWeatherRoutingHost::Impl::LoadSettings() {
-  if (!pConfig) return;
+  const wxString bundled_polar =
+      package_root + wxFILE_SEP_PATH + "resources" + wxFILE_SEP_PATH +
+      "Nicholson35_Mk1_cruising_realistic.pol";
+  if (!pConfig) {
+    vessel_performance_file->SetPath(bundled_polar);
+    LoadVesselPerformance(bundled_polar, false);
+    return;
+  }
   const wxString old_path = pConfig->GetPath();
   pConfig->SetPath("/PortablePlugins/org.opencpn.iweather-routing/Routing");
+  const wxString performance_path =
+      pConfig->Read("vesselPerformancePath", bundled_polar);
+  vessel_performance_file->SetPath(performance_path);
+  LoadVesselPerformance(performance_path, false);
   avoid_land->SetValue(pConfig->ReadBool("avoidUnsafeCharts", true));
   min_wind_angle->SetValue(pConfig->ReadLong("minimumTrueWindAngle", 40));
   max_wind_angle->SetValue(pConfig->ReadLong("maximumTrueWindAngle", 160));
@@ -677,7 +741,10 @@ void PortableWeatherRoutingHost::Impl::SaveSettings() {
   if (!pConfig) return;
   const wxString old_path = pConfig->GetPath();
   pConfig->SetPath("/PortablePlugins/org.opencpn.iweather-routing/Routing");
-  pConfig->Write("settingsSchema", 2L);
+  pConfig->Write("settingsSchema", 3L);
+  if (vessel_performance_file)
+    pConfig->Write("vesselPerformancePath",
+                   vessel_performance_file->GetPath());
   pConfig->Write("avoidUnsafeCharts", avoid_land->GetValue());
   pConfig->Write("minimumTrueWindAngle",
                  static_cast<long>(min_wind_angle->GetValue()));
@@ -793,10 +860,14 @@ void PortableWeatherRoutingHost::Impl::Start() {
       !Number(start_lon, &request.start_longitude) ||
       !Number(dest_lat, &request.destination_latitude) ||
       !Number(dest_lon, &request.destination_longitude) ||
-      !Number(boat_speed, &request.boat_speed_knots) ||
       !UtcTime(departure, &request.departure_unix_time)) {
     status->SetLabel(
-        "Enter valid positions, speed and departure as YYYY-MM-DDTHH:MMZ");
+        "Enter valid positions and departure as YYYY-MM-DDTHH:MMZ");
+    return;
+  }
+  const auto selected_performance = vessel_performance;
+  if (!selected_performance || selected_performance->grids.empty()) {
+    status->SetLabel("Load a valid OpenCPN boat .xml or polar .pol file first");
     return;
   }
   request.time_step_seconds = time_step->GetValue();
@@ -865,6 +936,7 @@ void PortableWeatherRoutingHost::Impl::Start() {
   cancelled.store(false);
   calculate->Enable(false);
   cancel->Enable(true);
+  vessel_performance_file->Enable(false);
   export_gpx->Enable(false);
   route.clear();
   alternative_routes.clear();
@@ -873,7 +945,7 @@ void PortableWeatherRoutingHost::Impl::Start() {
   departure_runs.store(run_count);
   departures_completed.store(0);
   worker = std::thread([this, request, run_count, departure_step_seconds,
-                        parallel_worker_limit] {
+                        parallel_worker_limit, selected_performance] {
     std::vector<DepartureResult> results(run_count);
     std::atomic<unsigned> next_departure{0};
     const unsigned parallelism = std::min(parallel_worker_limit, run_count);
@@ -890,6 +962,21 @@ void PortableWeatherRoutingHost::Impl::Start() {
           auto candidate_request = request;
           candidate_request.departure_unix_time +=
               static_cast<int64_t>(run) * departure_step_seconds;
+          std::vector<ocpn_portable_polar_grid> polar_views;
+          polar_views.reserve(selected_performance->grids.size());
+          for (const auto& grid : selected_performance->grids) {
+            polar_views.push_back(
+                {grid.identity.data(),
+                 grid.identity.size(),
+                 grid.true_wind_speeds_knots.data(),
+                 grid.true_wind_speeds_knots.size(),
+                 grid.true_wind_angles_degrees.data(),
+                 grid.true_wind_angles_degrees.size(),
+                 grid.boat_speeds_knots.data(),
+                 grid.boat_speeds_knots.size()});
+          }
+          candidate_request.polars = polar_views.data();
+          candidate_request.polar_count = polar_views.size();
           std::vector<ocpn_portable_route_point> points(kMaximumRoutePoints);
           std::vector<char> diagnostic(4096);
           char error[4096] = {};
@@ -982,6 +1069,7 @@ void PortableWeatherRoutingHost::Impl::Finish(
   if (worker.joinable()) worker.join();
   calculate->Enable(true);
   cancel->Enable(false);
+  vessel_performance_file->Enable(true);
   if (!success) {
     status->SetLabel("Failed: " + message);
     return;

@@ -18,6 +18,12 @@ environmental generation outside OpenCPN. Neither plugin depends on a native
 xGRIB or Weather Routing plugin. Current evidence and remaining gates are in
 `docs/portable-plugin-runtime/prototype-status.md`.
 
+iWeatherRouting accepts real OpenCPN weather-routing `.pol` files and boat
+`.xml` manifests. OpenCPN parses and validates the user-selected file, then
+sends bounded value-only polar grids to the Wasm component for TWS/TWA
+interpolation. A conservative Nicholson 35 Mk1 polar is bundled as the initial
+test model; selecting another model is remembered in the isolated profile.
+
 ## Build and test
 
 Use a Rust toolchain with `wasm32-wasip2`, ecCodes and jsoncpp. The optional

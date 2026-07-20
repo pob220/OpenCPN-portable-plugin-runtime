@@ -22,12 +22,15 @@ wasmtime::component::bindgen!({
     world: "plugin-world",
 });
 
-const HOST_ABI_VERSION: u32 = 6;
+const HOST_ABI_VERSION: u32 = 7;
 const ERROR_TEXT_LIMIT: usize = 4096;
 const SETTINGS_VALUE_LIMIT: usize = 64 * 1024;
 const OVERLAY_POINT_LIMIT: usize = 1_000_000;
 const CHART_SEGMENT_LIMIT: usize = 10_000;
 const ENVIRONMENT_SAMPLE_LIMIT: usize = 100_000;
+const POLAR_GRID_LIMIT: usize = 8;
+const POLAR_AXIS_LIMIT: usize = 200;
+const POLAR_CELL_LIMIT: usize = 200_000;
 const PRIVATE_READ_LIMIT: usize = 8 * 1024 * 1024;
 const EPOCH_TICK: Duration = Duration::from_millis(100);
 const CALL_EPOCH_DEADLINE: u64 = 50;
@@ -83,13 +86,26 @@ pub struct EnvironmentSample {
 }
 
 #[repr(C)]
+pub struct PolarGrid {
+    identity: *const c_char,
+    identity_len: usize,
+    true_wind_speeds_knots: *const f64,
+    true_wind_speed_count: usize,
+    true_wind_angles_degrees: *const f64,
+    true_wind_angle_count: usize,
+    boat_speeds_knots: *const f64,
+    boat_speed_count: usize,
+}
+
+#[repr(C)]
 pub struct RouteRequest {
     start_latitude: f64,
     start_longitude: f64,
     destination_latitude: f64,
     destination_longitude: f64,
     departure_unix_time: i64,
-    boat_speed_knots: f64,
+    polars: *const PolarGrid,
+    polar_count: usize,
     time_step_seconds: u32,
     heading_step_degrees: u16,
     max_hours: u32,
@@ -812,6 +828,17 @@ fn input_string(ptr: *const c_char, len: usize) -> anyhow::Result<String> {
     Ok(std::str::from_utf8(bytes)?.to_string())
 }
 
+fn input_doubles(ptr: *const f64, len: usize) -> anyhow::Result<Vec<f64>> {
+    if ptr.is_null() && len != 0 {
+        anyhow::bail!("null numeric pointer with non-zero length");
+    }
+    Ok(if len == 0 {
+        Vec::new()
+    } else {
+        unsafe { slice::from_raw_parts(ptr, len) }.to_vec()
+    })
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ocpn_portable_runtime_create(
     component_path: *const c_char,
@@ -1068,13 +1095,56 @@ pub unsafe extern "C" fn ocpn_portable_runtime_calculate_route(
     };
     let calculated = (|| -> anyhow::Result<()> {
         prepare_routing_call(runtime)?;
+        if request.polar_count == 0 || request.polar_count > POLAR_GRID_LIMIT {
+            anyhow::bail!("route request needs 1-{POLAR_GRID_LIMIT} polar grids");
+        }
+        if request.polars.is_null() {
+            anyhow::bail!("route polar pointer is null");
+        }
+        let raw_polars = unsafe { slice::from_raw_parts(request.polars, request.polar_count) };
+        let mut total_cells = 0usize;
+        let mut polars = Vec::with_capacity(raw_polars.len());
+        for raw in raw_polars {
+            if raw.true_wind_speed_count < 2
+                || raw.true_wind_speed_count > POLAR_AXIS_LIMIT
+                || raw.true_wind_angle_count < 2
+                || raw.true_wind_angle_count > POLAR_AXIS_LIMIT
+            {
+                anyhow::bail!("polar axes are outside the supported range");
+            }
+            let expected = raw
+                .true_wind_speed_count
+                .checked_mul(raw.true_wind_angle_count)
+                .ok_or_else(|| anyhow::anyhow!("polar dimensions overflow"))?;
+            if raw.boat_speed_count != expected {
+                anyhow::bail!("polar grid dimensions do not match boat speeds");
+            }
+            total_cells = total_cells
+                .checked_add(expected)
+                .ok_or_else(|| anyhow::anyhow!("polar cell count overflow"))?;
+            if total_cells > POLAR_CELL_LIMIT {
+                anyhow::bail!("route polar data exceeds the cell limit");
+            }
+            polars.push(exports::opencpn::portable::plugin::PolarGrid {
+                identity: input_string(raw.identity, raw.identity_len)?,
+                true_wind_speeds_knots: input_doubles(
+                    raw.true_wind_speeds_knots,
+                    raw.true_wind_speed_count,
+                )?,
+                true_wind_angles_degrees: input_doubles(
+                    raw.true_wind_angles_degrees,
+                    raw.true_wind_angle_count,
+                )?,
+                boat_speeds_knots: input_doubles(raw.boat_speeds_knots, raw.boat_speed_count)?,
+            });
+        }
         let request = exports::opencpn::portable::plugin::RouteRequest {
             start_latitude: request.start_latitude,
             start_longitude: request.start_longitude,
             destination_latitude: request.destination_latitude,
             destination_longitude: request.destination_longitude,
             departure_unix_time: request.departure_unix_time,
-            boat_speed_knots: request.boat_speed_knots,
+            polars,
             time_step_seconds: request.time_step_seconds,
             heading_step_degrees: request.heading_step_degrees,
             max_hours: request.max_hours,
@@ -1101,7 +1171,7 @@ pub unsafe extern "C" fn ocpn_portable_runtime_calculate_route(
         let route = runtime
             .bindings
             .opencpn_portable_plugin()
-            .call_calculate_route(&mut runtime.store, request)?
+            .call_calculate_route(&mut runtime.store, &request)?
             .map_err(anyhow::Error::msg)?;
         output.point_count = route.points.len();
         if route.points.len() > output.point_capacity
