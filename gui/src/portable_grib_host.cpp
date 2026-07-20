@@ -60,6 +60,10 @@ constexpr int kProgressTimerId = wxID_HIGHEST + 712;
 constexpr int kPlaybackTimerId = wxID_HIGHEST + 713;
 constexpr size_t kMaximumResultBytes = 32U * 1024U * 1024U;
 constexpr double kPi = 3.14159265358979323846;
+// This is a deliberately conservative physical ceiling, not a display clamp.
+// Values at or above common GRIB/NetCDF fill sentinels (for example 9999)
+// must be discarded rather than rendered or supplied to route calculations.
+constexpr double kMaximumCurrentMetresPerSecond = 12.0;
 constexpr const char* kCopernicusCredentialService =
     "OpenCPN iGRIB Copernicus Marine";
 constexpr const char* kCopernicusPasswordEnvironment =
@@ -76,6 +80,22 @@ struct DecodedEnvironmentFrame {
   std::map<wxString, wxString> units;
   std::map<wxString, wxString> source_times;
 };
+
+bool PlausibleDecodedValue(const wxString& kind, double value) {
+  if (!std::isfinite(value)) return false;
+  if (kind == "current-u" || kind == "current-v")
+    return std::abs(value) < kMaximumCurrentMetresPerSecond;
+  if (kind == "wind-u" || kind == "wind-v") return std::abs(value) <= 200.0;
+  if (kind == "wave-height") return value >= 0.0 && value <= 100.0;
+  if (kind == "wave-period") return value >= 0.0 && value <= 100.0;
+  if (kind == "wave-direction") return value >= 0.0 && value <= 360.0;
+  return true;
+}
+
+bool PlausibleCurrent(double u, double v) {
+  return std::isfinite(u) && std::isfinite(v) &&
+         std::hypot(u, v) < kMaximumCurrentMetresPerSecond;
+}
 
 bool ParseDecodedFrame(wxJSONValue& value, DecodedEnvironmentFrame* decoded,
                        wxString* error) {
@@ -100,8 +120,9 @@ bool ParseDecodedFrame(wxJSONValue& value, DecodedEnvironmentFrame* decoded,
       const double latitude = sample[0].AsDouble();
       const double longitude = sample[1].AsDouble();
       const double sample_value = sample[2].AsDouble();
-      if (std::isfinite(latitude) && std::isfinite(longitude) &&
-          std::isfinite(sample_value))
+      if (std::isfinite(latitude) && latitude >= -90.0 && latitude <= 90.0 &&
+          std::isfinite(longitude) && longitude >= -180.0 &&
+          longitude <= 180.0 && PlausibleDecodedValue(kind, sample_value))
         output.push_back({latitude, longitude, sample_value});
     }
   }
@@ -1793,13 +1814,16 @@ void PortableGribHost::Impl::SetCursorPosition(double latitude,
 
 void PortableGribHost::Impl::UpdateCursorStatus() {
   if (!cursor_status || !have_cursor || fields.empty()) return;
-  auto nearest = [&](const wxString& kind, double* value) {
+  auto nearest = [&](const wxString& kind, double* value,
+                     bool marine_only = false) {
     const auto found = fields.find(kind);
     if (found == fields.end() || found->second.empty()) return false;
     const double longitude_scale =
         std::max(0.1, std::cos(cursor_latitude * kPi / 180.0));
     double best_distance = std::numeric_limits<double>::max();
     for (const auto& sample : found->second) {
+      if (marine_only && !IsMarinePoint(sample.latitude, sample.longitude))
+        continue;
       const double dy = sample.latitude - cursor_latitude;
       const double dx = (sample.longitude - cursor_longitude) * longitude_scale;
       const double distance = dx * dx + dy * dy;
@@ -1846,19 +1870,20 @@ void PortableGribHost::Impl::UpdateCursorStatus() {
     else
       pressure_value->SetLabel(wxString::Format("%.1f hPa", hpa));
   }
-  if (marine_cursor && nearest("wave-height", &value)) {
+  if (marine_cursor && nearest("wave-height", &value, true)) {
     wxString label = wave_display.units == 1
                          ? wxString::Format("%.1f ft", value * 3.2808399)
                          : wxString::Format("%.2f m", value);
     double period = 0.0;
     double direction = 0.0;
-    if (nearest("wave-period", &period))
+    if (nearest("wave-period", &period, true))
       label += wxString::Format("  %.1f s", period);
-    if (nearest("wave-direction", &direction))
+    if (nearest("wave-direction", &direction, true))
       label += wxString::Format("  %03.0f° from", direction);
     wave_value->SetLabel(label);
   }
-  if (marine_cursor && nearest("current-u", &u) && nearest("current-v", &v)) {
+  if (marine_cursor && nearest("current-u", &u, true) &&
+      nearest("current-v", &v, true) && PlausibleCurrent(u, v)) {
     double toward = std::atan2(u, v) * 180.0 / kPi;
     if (toward < 0.0) toward += 360.0;
     current_value->SetLabel(
@@ -1898,7 +1923,8 @@ bool PortableGribHost::Impl::Render(ocpnDC& dc, const ViewPort& viewport) {
       const auto& vs = v->second[i];
       if (std::abs(us.latitude - vs.latitude) <= 0.001 &&
           std::abs(us.longitude - vs.longitude) <= 0.001 &&
-          (!marine_only || IsMarinePoint(us.latitude, us.longitude)))
+          (!marine_only || IsMarinePoint(us.latitude, us.longitude)) &&
+          (!marine_only || PlausibleCurrent(us.value, vs.value)))
         output.push_back(
             {us.latitude, us.longitude, std::hypot(us.value, vs.value)});
     }
@@ -2032,7 +2058,9 @@ bool PortableGribHost::Impl::Render(ocpnDC& dc, const ViewPort& viewport) {
         continue;
       if (marine_only && !IsMarinePoint(us.latitude, us.longitude)) continue;
       const double magnitude = std::hypot(us.value, vs.value);
-      if (magnitude < 0.01) continue;
+      if (magnitude < 0.01 ||
+          (marine_only && !PlausibleCurrent(us.value, vs.value)))
+        continue;
       const wxPoint origin = projection.GetPixFromLL(us.latitude, us.longitude);
       if (origin.x < 0 || origin.y < 0 || origin.x >= viewport.pix_width ||
           origin.y >= viewport.pix_height)
@@ -2529,14 +2557,17 @@ bool PortableGribHost::Impl::SampleBatch(
     CacheRoutingFrame(time, decoded);
   }
 
-  auto nearest = [](const DecodedEnvironmentFrame& frame, const wxString& name,
-                    double latitude, double longitude, double* output) {
+  auto nearest = [this](const DecodedEnvironmentFrame& frame,
+                        const wxString& name, double latitude, double longitude,
+                        double* output, bool marine_only = false) {
     const auto found = frame.fields.find(name);
     if (found == frame.fields.end() || found->second.empty()) return false;
     const Sample* best = nullptr;
     double best_distance = std::numeric_limits<double>::max();
     const double lon_scale = std::max(0.1, std::cos(latitude * kPi / 180.0));
     for (const auto& sample : found->second) {
+      if (marine_only && !IsMarinePoint(sample.latitude, sample.longitude))
+        continue;
       const double dy = sample.latitude - latitude;
       const double dx = (sample.longitude - longitude) * lon_scale;
       const double distance = dx * dx + dy * dy;
@@ -2548,6 +2579,40 @@ bool PortableGribHost::Impl::SampleBatch(
     if (!best || best_distance > 4.0) return false;
     *output = best->value;
     return true;
+  };
+  auto nearest_vector = [this](const DecodedEnvironmentFrame& frame,
+                               const wxString& u_name, const wxString& v_name,
+                               double latitude, double longitude,
+                               double* u_output, double* v_output,
+                               bool marine_only) {
+    const auto u_field = frame.fields.find(u_name);
+    const auto v_field = frame.fields.find(v_name);
+    if (u_field == frame.fields.end() || v_field == frame.fields.end())
+      return false;
+    const size_t count =
+        std::min(u_field->second.size(), v_field->second.size());
+    const double lon_scale = std::max(0.1, std::cos(latitude * kPi / 180.0));
+    double best_distance = std::numeric_limits<double>::max();
+    bool found = false;
+    for (size_t index = 0; index < count; ++index) {
+      const auto& u = u_field->second[index];
+      const auto& v = v_field->second[index];
+      if (std::abs(u.latitude - v.latitude) > 0.001 ||
+          std::abs(u.longitude - v.longitude) > 0.001 ||
+          (marine_only && !IsMarinePoint(u.latitude, u.longitude)) ||
+          (marine_only && !PlausibleCurrent(u.value, v.value)))
+        continue;
+      const double dy = u.latitude - latitude;
+      const double dx = (u.longitude - longitude) * lon_scale;
+      const double distance = dx * dx + dy * dy;
+      if (distance < best_distance) {
+        best_distance = distance;
+        *u_output = u.value;
+        *v_output = v.value;
+        found = true;
+      }
+    }
+    return found && best_distance <= 4.0;
   };
   results->clear();
   results->reserve(requests.size());
@@ -2566,21 +2631,21 @@ bool PortableGribHost::Impl::SampleBatch(
     const auto& frame = cached->second;
     const bool marine = IsMarinePoint(request.latitude, request.longitude);
     double u = 0.0, v = 0.0;
-    if (nearest(frame, "wind-u", request.latitude, request.longitude, &u) &&
-        nearest(frame, "wind-v", request.latitude, request.longitude, &v)) {
+    if (nearest_vector(frame, "wind-u", "wind-v", request.latitude,
+                       request.longitude, &u, &v, false)) {
       sample.wind_u_knots = u * 1.94384449;
       sample.wind_v_knots = v * 1.94384449;
       sample.available |= 1;
     }
     if (marine &&
-        nearest(frame, "current-u", request.latitude, request.longitude, &u) &&
-        nearest(frame, "current-v", request.latitude, request.longitude, &v)) {
+        nearest_vector(frame, "current-u", "current-v", request.latitude,
+                       request.longitude, &u, &v, true)) {
       sample.current_u_knots = u * 1.94384449;
       sample.current_v_knots = v * 1.94384449;
       sample.available |= 2;
     }
     if (marine && nearest(frame, "wave-height", request.latitude,
-                          request.longitude, &sample.wave_height_metres))
+                          request.longitude, &sample.wave_height_metres, true))
       sample.available |= 4;
     results->push_back(sample);
   }

@@ -30,7 +30,9 @@ default.
   iGRIB samples, batched GSHHS checks, cancellation, progress, retained route
   alternatives and user-selected GPX output. A bounded departure window uses
   up to four independent Wasmtime Stores concurrently and selects the earliest
-  safe arrival.
+  safe arrival. Route endpoints can be resolved from the live vessel position,
+  stable value snapshots of OpenCPN waypoints, the latest chart cursor or
+  manual coordinates; no core navigation object crosses the boundary.
 - Host-rendered declarative iGRIB surface with readable UTC timeline
   navigation/playback, chart-cursor values, progress/cancellation,
   open/settings/download/generate actions and native file pickers. Persistent
@@ -48,7 +50,9 @@ default.
   waves and currents through a cached point-in-polygon index built from the
   best bundled shapefile basemap; wind, pressure and air temperature remain
   visible over land. The same marine-only policy applies to typed environmental
-  batches consumed by iWeatherRouting.
+  batches consumed by iWeatherRouting. Both the decoder and host reject GRIB
+  missing-value sentinels and current vectors at or above 12 m/s before they
+  reach drawing, cursor readout or route sampling.
 - Standalone ecCodes helper supporting bounded `inspect` and `frame` operations
   with structured result/error JSON and atomic result publication. Sparse
   three-hourly wave height/period/direction records are selected within a
@@ -154,10 +158,12 @@ Measured conformance values for this machine are recorded in
   not an expansion of the WIT boundary into wxWidgets.
 - Chart coverage batching is real, but structured land/depth/drying/conflict
   safety evidence and route-shaped immutable caches are not yet implemented.
-- iWeatherRouting currently supports a start/destination route and a
-  conservative estimated sailing polar. Full polar-file interpolation,
-  intermediate waypoints and OpenCPN route-object publication remain later,
-  separately versioned services; exported GPX and overlays are implemented.
+- iWeatherRouting currently supports start/destination selection from live
+  position, OpenCPN waypoint snapshots, chart cursor or manual coordinates and
+  a conservative estimated sailing polar. Full polar-file interpolation,
+  ordered intermediate waypoints and OpenCPN route-object publication remain
+  later, separately versioned services; exported GPX and overlays are
+  implemented.
 - Production catalogue/TUF metadata, revocation, user permission-consent UI,
   cross-platform credential-store conformance, state migrations and a
   security-response ownership agreement remain absent.

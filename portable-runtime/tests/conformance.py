@@ -66,6 +66,17 @@ def run(command, timeout=60, expected=0):
     return result, elapsed_ms
 
 
+def assert_physical_marine_values(frame):
+    for field in frame.get("fields", []):
+        if field.get("kind") not in {"current-u", "current-v"}:
+            continue
+        for sample in field.get("samples", []):
+            if len(sample) != 3 or abs(float(sample[2])) >= 12.0:
+                raise RuntimeError(
+                    "decoder emitted an impossible current or missing-value sentinel"
+                )
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--package", required=True, type=pathlib.Path)
@@ -233,6 +244,7 @@ def main():
             frame = json.loads(frame_path.read_text())
             if frame.get("sampleCount", 0) < 1:
                 raise RuntimeError("fixture frame contained no supported samples")
+            assert_physical_marine_values(frame)
             decoded_frames = 1
             last_frame_ms = None
             if len(times) > 1:
@@ -243,6 +255,7 @@ def main():
                     120,
                 )
                 last_frame = json.loads(last_frame_path.read_text())
+                assert_physical_marine_values(last_frame)
                 if (last_frame.get("sampleCount", 0) < 1 or
                         last_frame.get("time") != times[-1] or
                         frame.get("time") == last_frame.get("time")):

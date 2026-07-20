@@ -10,7 +10,8 @@
   "requires": [
     {"interface": "org.opencpn.environment.provider", "range": ">=0.1.0 <0.2.0"}
   ],
-  "permissions": ["ui.commands", "weather-routing.compute", "environment.consume",
+  "permissions": ["ui.commands", "navigation.position.read", "navigation.objects.read",
+                  "weather-routing.compute", "environment.consume",
                   "charts.coverage", "storage.user-selected"],
   "resources": ["resources/iweather-routing.svg", "ui/iweather-routing.ui.json"],
   "licenses": ["GPL-2.0-or-later"],

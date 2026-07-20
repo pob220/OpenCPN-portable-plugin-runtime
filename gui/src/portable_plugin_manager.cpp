@@ -61,6 +61,7 @@ constexpr unsigned kMaximumWorkUnits = 10'000;
 constexpr size_t kChartSegmentLimit = 10'000;
 constexpr uint64_t kNetworkDownloadLimit = 512ULL * 1024ULL * 1024ULL;
 constexpr size_t kPrivateReadLimit = 8U * 1024U * 1024U;
+constexpr size_t kNavigationObjectLimit = 10'000;
 
 wxString FromUtf8(const char* data, size_t length) {
   if (!data || length == 0) return wxString();
@@ -215,6 +216,9 @@ public:
   std::map<int, Action> actions;
   std::shared_ptr<std::atomic<bool>> alive;
   bool stopped = false;
+  bool cursor_position_available = false;
+  double cursor_latitude = 0.0;
+  double cursor_longitude = 0.0;
 
   static void Log(void* user_data, uint32_t level, const char* message,
                   size_t message_len);
@@ -536,11 +540,58 @@ int32_t PortablePluginManager::Impl::OpenWeatherRouting(void* user_data) {
         if (candidate->enabled && !candidate->failed &&
             candidate->provides.count("org.opencpn.environment.provider") &&
             candidate->environmental_host) {
-          const wxString value = candidate->environmental_host->DatasetSummary();
+          const wxString value =
+              candidate->environmental_host->DatasetSummary();
           if (!value.StartsWith("No iGRIB")) return value;
         }
       }
       return wxString("No decoded iGRIB dataset is available");
+    };
+    auto waypoints = [owner = instance->owner, instance]() {
+      std::vector<PortableNavigationPosition> result;
+      if (!owner->HasPermission(*instance, "navigation.objects.read"))
+        return result;
+      const wxArrayString ids = GetWaypointGUIDArray();
+      result.reserve(std::min(ids.size(), kNavigationObjectLimit));
+      for (size_t index = 0;
+           index < ids.size() && result.size() < kNavigationObjectLimit;
+           ++index) {
+        auto waypoint = GetWaypoint_Plugin(ids[index]);
+        if (!waypoint || waypoint->m_GUID.empty() ||
+            !std::isfinite(waypoint->m_lat) ||
+            !std::isfinite(waypoint->m_lon) || waypoint->m_lat < -90.0 ||
+            waypoint->m_lat > 90.0 || waypoint->m_lon < -180.0 ||
+            waypoint->m_lon > 180.0)
+          continue;
+        wxString name = waypoint->m_MarkName;
+        if (name.empty()) name = "Unnamed waypoint";
+        result.push_back(
+            {waypoint->m_GUID, name, waypoint->m_lat, waypoint->m_lon});
+      }
+      std::stable_sort(result.begin(), result.end(),
+                       [](const auto& left, const auto& right) {
+                         return left.name.CmpNoCase(right.name) < 0;
+                       });
+      return result;
+    };
+    auto vessel = [owner = instance->owner,
+                   instance](PortableNavigationPosition* output) {
+      if (!output ||
+          !owner->HasPermission(*instance, "navigation.position.read") ||
+          !bGPSValid || !std::isfinite(gLat) || !std::isfinite(gLon))
+        return false;
+      *output = {"opencpn:vessel", "Current vessel position", gLat, gLon};
+      return true;
+    };
+    auto cursor = [owner = instance->owner,
+                   instance](PortableNavigationPosition* output) {
+      if (!output ||
+          !owner->HasPermission(*instance, "navigation.position.read") ||
+          !owner->cursor_position_available)
+        return false;
+      *output = {"opencpn:chart-cursor", "Latest chart cursor position",
+                 owner->cursor_latitude, owner->cursor_longitude};
+      return true;
     };
     const double latitude = std::isfinite(gLat) ? gLat : 53.0;
     const double longitude = std::isfinite(gLon) ? gLon : -5.0;
@@ -548,7 +599,8 @@ int32_t PortablePluginManager::Impl::OpenWeatherRouting(void* user_data) {
         std::make_unique<PortableWeatherRoutingHost>(
             instance->owner->plugin_manager->GetParentFrame(),
             instance->runtime, instance->runtime_mutex, instance->package_root,
-            std::move(summary), latitude, longitude);
+            std::move(summary), std::move(waypoints), std::move(vessel),
+            std::move(cursor), latitude, longitude);
   }
   wxString error;
   return instance->weather_routing_host->Show(&error) ? 0 : -2;
@@ -567,8 +619,8 @@ int32_t PortablePluginManager::Impl::EnvironmentSampleBatch(
   std::vector<PortableEnvironmentRequest> input;
   input.reserve(request_count);
   for (size_t i = 0; i < request_count; ++i)
-    input.push_back({requests[i].latitude, requests[i].longitude,
-                     requests[i].unix_time});
+    input.push_back(
+        {requests[i].latitude, requests[i].longitude, requests[i].unix_time});
   for (const auto& provider : instance->owner->instances) {
     if (!provider->enabled || provider->failed ||
         !provider->provides.count("org.opencpn.environment.provider") ||
@@ -580,8 +632,8 @@ int32_t PortablePluginManager::Impl::EnvironmentSampleBatch(
         sampled.size() != result_count)
       continue;
     for (size_t i = 0; i < result_count; ++i) {
-      results[i] = {sampled[i].wind_u_knots, sampled[i].wind_v_knots,
-                    sampled[i].current_u_knots, sampled[i].current_v_knots,
+      results[i] = {sampled[i].wind_u_knots,       sampled[i].wind_v_knots,
+                    sampled[i].current_u_knots,    sampled[i].current_v_knots,
                     sampled[i].wave_height_metres, sampled[i].available};
     }
     return 0;
@@ -589,8 +641,10 @@ int32_t PortablePluginManager::Impl::EnvironmentSampleBatch(
   return -2;
 }
 
-void PortablePluginManager::Impl::RoutingProgress(
-    void* user_data, uint8_t percent, const char* message, size_t message_len) {
+void PortablePluginManager::Impl::RoutingProgress(void* user_data,
+                                                  uint8_t percent,
+                                                  const char* message,
+                                                  size_t message_len) {
   auto* instance = static_cast<Instance*>(user_data);
   if (instance && instance->weather_routing_host)
     instance->weather_routing_host->ReportProgress(
@@ -626,11 +680,10 @@ int32_t PortablePluginManager::Impl::ChartsQuerySegments(
       continue;
     static std::mutex gshhs_mutex;
     std::lock_guard<std::mutex> lock(gshhs_mutex);
-    results[i].state = PlugIn_GSHHS_CrossesLand(
-                           segments[i].start.latitude,
-                           segments[i].start.longitude,
-                           segments[i].end.latitude,
-                           segments[i].end.longitude)
+    results[i].state = PlugIn_GSHHS_CrossesLand(segments[i].start.latitude,
+                                                segments[i].start.longitude,
+                                                segments[i].end.latitude,
+                                                segments[i].end.longitude)
                            ? 1
                            : 0;
     results[i].charts_considered = 1;
@@ -827,6 +880,7 @@ bool PortablePluginManager::Impl::Load() {
 
   const std::set<wxString> known_permissions = {"ui.commands",
                                                 "navigation.position.read",
+                                                "navigation.objects.read",
                                                 "settings.read-write",
                                                 "overlay.submit",
                                                 "jobs.compute",
@@ -934,8 +988,8 @@ bool PortablePluginManager::Impl::Load() {
         const wxString service_version = service[version_member].AsString();
         if (!service.IsObject() || !known_services.count(interface) ||
             service_version.empty()) {
-          wxLogError("Portable plugin %s has invalid %s service metadata",
-                     id, member);
+          wxLogError("Portable plugin %s has invalid %s service metadata", id,
+                     member);
           valid = false;
         } else {
           output->insert(interface);
@@ -1018,12 +1072,13 @@ bool PortablePluginManager::Impl::Load() {
   for (const auto& instance : instances) {
     for (const auto& required : instance->required_services) {
       if (!available_services.count(required))
-        wxLogWarning("Portable plugin %s has no provider for runtime service %s; "
-                     "dependent operations will fail closed",
-                     instance->id, required);
+        wxLogWarning(
+            "Portable plugin %s has no provider for runtime service %s; "
+            "dependent operations will fail closed",
+            instance->id, required);
       else
-        wxLogMessage("Portable plugin %s discovered service %s",
-                     instance->id, required);
+        wxLogMessage("Portable plugin %s discovered service %s", instance->id,
+                     required);
     }
   }
   if (!actions.empty())
@@ -1140,6 +1195,13 @@ bool PortablePluginManager::Impl::Render(ocpnDC& dc, const ViewPort& viewport,
 
 void PortablePluginManager::Impl::SetCursorPosition(double latitude,
                                                     double longitude) {
+  if (std::isfinite(latitude) && std::isfinite(longitude) &&
+      latitude >= -90.0 && latitude <= 90.0 && longitude >= -180.0 &&
+      longitude <= 180.0) {
+    cursor_position_available = true;
+    cursor_latitude = latitude;
+    cursor_longitude = longitude;
+  }
   for (const auto& instance : instances) {
     if (instance->enabled && !instance->failed && instance->environmental_host)
       instance->environmental_host->SetCursorPosition(latitude, longitude);

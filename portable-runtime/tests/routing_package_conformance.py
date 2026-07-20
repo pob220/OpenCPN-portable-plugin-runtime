@@ -44,6 +44,8 @@ def main():
             "weather-routing.compute",
             "environment.consume",
             "charts.coverage",
+            "navigation.position.read",
+            "navigation.objects.read",
         }
         if not required.issubset(set(manifest.get("permissions", []))):
             raise RuntimeError("routing package omits a required capability")
@@ -62,7 +64,12 @@ def main():
         }
         required_controls = {
             "start-latitude",
+            "start-source",
+            "start-waypoint",
             "destination-latitude",
+            "destination-source",
+            "destination-waypoint",
+            "refresh-positions",
             "departure-utc",
             "polar-reference-speed",
             "environment-provider",

@@ -213,9 +213,12 @@ After opening or generating a multi-time GRIB in iGRIB, select the
 1. Confirm the forecast summary names the iGRIB file and reports its forecast
    time count. This is service discovery through the host broker; no native
    xGRIB message strings are involved.
-2. Enter a short start/destination pair entirely inside the GRIB and GSHHS
-   coverage. Keep the first run below roughly 30 NM, use the default one-hour
-   step and press **Calculate route**.
+2. Choose each supported position source in turn: live vessel position,
+   OpenCPN waypoint, latest chart-cursor position and manual coordinates.
+   **Refresh OpenCPN positions** must update the waypoint lists after marks are
+   created or imported. Choose a short start/destination pair entirely inside
+   the GRIB and GSHHS coverage. Keep the first run below roughly 30 NM, use the
+   default one-hour step and press **Calculate route**.
 3. Verify progress remains responsive and the result reports points, distance,
    duration and states examined. The magenta route should appear on the chart.
    The component requests forecast-time/position batches; iGRIB decodes the
@@ -239,9 +242,10 @@ After opening or generating a multi-time GRIB in iGRIB, select the
 The present component uses a deliberately conservative estimated sailing
 polar controlled by the reference-speed field. The Advanced page can compare
 a bounded forward departure window in a four-worker component-instance pool
-and retain alternatives. Loading full vessel polar profiles and route
-waypoints are explicit follow-on interfaces; testers should not interpret
-this reference engine as a replacement for a commissioned vessel model.
+and retain alternatives. Loading full vessel polar profiles and ordered
+intermediate-waypoint sequences are explicit follow-on interfaces; testers
+should not interpret this reference engine as a replacement for a commissioned
+vessel model.
 
 ## 7. Conformance tests
 

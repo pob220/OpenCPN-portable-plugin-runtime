@@ -13,6 +13,7 @@
 #include <wx/button.h>
 #include <wx/app.h>
 #include <wx/checkbox.h>
+#include <wx/choice.h>
 #include <wx/datetime.h>
 #include <wx/filedlg.h>
 #include <wx/filename.h>
@@ -36,6 +37,12 @@
 
 namespace {
 constexpr size_t kMaximumRoutePoints = 20000;
+enum PositionSource {
+  kVesselPosition = 0,
+  kOpenCpnWaypoint = 1,
+  kChartCursor = 2,
+  kManualCoordinates = 3,
+};
 void AddRow(wxFlexGridSizer* grid, wxWindow* parent, const wxString& label,
             wxWindow* control) {
   grid->Add(new wxStaticText(parent, wxID_ANY, label), 0,
@@ -81,9 +88,14 @@ bool LoadSurface(const wxString& package_root, wxString* title,
     tabs->Add(value["tabs"][index].AsString());
   }
   const std::set<wxString> required_controls = {"start-latitude",
+                                                "start-source",
+                                                "start-waypoint",
                                                 "start-longitude",
                                                 "destination-latitude",
+                                                "destination-source",
+                                                "destination-waypoint",
                                                 "destination-longitude",
+                                                "refresh-positions",
                                                 "departure-utc",
                                                 "polar-reference-speed",
                                                 "environment-provider",
@@ -149,12 +161,18 @@ public:
   Impl(wxWindow* parent_value, ocpn_portable_runtime* runtime_value,
        std::shared_ptr<std::mutex> runtime_mutex_value,
        wxString package_root_value, std::function<wxString()> summary,
-       double latitude, double longitude)
+       std::function<std::vector<PortableNavigationPosition>()> waypoints,
+       std::function<bool(PortableNavigationPosition*)> vessel,
+       std::function<bool(PortableNavigationPosition*)> cursor, double latitude,
+       double longitude)
       : parent(parent_value),
         runtime(runtime_value),
         runtime_mutex(std::move(runtime_mutex_value)),
         package_root(std::move(package_root_value)),
         dataset_summary(std::move(summary)),
+        list_waypoints(std::move(waypoints)),
+        vessel_position(std::move(vessel)),
+        cursor_position(std::move(cursor)),
         initial_latitude(latitude),
         initial_longitude(longitude) {}
   ~Impl() { Shutdown(); }
@@ -170,6 +188,9 @@ private:
   wxPanel* CreateSafetyPanel(wxNotebook* book);
   wxPanel* CreateAdvancedPanel(wxNotebook* book);
   wxPanel* CreateResultsPanel(wxNotebook* book);
+  void RefreshNavigationPositions(bool initial = false);
+  bool ApplyPositionSource(bool start, bool report_error = true);
+  void UpdatePositionControls(bool start);
   void Start();
   void Finish(bool success, wxString message, RoutingOutcome selected,
               std::vector<std::vector<ocpn_portable_route_point>> alternatives,
@@ -188,11 +209,18 @@ private:
   std::map<wxString, wxString> surface_labels;
   bool surface_loaded = false;
   std::function<wxString()> dataset_summary;
+  std::function<std::vector<PortableNavigationPosition>()> list_waypoints;
+  std::function<bool(PortableNavigationPosition*)> vessel_position;
+  std::function<bool(PortableNavigationPosition*)> cursor_position;
+  std::vector<PortableNavigationPosition> waypoints;
   double initial_latitude = 0.0;
   double initial_longitude = 0.0;
   wxFrame* frame = nullptr;
   wxTextCtrl *start_lat = nullptr, *start_lon = nullptr, *dest_lat = nullptr,
              *dest_lon = nullptr, *departure = nullptr, *boat_speed = nullptr;
+  wxChoice *start_source = nullptr, *start_waypoint = nullptr,
+           *dest_source = nullptr, *dest_waypoint = nullptr;
+  wxButton* refresh_positions = nullptr;
   wxSpinCtrl *time_step = nullptr, *heading_step = nullptr,
              *max_hours = nullptr, *max_states = nullptr,
              *departure_window = nullptr, *departure_spacing = nullptr;
@@ -229,14 +257,29 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateRoutePanel(wxNotebook* book) {
   departure = new wxTextCtrl(
       panel, wxID_ANY, wxDateTime::Now().ToUTC().Format("%Y-%m-%dT%H:%MZ"));
   boat_speed = new wxTextCtrl(panel, wxID_ANY, "7.0");
+  const wxArrayString position_sources = {
+      "Current vessel position", "OpenCPN waypoint",
+      "Latest chart cursor position", "Manual coordinates"};
+  start_source = new wxChoice(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+                              position_sources);
+  start_waypoint = new wxChoice(panel, wxID_ANY);
+  dest_source = new wxChoice(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+                             position_sources);
+  dest_waypoint = new wxChoice(panel, wxID_ANY);
+  refresh_positions = new wxButton(panel, wxID_ANY, Label("refresh-positions"));
+  AddRow(grid, panel, Label("start-source"), start_source);
+  AddRow(grid, panel, Label("start-waypoint"), start_waypoint);
   AddRow(grid, panel, Label("start-latitude"), start_lat);
   AddRow(grid, panel, Label("start-longitude"), start_lon);
+  AddRow(grid, panel, Label("destination-source"), dest_source);
+  AddRow(grid, panel, Label("destination-waypoint"), dest_waypoint);
   AddRow(grid, panel, Label("destination-latitude"), dest_lat);
   AddRow(grid, panel, Label("destination-longitude"), dest_lon);
   AddRow(grid, panel, Label("departure-utc"), departure);
   AddRow(grid, panel, Label("polar-reference-speed"), boat_speed);
   provider = new wxStaticText(panel, wxID_ANY, dataset_summary());
   root->Add(grid, 0, wxEXPAND | wxALL, 12);
+  root->Add(refresh_positions, 0, wxLEFT | wxRIGHT | wxBOTTOM, 12);
   root->Add(new wxStaticLine(panel), 0, wxEXPAND | wxLEFT | wxRIGHT, 12);
   root->Add(provider, 0, wxEXPAND | wxALL, 12);
   root->Add(
@@ -245,7 +288,142 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateRoutePanel(wxNotebook* book) {
                        "through iGRIB's typed host-brokered provider service."),
       0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 12);
   panel->SetSizer(root);
+  start_source->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
+    UpdatePositionControls(true);
+    ApplyPositionSource(true);
+  });
+  dest_source->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
+    UpdatePositionControls(false);
+    ApplyPositionSource(false);
+  });
+  start_waypoint->Bind(wxEVT_CHOICE,
+                       [this](wxCommandEvent&) { ApplyPositionSource(true); });
+  dest_waypoint->Bind(wxEVT_CHOICE,
+                      [this](wxCommandEvent&) { ApplyPositionSource(false); });
+  refresh_positions->Bind(
+      wxEVT_BUTTON, [this](wxCommandEvent&) { RefreshNavigationPositions(); });
   return panel;
+}
+
+void PortableWeatherRoutingHost::Impl::UpdatePositionControls(bool start) {
+  wxChoice* source = start ? start_source : dest_source;
+  wxChoice* waypoint = start ? start_waypoint : dest_waypoint;
+  wxTextCtrl* latitude = start ? start_lat : dest_lat;
+  wxTextCtrl* longitude = start ? start_lon : dest_lon;
+  if (!source || !waypoint || !latitude || !longitude) return;
+  const int selected = source->GetSelection();
+  waypoint->Enable(selected == kOpenCpnWaypoint && !waypoints.empty());
+  const bool manual = selected == kManualCoordinates;
+  latitude->SetEditable(manual);
+  longitude->SetEditable(manual);
+}
+
+bool PortableWeatherRoutingHost::Impl::ApplyPositionSource(bool start,
+                                                           bool report_error) {
+  wxChoice* source = start ? start_source : dest_source;
+  wxChoice* waypoint = start ? start_waypoint : dest_waypoint;
+  wxTextCtrl* latitude = start ? start_lat : dest_lat;
+  wxTextCtrl* longitude = start ? start_lon : dest_lon;
+  if (!source || !waypoint || !latitude || !longitude) return false;
+  PortableNavigationPosition selected;
+  bool available = false;
+  switch (source->GetSelection()) {
+    case kVesselPosition:
+      available = vessel_position && vessel_position(&selected);
+      break;
+    case kOpenCpnWaypoint: {
+      const int index = waypoint->GetSelection();
+      if (index >= 0 && static_cast<size_t>(index) < waypoints.size()) {
+        selected = waypoints[static_cast<size_t>(index)];
+        available = true;
+      }
+      break;
+    }
+    case kChartCursor:
+      available = cursor_position && cursor_position(&selected);
+      break;
+    case kManualCoordinates:
+      return true;
+    default:
+      break;
+  }
+  if (!available) {
+    if (report_error && status)
+      status->SetLabel(start ? "The selected start position is unavailable"
+                             : "The selected destination is unavailable");
+    return false;
+  }
+  latitude->SetValue(wxString::Format("%.6f", selected.latitude));
+  longitude->SetValue(wxString::Format("%.6f", selected.longitude));
+  if (report_error && status)
+    status->SetLabel(
+        wxString::Format("%s: %s (%.5f, %.5f)", start ? "Start" : "Destination",
+                         selected.name, selected.latitude, selected.longitude));
+  return true;
+}
+
+void PortableWeatherRoutingHost::Impl::RefreshNavigationPositions(
+    bool initial) {
+  const wxString start_id =
+      start_waypoint && start_waypoint->GetSelection() != wxNOT_FOUND &&
+              static_cast<size_t>(start_waypoint->GetSelection()) <
+                  waypoints.size()
+          ? waypoints[static_cast<size_t>(start_waypoint->GetSelection())].id
+          : wxString();
+  const wxString destination_id =
+      dest_waypoint && dest_waypoint->GetSelection() != wxNOT_FOUND &&
+              static_cast<size_t>(dest_waypoint->GetSelection()) <
+                  waypoints.size()
+          ? waypoints[static_cast<size_t>(dest_waypoint->GetSelection())].id
+          : wxString();
+  waypoints = list_waypoints ? list_waypoints()
+                             : std::vector<PortableNavigationPosition>();
+  start_waypoint->Clear();
+  dest_waypoint->Clear();
+  int restored_start = wxNOT_FOUND;
+  int restored_destination = wxNOT_FOUND;
+  for (size_t index = 0; index < waypoints.size(); ++index) {
+    const auto& point = waypoints[index];
+    const wxString display = wxString::Format("%s  —  %.5f, %.5f", point.name,
+                                              point.latitude, point.longitude);
+    start_waypoint->Append(display);
+    dest_waypoint->Append(display);
+    if (point.id == start_id) restored_start = static_cast<int>(index);
+    if (point.id == destination_id)
+      restored_destination = static_cast<int>(index);
+  }
+  if (!waypoints.empty()) {
+    start_waypoint->SetSelection(
+        restored_start == wxNOT_FOUND ? 0 : restored_start);
+    dest_waypoint->SetSelection(
+        restored_destination == wxNOT_FOUND
+            ? static_cast<int>(waypoints.size() > 1 ? waypoints.size() - 1 : 0)
+            : restored_destination);
+  }
+  if (initial) {
+    PortableNavigationPosition current;
+    if (vessel_position && vessel_position(&current))
+      start_source->SetSelection(kVesselPosition);
+    else if (!waypoints.empty())
+      start_source->SetSelection(kOpenCpnWaypoint);
+    else if (cursor_position && cursor_position(&current))
+      start_source->SetSelection(kChartCursor);
+    else
+      start_source->SetSelection(kManualCoordinates);
+    if (!waypoints.empty())
+      dest_source->SetSelection(kOpenCpnWaypoint);
+    else if (cursor_position && cursor_position(&current))
+      dest_source->SetSelection(kChartCursor);
+    else
+      dest_source->SetSelection(kManualCoordinates);
+  }
+  UpdatePositionControls(true);
+  UpdatePositionControls(false);
+  ApplyPositionSource(true, false);
+  ApplyPositionSource(false, false);
+  if (!initial && status)
+    status->SetLabel(
+        wxString::Format("Loaded %zu OpenCPN waypoint(s)", waypoints.size()));
 }
 
 wxPanel* PortableWeatherRoutingHost::Impl::CreateSafetyPanel(wxNotebook* book) {
@@ -341,7 +519,8 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateResultsPanel(
 
 void PortableWeatherRoutingHost::Impl::CreateFrame() {
   frame = new wxFrame(parent, wxID_ANY, surface_title, wxDefaultPosition,
-                      wxSize(720, 570), wxDEFAULT_FRAME_STYLE);
+                      wxSize(760, 650),
+                      wxDEFAULT_FRAME_STYLE | wxFRAME_FLOAT_ON_PARENT);
   auto* root = new wxBoxSizer(wxVERTICAL);
   auto* book = new wxNotebook(frame, wxID_ANY);
   book->AddPage(CreateRoutePanel(book), surface_tabs[0]);
@@ -374,6 +553,7 @@ void PortableWeatherRoutingHost::Impl::CreateFrame() {
       frame->Hide();
   });
   frame->SetSizer(root);
+  RefreshNavigationPositions(true);
 }
 
 bool PortableWeatherRoutingHost::Impl::Show(wxString* error) {
@@ -387,7 +567,10 @@ bool PortableWeatherRoutingHost::Impl::Show(wxString* error) {
       return false;
     surface_loaded = true;
   }
-  if (!frame) CreateFrame();
+  if (!frame)
+    CreateFrame();
+  else
+    RefreshNavigationPositions(false);
   provider->SetLabel(dataset_summary());
   frame->Show();
   frame->Raise();
@@ -396,6 +579,7 @@ bool PortableWeatherRoutingHost::Impl::Show(wxString* error) {
 
 void PortableWeatherRoutingHost::Impl::Start() {
   if (worker.joinable()) return;
+  if (!ApplyPositionSource(true) || !ApplyPositionSource(false)) return;
   ocpn_portable_route_request request{};
   if (!Number(start_lat, &request.start_latitude) ||
       !Number(start_lon, &request.start_longitude) ||
@@ -646,10 +830,16 @@ void PortableWeatherRoutingHost::Impl::Shutdown() {
 PortableWeatherRoutingHost::PortableWeatherRoutingHost(
     wxWindow* parent, ocpn_portable_runtime* runtime,
     std::shared_ptr<std::mutex> runtime_mutex, const wxString& package_root,
-    std::function<wxString()> summary, double latitude, double longitude)
-    : m_impl(std::make_unique<Impl>(parent, runtime, std::move(runtime_mutex),
-                                    package_root, std::move(summary), latitude,
-                                    longitude)) {}
+    std::function<wxString()> summary,
+    std::function<std::vector<PortableNavigationPosition>()> list_waypoints,
+    std::function<bool(PortableNavigationPosition*)> vessel_position,
+    std::function<bool(PortableNavigationPosition*)> cursor_position,
+    double latitude, double longitude)
+    : m_impl(std::make_unique<Impl>(
+          parent, runtime, std::move(runtime_mutex), package_root,
+          std::move(summary), std::move(list_waypoints),
+          std::move(vessel_position), std::move(cursor_position), latitude,
+          longitude)) {}
 PortableWeatherRoutingHost::~PortableWeatherRoutingHost() = default;
 bool PortableWeatherRoutingHost::Show(wxString* error) {
   return m_impl->Show(error);

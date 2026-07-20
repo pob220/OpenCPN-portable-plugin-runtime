@@ -110,6 +110,16 @@ std::string FieldKind(codes_handle* handle) {
   return {};
 }
 
+bool PlausibleFieldValue(const std::string& kind, double value) {
+  if (!std::isfinite(value)) return false;
+  if (kind == "current-u" || kind == "current-v") return std::abs(value) < 12.0;
+  if (kind == "wind-u" || kind == "wind-v") return std::abs(value) <= 200.0;
+  if (kind == "wave-height") return value >= 0.0 && value <= 100.0;
+  if (kind == "wave-period") return value >= 0.0 && value <= 100.0;
+  if (kind == "wave-direction") return value >= 0.0 && value <= 360.0;
+  return true;
+}
+
 File Open(const std::filesystem::path& path) {
   if (!std::filesystem::is_regular_file(path))
     throw Error("input is not a regular file");
@@ -232,13 +242,18 @@ Json::Value DecodeFrame(const std::filesystem::path& path,
         Json::Int64(nearest->second.minutes - requested_minutes);
     Json::Value samples(Json::arrayValue);
     double latitude = 0.0, longitude = 0.0, value = 0.0;
+    double missing_value = 0.0;
+    const bool has_missing_value =
+        codes_get_double(handle.get(), "missingValue", &missing_value) == 0 &&
+        std::isfinite(missing_value);
     size_t index = 0;
     while (codes_grib_iterator_next(iterator.get(), &latitude, &longitude,
                                     &value)) {
       if (index++ % stride != 0) continue;
       if (!std::isfinite(latitude) || !std::isfinite(longitude) ||
-          !std::isfinite(value) || latitude < -90.0 || latitude > 90.0 ||
-          longitude < -360.0 || longitude > 360.0)
+          !PlausibleFieldValue(kind, value) || latitude < -90.0 ||
+          latitude > 90.0 || longitude < -360.0 || longitude > 360.0 ||
+          (has_missing_value && value == missing_value))
         continue;
       Json::Value sample(Json::arrayValue);
       sample.append(latitude);
