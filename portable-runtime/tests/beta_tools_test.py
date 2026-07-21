@@ -2,6 +2,7 @@
 
 import importlib.util
 import pathlib
+import re
 import subprocess
 import sys
 import unittest
@@ -93,6 +94,36 @@ class BetaToolsTest(unittest.TestCase):
         self.assertIn('ln -s "../share/opencpn/$name"', source)
         self.assertIn("org.opencpn.igrib-0.1.0.ocpnp", source)
         self.assertIn("org.opencpn.iweather-routing-0.1.0.ocpnp", source)
+
+    def test_beta_prerequisites_cover_generator_dependencies(self):
+        source = (BETA / "debian-prerequisites.sh").read_text()
+        for package in (
+            "libeccodes-dev",
+            "libjsoncpp-dev",
+            "libnetcdf-dev",
+            "libcurl4-openssl-dev",
+            "libqhull-dev",
+            "libblosc-dev",
+            "libzip-dev",
+            "libsodium-dev",
+            "libzstd-dev",
+            "libproj-dev",
+            "libbz2-dev",
+        ):
+            self.assertIn(package, source)
+
+    def test_beta_generator_integrity_pin_matches_submodule(self):
+        source = (BETA / "build-linux.sh").read_text()
+        match = re.search(r'^generator_commit="([0-9a-f]{40})"$', source, re.M)
+        self.assertIsNotNone(match)
+        actual = subprocess.run(
+            ["git", "-C", str(RUNTIME / "vendor/environmental-grib-generator"),
+             "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        self.assertEqual(match.group(1), actual)
 
 
 if __name__ == "__main__":

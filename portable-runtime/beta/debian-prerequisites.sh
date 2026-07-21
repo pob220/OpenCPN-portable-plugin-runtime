@@ -38,6 +38,7 @@ packages=(
   libqhull-dev
   libshp-dev
   libsndfile1-dev
+  libsodium-dev
   libsqlite3-dev
   libssl-dev
   libtinyxml-dev
@@ -48,6 +49,7 @@ packages=(
   libwxgtk-webview3.2-dev
   libwxsvg-dev
   libzip-dev
+  libzstd-dev
   lsb-release
   ninja-build
   pkg-config
