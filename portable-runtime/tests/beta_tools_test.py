@@ -125,6 +125,16 @@ class BetaToolsTest(unittest.TestCase):
         ).stdout.strip()
         self.assertEqual(match.group(1), actual)
 
+    def test_all_linux_eccodes_consumers_validate_the_public_header(self):
+        runtime_cmake = (RUNTIME / "CMakeLists.txt").read_text()
+        generator_cmake = (
+            RUNTIME / "vendor/environmental-grib-generator/CMakeLists.txt"
+        ).read_text()
+        for source in (runtime_cmake, generator_cmake):
+            self.assertIn("find_path(", source)
+            self.assertIn("eccodes.h", source)
+            self.assertIn("INTERFACE_INCLUDE_DIRECTORIES", source)
+
 
 if __name__ == "__main__":
     unittest.main()

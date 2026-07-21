@@ -26,6 +26,17 @@ if (OCPN_IGRIB_BUILD_NATIVE_HELPER)
   else ()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(IGRIB_ECCODES REQUIRED IMPORTED_TARGET eccodes)
+    # Ubuntu multiarch packages can publish an eccodes.pc includedir relative
+    # to the pkg-config directory (for example /usr/lib/include).  Resolve the
+    # installed public header and reject the dependency if it is not real.
+    find_path(IGRIB_ECCODES_HEADER_DIRECTORY NAMES eccodes.h
+              HINTS ${IGRIB_ECCODES_INCLUDE_DIRS})
+    if (NOT IGRIB_ECCODES_HEADER_DIRECTORY)
+      message(FATAL_ERROR "Could not locate the ecCodes public headers")
+    endif ()
+    set_property(TARGET PkgConfig::IGRIB_ECCODES PROPERTY
+                 INTERFACE_INCLUDE_DIRECTORIES
+                 "${IGRIB_ECCODES_HEADER_DIRECTORY}")
     pkg_check_modules(IGRIB_JSONCPP REQUIRED IMPORTED_TARGET jsoncpp)
     set(_igrib_decoder_libraries PkgConfig::IGRIB_ECCODES
                                  PkgConfig::IGRIB_JSONCPP)
