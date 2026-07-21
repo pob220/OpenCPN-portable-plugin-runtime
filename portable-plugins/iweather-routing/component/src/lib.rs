@@ -1010,6 +1010,20 @@ impl exports::opencpn::portable::plugin::Guest for IWeatherRouting {
             Err(format!("unknown iWeatherRouting action: {action_id}"))
         }
     }
+    fn on_surface_event(
+        surface_id: String,
+        control_id: String,
+        value_json: String,
+    ) -> Result<String, String> {
+        if surface_id != "weather-routing.main" {
+            return Err(format!("unknown iWeatherRouting surface: {surface_id}"));
+        }
+        if control_id.is_empty() || value_json.len() > 64 * 1024 {
+            return Err("invalid weather-routing surface event".into());
+        }
+        host::setting_set(&format!("surface.{control_id}"), &value_json)?;
+        Ok(value_json)
+    }
     fn on_job_event(_: String, _: exports::opencpn::portable::plugin::JobEvent) {}
     fn calculate_route(request: RouteRequest) -> Result<RouteResult, String> {
         calculate(request)

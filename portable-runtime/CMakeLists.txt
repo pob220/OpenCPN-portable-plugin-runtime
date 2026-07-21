@@ -13,20 +13,44 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 option(OCPN_IGRIB_BUILD_NATIVE_HELPER
        "Build the experimental ecCodes iGRIB decode helper" ON)
+option(OCPN_IGRIB_BUILD_GENERATOR_HELPER
+       "Build the shared environmental GRIB generator sidecar" ON)
 set(OCPN_IGRIB_GENERATOR_HELPER "" CACHE FILEPATH
-    "Optional environmental-grib executable included as a target sidecar")
+    "Optional prebuilt environmental-grib sidecar (overrides the shared source build)")
 
 if (OCPN_IGRIB_BUILD_NATIVE_HELPER)
-  find_package(PkgConfig REQUIRED)
-  pkg_check_modules(IGRIB_ECCODES REQUIRED IMPORTED_TARGET eccodes)
-  pkg_check_modules(IGRIB_JSONCPP REQUIRED IMPORTED_TARGET jsoncpp)
+  if (WIN32)
+    find_package(eccodes CONFIG REQUIRED)
+    find_package(jsoncpp CONFIG REQUIRED)
+    set(_igrib_decoder_libraries eccodes JsonCpp::JsonCpp)
+  else ()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(IGRIB_ECCODES REQUIRED IMPORTED_TARGET eccodes)
+    pkg_check_modules(IGRIB_JSONCPP REQUIRED IMPORTED_TARGET jsoncpp)
+    set(_igrib_decoder_libraries PkgConfig::IGRIB_ECCODES
+                                 PkgConfig::IGRIB_JSONCPP)
+  endif ()
   add_executable(igrib_environment_helper
                  helper/igrib_environment_helper.cpp)
   target_compile_features(igrib_environment_helper PRIVATE cxx_std_17)
-  target_compile_options(igrib_environment_helper PRIVATE
-                         -Wall -Wextra -Wpedantic)
+  if (MSVC)
+    target_compile_options(igrib_environment_helper PRIVATE /W4)
+  else ()
+    target_compile_options(igrib_environment_helper PRIVATE
+                           -Wall -Wextra -Wpedantic)
+  endif ()
   target_link_libraries(igrib_environment_helper PRIVATE
-                        PkgConfig::IGRIB_ECCODES PkgConfig::IGRIB_JSONCPP)
+                        ${_igrib_decoder_libraries})
+endif ()
+
+# This is deliberately a separately maintained helper process rather than
+# provider code linked into OpenCPN.  Building the exact vendored revision as
+# part of the portable-runtime graph makes packages reproducible and prevents
+# a stale executable elsewhere on a developer machine being bundled by
+# accident.  A prebuilt helper remains available for cross-compilation jobs.
+if (OCPN_IGRIB_BUILD_GENERATOR_HELPER AND NOT OCPN_IGRIB_GENERATOR_HELPER)
+  add_subdirectory(vendor/environmental-grib-generator
+                   environmental-grib-generator EXCLUDE_FROM_ALL)
 endif ()
 
 set(_portable_env
@@ -128,6 +152,18 @@ if (OCPN_IGRIB_GENERATOR_HELPER)
     COMMENT "Adding the environmental generator sidecar to iGRIB"
     VERBATIM
   )
+elseif (OCPN_IGRIB_BUILD_GENERATOR_HELPER)
+  set(_igrib_generator_copy
+      "${_igrib_helpers}/environmental-grib${_igrib_executable_suffix}")
+  add_custom_command(
+    OUTPUT "${_igrib_generator_copy}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${_igrib_helpers}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:environmental-grib>" "${_igrib_generator_copy}"
+    DEPENDS environmental-grib
+    COMMENT "Adding the shared environmental generator sidecar to iGRIB"
+    VERBATIM
+  )
 endif ()
 file(GLOB_RECURSE _igrib_sources CONFIGURE_DEPENDS
      "${_igrib_source}/component/src/*.rs")
@@ -209,6 +245,12 @@ add_custom_command(
 )
 add_custom_target(portable_igrib_package ALL
                   DEPENDS "${_igrib_package_stamp}" "${_igrib_archive}")
+if (OCPN_BUILD_TEST AND OCPN_IGRIB_BUILD_GENERATOR_HELPER AND
+    NOT OCPN_IGRIB_GENERATOR_HELPER)
+  add_dependencies(portable_igrib_package environmental_grib_tests
+                   environmental_grib_xtd_tests
+                   environmental_grib_merge_tests)
+endif ()
 set(OCPN_PORTABLE_IGRIB_PACKAGE "${_igrib_package}" CACHE INTERNAL
     "Build-tree iGRIB portable package")
 set(OCPN_PORTABLE_IGRIB_ARCHIVE "${_igrib_archive}" CACHE INTERNAL
@@ -289,6 +331,17 @@ set(OCPN_PORTABLE_IWR_ARCHIVE "${_iwr_archive}" CACHE INTERNAL
 
 if (OCPN_BUILD_TEST)
   find_package(Threads REQUIRED)
+  add_executable(portable_service_version_test
+                 tests/portable_service_version_test.cpp)
+  target_compile_features(portable_service_version_test PRIVATE cxx_std_17)
+  target_compile_options(portable_service_version_test PRIVATE
+                         -Wall -Wextra -Wpedantic)
+  target_include_directories(
+    portable_service_version_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/gui/include/gui"
+  )
+  add_test(NAME portable_service_version COMMAND portable_service_version_test)
+
   add_executable(
     portable_polar_test
     tests/portable_polar_test.cpp
@@ -337,6 +390,22 @@ if (OCPN_BUILD_TEST)
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/beta_tools_test.py"
   )
   if (OCPN_IGRIB_BUILD_NATIVE_HELPER)
+    if (_igrib_generator_copy)
+      add_test(
+        NAME portable_environment_helper_fields
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/environment_helper_test.py"
+                "$<TARGET_FILE:igrib_environment_helper>"
+                "${_igrib_generator_copy}"
+      )
+    else ()
+      add_test(
+        NAME portable_environment_helper_fields
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/environment_helper_test.py"
+                "$<TARGET_FILE:igrib_environment_helper>"
+      )
+    endif ()
     add_test(
       NAME portable_igrib_conformance
       COMMAND "${Python3_EXECUTABLE}"
@@ -344,6 +413,12 @@ if (OCPN_BUILD_TEST)
               --package "${_igrib_archive}"
               --trusted-key
               "${CMAKE_CURRENT_SOURCE_DIR}/development-keys/igrib-ed25519-public.pem"
+    )
+    add_test(
+      NAME portable_iweather_routing_environment_fixture
+      COMMAND "${Python3_EXECUTABLE}"
+              "${CMAKE_CURRENT_SOURCE_DIR}/tests/routing_environment_fixture_test.py"
+              "$<TARGET_FILE:igrib_environment_helper>"
     )
   endif ()
   add_test(

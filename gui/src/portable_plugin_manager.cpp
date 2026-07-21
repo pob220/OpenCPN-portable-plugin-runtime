@@ -38,7 +38,8 @@
 #include <wx/wfstream.h>
 
 #include "ocpn_portable_runtime.h"
-#include "portable_grib_host.h"
+#include "portable_environment_host.h"
+#include "portable_service_version.h"
 #include "portable_weather_routing_host.h"
 
 #include "model/base_platform.h"
@@ -179,16 +180,21 @@ public:
     wxString version;
     wxString package_root;
     wxString private_root;
+    wxString environment_surface;
     std::set<wxString> permissions;
     std::set<wxString> provides;
     std::set<wxString> required_services;
+    std::map<wxString, wxString> provided_service_versions;
+    std::map<wxString, wxString> required_service_ranges;
     ocpn_portable_runtime* runtime = nullptr;
     std::shared_ptr<std::mutex> runtime_mutex = std::make_shared<std::mutex>();
     bool enabled = false;
     bool failed = false;
     std::map<wxString, Scene> scenes;
     std::map<wxString, std::shared_ptr<Job>> jobs;
-    std::unique_ptr<PortableGribHost> environmental_host;
+    std::unique_ptr<PortableEnvironmentHost> environmental_host;
+    PortableEnvironmentHost* held_environment_host = nullptr;
+    std::shared_ptr<const PortableEnvironmentDataset> held_environment_dataset;
     std::unique_ptr<PortableWeatherRoutingHost> weather_routing_host;
   };
 
@@ -211,6 +217,17 @@ public:
 
   bool HasPermission(const Instance& instance, const wxString& permission) {
     return instance.permissions.count(permission) != 0;
+  }
+
+  bool ProvidesCompatibleService(const Instance& provider,
+                                 const Instance& consumer,
+                                 const wxString& interface) const {
+    const auto provided = provider.provided_service_versions.find(interface);
+    if (provided == provider.provided_service_versions.end()) return false;
+    const auto required = consumer.required_service_ranges.find(interface);
+    if (required == consumer.required_service_ranges.end()) return true;
+    return ocpn::portable::ServiceVersionSatisfies(
+        provided->second.ToStdString(), required->second.ToStdString());
   }
 
   bool SampleEnvironment(
@@ -527,10 +544,16 @@ int32_t PortablePluginManager::Impl::OpenEnvironmentalViewer(void* user_data) {
       !instance->owner->HasPermission(*instance, "environment.datasets"))
     return -1;
   if (!instance->environmental_host) {
-    instance->environmental_host = std::make_unique<PortableGribHost>(
-        instance->owner->plugin_manager->GetParentFrame(),
-        instance->package_root,
-        instance->owner->HasPermission(*instance, "credentials.provider"));
+    if (instance->environment_surface.empty()) {
+      wxLogError("Portable plugin %s does not declare environment.viewer",
+                 instance->id);
+      return -2;
+    }
+    instance->environmental_host = std::make_unique<PortableEnvironmentHost>(
+        instance->owner->plugin_manager->GetParentFrame(), instance->id,
+        instance->package_root, instance->environment_surface,
+        instance->owner->HasPermission(*instance, "credentials.provider"),
+        instance->runtime, instance->runtime_mutex);
   }
   wxString error;
   if (!instance->environmental_host->Show(&error)) {
@@ -549,17 +572,18 @@ int32_t PortablePluginManager::Impl::OpenWeatherRouting(void* user_data) {
       !instance->owner->HasPermission(*instance, "weather-routing.compute"))
     return -1;
   if (!instance->weather_routing_host) {
-    auto summary = [owner = instance->owner]() {
+    auto summary = [owner = instance->owner, instance]() {
       for (const auto& candidate : owner->instances) {
         if (candidate->enabled && !candidate->failed &&
-            candidate->provides.count("org.opencpn.environment.provider") &&
+            owner->ProvidesCompatibleService(
+                *candidate, *instance, "org.opencpn.environment.provider") &&
             candidate->environmental_host) {
           const wxString value =
               candidate->environmental_host->DatasetSummary();
-          if (!value.StartsWith("No iGRIB")) return value;
+          if (!value.StartsWith("No environmental")) return value;
         }
       }
-      return wxString("No decoded iGRIB dataset is available");
+      return wxString("No decoded environmental dataset is available");
     };
     auto waypoints = [owner = instance->owner, instance]() {
       std::vector<PortableNavigationPosition> result;
@@ -607,10 +631,11 @@ int32_t PortablePluginManager::Impl::OpenWeatherRouting(void* user_data) {
                  owner->cursor_latitude, owner->cursor_longitude};
       return true;
     };
-    auto displayed_time = [owner = instance->owner](int64_t* output) {
+    auto displayed_time = [owner = instance->owner, instance](int64_t* output) {
       for (const auto& candidate : owner->instances) {
         if (candidate->enabled && !candidate->failed &&
-            candidate->provides.count("org.opencpn.environment.provider") &&
+            owner->ProvidesCompatibleService(
+                *candidate, *instance, "org.opencpn.environment.provider") &&
             candidate->environmental_host &&
             candidate->environmental_host->DisplayedTime(output))
           return true;
@@ -623,6 +648,30 @@ int32_t PortablePluginManager::Impl::OpenWeatherRouting(void* user_data) {
                          std::vector<uint8_t>* availability, wxString* error) {
       if (!availability) {
         if (error) *error = "invalid environmental preflight output";
+        return false;
+      }
+      instance->held_environment_host = nullptr;
+      instance->held_environment_dataset.reset();
+      wxString acquisition_error =
+          "no enabled portable environmental-data provider is available";
+      for (const auto& provider : owner->instances) {
+        if (!provider->enabled || provider->failed ||
+            !owner->ProvidesCompatibleService(
+                *provider, *instance, "org.opencpn.environment.provider") ||
+            !provider->environmental_host)
+          continue;
+        wxString candidate_error;
+        auto dataset =
+            provider->environmental_host->AcquireDataset(&candidate_error);
+        if (dataset) {
+          instance->held_environment_host = provider->environmental_host.get();
+          instance->held_environment_dataset = std::move(dataset);
+          break;
+        }
+        if (!candidate_error.empty()) acquisition_error = candidate_error;
+      }
+      if (!instance->held_environment_dataset) {
+        if (error) *error = acquisition_error;
         return false;
       }
       std::vector<PortableEnvironmentRequest> requests;
@@ -659,11 +708,16 @@ bool PortablePluginManager::Impl::SampleEnvironment(
     if (error) *error = "environment.consume permission was not granted";
     return false;
   }
+  if (consumer.held_environment_host && consumer.held_environment_dataset) {
+    return consumer.held_environment_host->SampleBatch(
+        consumer.held_environment_dataset, requests, results, error);
+  }
   wxString last_error =
       "no enabled portable environmental-data provider is available";
   for (const auto& provider : instances) {
     if (!provider->enabled || provider->failed ||
-        !provider->provides.count("org.opencpn.environment.provider") ||
+        !ProvidesCompatibleService(*provider, consumer,
+                                   "org.opencpn.environment.provider") ||
         !provider->environmental_host)
       continue;
     std::vector<PortableEnvironmentSample> sampled;
@@ -1021,6 +1075,12 @@ bool PortablePluginManager::Impl::Load() {
     instance->name = name;
     instance->version = version;
     instance->package_root = root_path;
+    if (manifest["surfaces"].IsObject()) {
+      const wxString surface =
+          manifest["surfaces"]["environment.viewer"].AsString();
+      if (!surface.empty() && IsSafeRelativePath(surface))
+        instance->environment_surface = surface;
+    }
     instance->private_root = g_BasePlatform->GetPrivateDataDir() +
                              wxFILE_SEP_PATH + "portable-plugin-data" +
                              wxFILE_SEP_PATH + id;
@@ -1054,7 +1114,8 @@ bool PortablePluginManager::Impl::Load() {
     const std::set<wxString> known_services = {
         "org.opencpn.environment.provider"};
     auto read_services = [&](const char* member, const char* version_member,
-                             std::set<wxString>* output) {
+                             std::set<wxString>* names,
+                             std::map<wxString, wxString>* versions) {
       wxJSONValue services = manifest[member];
       if (!services.IsArray()) return true;
       bool valid = true;
@@ -1062,19 +1123,29 @@ bool PortablePluginManager::Impl::Load() {
         wxJSONValue service = services[i];
         const wxString interface = service["interface"].AsString();
         const wxString service_version = service[version_member].AsString();
+        ocpn::portable::ServiceVersion parsed_service_version;
+        const bool valid_version =
+            wxString(version_member) == "version"
+                ? ocpn::portable::ParseServiceVersion(
+                      service_version.ToStdString(), &parsed_service_version)
+                : ocpn::portable::IsServiceVersionRange(
+                      service_version.ToStdString());
         if (!service.IsObject() || !known_services.count(interface) ||
-            service_version.empty()) {
+            !valid_version || versions->count(interface)) {
           wxLogError("Portable plugin %s has invalid %s service metadata", id,
                      member);
           valid = false;
         } else {
-          output->insert(interface);
+          names->insert(interface);
+          (*versions)[interface] = service_version;
         }
       }
       return valid;
     };
-    if (!read_services("provides", "version", &instance->provides) ||
-        !read_services("requires", "range", &instance->required_services)) {
+    if (!read_services("provides", "version", &instance->provides,
+                       &instance->provided_service_versions) ||
+        !read_services("requires", "range", &instance->required_services,
+                       &instance->required_service_ranges)) {
       more = directory.GetNext(&entry);
       continue;
     }
@@ -1140,21 +1211,25 @@ bool PortablePluginManager::Impl::Load() {
     instances.push_back(std::move(instance));
     more = directory.GetNext(&entry);
   }
-  std::set<wxString> available_services;
-  for (const auto& instance : instances)
-    if (instance->enabled && !instance->failed)
-      available_services.insert(instance->provides.begin(),
-                                instance->provides.end());
   for (const auto& instance : instances) {
     for (const auto& required : instance->required_services) {
-      if (!available_services.count(required))
+      const auto provider = std::find_if(
+          instances.begin(), instances.end(), [&](const auto& candidate) {
+            return candidate->enabled && !candidate->failed &&
+                   ProvidesCompatibleService(*candidate, *instance, required);
+          });
+      if (provider == instances.end())
         wxLogWarning(
-            "Portable plugin %s has no provider for runtime service %s; "
+            "Portable plugin %s has no compatible provider for runtime "
+            "service %s (%s); "
             "dependent operations will fail closed",
-            instance->id, required);
+            instance->id, required,
+            instance->required_service_ranges[required]);
       else
-        wxLogMessage("Portable plugin %s discovered service %s", instance->id,
-                     required);
+        wxLogMessage("Portable plugin %s discovered service %s %s from %s",
+                     instance->id, required,
+                     (*provider)->provided_service_versions[required],
+                     (*provider)->id);
     }
   }
   if (!actions.empty())

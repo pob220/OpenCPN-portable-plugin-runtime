@@ -223,6 +223,12 @@ int32_t ocpn_portable_runtime_on_action(ocpn_portable_runtime* runtime,
                                         const char* action_id,
                                         size_t action_id_len, char* error,
                                         size_t error_capacity);
+int32_t ocpn_portable_runtime_on_surface_event(
+    ocpn_portable_runtime* runtime, const char* surface_id,
+    size_t surface_id_len, const char* control_id, size_t control_id_len,
+    const char* value_json, size_t value_json_len, char* state_json,
+    size_t state_json_capacity, size_t* state_json_len, char* error,
+    size_t error_capacity);
 int32_t ocpn_portable_runtime_on_job_event(
     ocpn_portable_runtime* runtime, const char* job_id, size_t job_id_len,
     uint32_t event_kind, uint8_t progress, const char* message,

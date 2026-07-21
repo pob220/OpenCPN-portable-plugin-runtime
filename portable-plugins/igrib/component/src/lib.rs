@@ -166,6 +166,42 @@ impl exports::opencpn::portable::plugin::Guest for IGrib {
         }
     }
 
+    fn on_surface_event(
+        surface_id: String,
+        control_id: String,
+        value_json: String,
+    ) -> Result<String, String> {
+        if surface_id != "environment.viewer" {
+            return Err(format!("unknown iGRIB surface: {surface_id}"));
+        }
+        if control_id.is_empty()
+            || control_id.len() > 96
+            || !control_id
+                .bytes()
+                .all(|value| value.is_ascii_alphanumeric() || b"-._".contains(&value))
+        {
+            return Err("invalid portable surface control id".into());
+        }
+        if value_json.len() > 64 * 1024 {
+            return Err("portable surface state exceeds 64 KiB".into());
+        }
+        // iGRIB owns its controller state. OpenCPN renders the declared
+        // controls and provides services, but state persistence and policy
+        // remain in the portable component.  The restore request is a typed
+        // controller operation rather than a host-side knowledge of iGRIB's
+        // preference keys.
+        let key = format!("surface.{control_id}");
+        if control_id == "display-settings" && value_json == "{\"request\":\"restore\"}" {
+            return Ok(host::setting_get(&key)?.unwrap_or_else(|| "{}".into()));
+        }
+        host::setting_set(&key, &value_json)?;
+        host::log(
+            LogLevel::Debug,
+            &format!("environment.viewer state updated: {control_id}"),
+        );
+        Ok(value_json)
+    }
+
     fn on_job_event(job_id: String, event: exports::opencpn::portable::plugin::JobEvent) {
         use exports::opencpn::portable::plugin::JobEvent;
         match event {

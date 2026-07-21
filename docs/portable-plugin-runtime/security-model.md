@@ -68,6 +68,9 @@ The package rules are detailed in [package-format.md](package-format.md). Securi
 - rollback and freeze detection using last-known versions and trusted time bounds;
 - atomic install into immutable version slots, then pointer switch; preserve previous slot/state for rollback;
 - path canonicalisation, duplicate/case-collision rejection, no symlinks/devices, file/count/uncompressed-size/compression-ratio limits;
+- keep package-installation limits distinct from environmental-data limits: an
+  ocean-scale GRIB is an external capability-selected document, not a package
+  entry, and is decoded message-by-message with bounded result batches;
 - signature and revocation verification before component compilation or helper inspection/execution;
 - an emergency kill entry for package identity/version and runtime/API profile.
 

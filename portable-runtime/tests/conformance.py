@@ -9,11 +9,13 @@ The JSON output deliberately distinguishes pass, skip and target identity.
 
 import argparse
 import datetime
+import hashlib
 import importlib.util
 import json
 import os
 import pathlib
 import platform
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -41,7 +43,11 @@ def target_name():
     if architecture is None:
         raise RuntimeError(f"unsupported processor architecture: {machine}")
     if sys.platform.startswith("linux"):
-        return f"linux-gnu-{architecture}"
+        return (
+            f"flatpak-{architecture}"
+            if os.environ.get("FLATPAK_ID")
+            else f"linux-gnu-{architecture}"
+        )
     if sys.platform == "darwin":
         return f"macos-{architecture}"
     if sys.platform == "win32" and architecture == "x86_64":
@@ -123,6 +129,8 @@ def main():
         generator = helper_root / f"environmental-grib{suffix}"
         if not decoder.is_file():
             raise RuntimeError(f"required decoder helper is absent for {target}")
+        if not generator.is_file():
+            raise RuntimeError(f"required generator helper is absent for {target}")
         report["checks"]["target_helper_selection"] = "passed"
 
         malformed = work / "malformed.grb"
@@ -138,16 +146,98 @@ def main():
             "status": "passed", "elapsed_ms": malformed_ms
         }
 
-        if generator.is_file():
-            capabilities, capabilities_ms = run([generator, "capabilities"])
-            capability_document = json.loads(capabilities.stdout)
-            if capability_document.get("schemaVersion") != 1:
-                raise RuntimeError("generator helper protocol is incompatible")
-            report["checks"]["generator_protocol"] = {
-                "status": "passed", "elapsed_ms": capabilities_ms
+        surface = json.loads(
+            (destination / "ui" / "igrib-viewer.ui.json").read_text()
+        )
+        helpers = surface.get("helpers", {})
+        if helpers.get("decoder_executable") != "igrib-environment-helper":
+            raise RuntimeError("environmental surface omits its decoder declaration")
+        if helpers.get("generator_executable") != "environmental-grib":
+            raise RuntimeError("environmental surface omits its generator declaration")
+        expected_groups = {
+            "wind", "wind-gust", "pressure", "wave", "current",
+            "precipitation", "cloud", "air-temperature",
+            "sea-temperature", "cape", "composite-reflectivity",
+            "geopotential-height", "relative-humidity",
+        }
+        declared_groups = {
+            field.get("id") for field in surface.get("field_groups", [])
+        }
+        if surface.get("schema_version") != 2 or \
+                declared_groups != expected_groups:
+            raise RuntimeError("declarative UI does not expose all 13 fields")
+        level_ids = {level.get("id") for level in surface.get("levels", [])}
+        if level_ids != {"surface", "850hpa", "700hpa", "500hpa", "300hpa"}:
+            raise RuntimeError("declarative UI pressure levels are incomplete")
+        control_ids = {item.get("id") for item in surface.get("controls", [])}
+        for required in {"timeline", "time-slider", "level", "open",
+                         "settings", "weather-table", "generate"}:
+            if required not in control_ids:
+                raise RuntimeError(f"declarative UI omits control {required}")
+        generator_declaration = surface.get("generator", {})
+        if (not generator_declaration.get("title") or
+                not generator_declaration.get("output_basename") or
+                not 1 <= generator_declaration.get("maximum_hours", 0) <= 744 or
+                not generator_declaration.get("safety_notice")):
+            raise RuntimeError("declarative generator metadata is incomplete")
+        for scheme, declaration in surface.get("credential_catalog", {}).items():
+            required_keys = {
+                "label", "account_label", "account_url", "username_label",
+                "secret_label", "service_suffix", "request_username_key",
+                "job_environment_key",
             }
-        else:
-            report["checks"]["generator_protocol"] = "skipped-helper-optional"
+            if not scheme or not required_keys.issubset(declaration):
+                raise RuntimeError("credential declaration is incomplete")
+        report["checks"]["declarative_ui_v2"] = "passed"
+
+        capabilities, capabilities_ms = run([generator, "capabilities"])
+        capability_document = json.loads(capabilities.stdout)
+        if capability_document.get("schemaVersion") != 1:
+            raise RuntimeError("generator helper protocol is incompatible")
+        catalog = surface.get("provider_catalog", {})
+        advertised = {
+            category: {entry.get("id") for entry in catalog.get(category, [])}
+            for category in ("weather", "waves", "current")
+        }
+        expected = {
+            "weather": set(capability_document.get("weatherProviders", [])),
+            "waves": set(capability_document.get("waveProviders", [])),
+            "current": set(capability_document.get("currentSources", []))
+            - {"synthetic"},
+        }
+        for category, required in expected.items():
+            missing = required - advertised[category]
+            if missing:
+                raise RuntimeError(
+                    f"package UI omits generator {category} providers: "
+                    f"{sorted(missing)}"
+                )
+        fallback_expected = {
+            "weather": set(capability_document.get(
+                "fallbackWeatherProviders", []
+            )),
+            "waves": set(capability_document.get(
+                "fallbackWaveProviders", []
+            )),
+            "current": set(capability_document.get(
+                "fallbackCurrentSources", []
+            )),
+        }
+        for category, required in fallback_expected.items():
+            declared = {
+                entry.get("id")
+                for entry in catalog.get(category, [])
+                if entry.get("fallback") is True
+            }
+            if declared != required:
+                raise RuntimeError(
+                    f"package {category} fallback catalogue {sorted(declared)} "
+                    f"does not match helper {sorted(required)}"
+                )
+        report["checks"]["generator_protocol"] = {
+            "status": "passed", "elapsed_ms": capabilities_ms
+        }
+        report["checks"]["provider_catalogue_compatibility"] = "passed"
 
         if args.live_copernicus:
             if not generator.is_file():

@@ -7,6 +7,9 @@
   "component": "component/igrib.wasm",
   "runtime": ">=0.1.0 <0.2.0",
   "portable_api": ">=0.1.0 <0.2.0",
+  "surfaces": {
+    "environment.viewer": "ui/igrib-viewer.ui.json"
+  },
   "provides": [
     {
       "interface": "org.opencpn.environment.provider",
@@ -33,12 +36,12 @@
     "environment-decoder": {
       "protocol": 1,
       "required": true,
-      "targets": ["linux-gnu-x86_64", "linux-gnu-aarch64", "macos-x86_64", "macos-aarch64", "windows-x86_64"]
+      "targets": ["linux-gnu-x86_64", "linux-gnu-aarch64", "flatpak-x86_64", "flatpak-aarch64", "macos-x86_64", "macos-aarch64", "windows-x86_64"]
     },
     "environment-generator": {
       "protocol": 1,
-      "required": false,
-      "targets": ["linux-gnu-x86_64", "linux-gnu-aarch64", "macos-x86_64", "macos-aarch64", "windows-x86_64"]
+      "required": true,
+      "targets": ["linux-gnu-x86_64", "linux-gnu-aarch64", "flatpak-x86_64", "flatpak-aarch64", "macos-x86_64", "macos-aarch64", "windows-x86_64"]
     }
   },
   "resources": [

@@ -1085,6 +1085,58 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_action(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn ocpn_portable_runtime_on_surface_event(
+    runtime: *mut Runtime,
+    surface_id: *const c_char,
+    surface_id_len: usize,
+    control_id: *const c_char,
+    control_id_len: usize,
+    value_json: *const c_char,
+    value_json_len: usize,
+    state_json: *mut c_char,
+    state_json_capacity: usize,
+    state_json_len: *mut usize,
+    error: *mut c_char,
+    error_capacity: usize,
+) -> i32 {
+    let Some(runtime) = (unsafe { runtime.as_mut() }) else {
+        write_error(error, error_capacity, "runtime is null");
+        return -1;
+    };
+    let result = (|| -> anyhow::Result<()> {
+        prepare_call(runtime)?;
+        let surface_id = input_string(surface_id, surface_id_len)?;
+        let control_id = input_string(control_id, control_id_len)?;
+        let value_json = input_string(value_json, value_json_len)?;
+        if value_json.len() > SETTINGS_VALUE_LIMIT {
+            anyhow::bail!("surface event value exceeds the 64 KiB limit");
+        }
+        let state = runtime
+            .bindings
+            .opencpn_portable_plugin()
+            .call_on_surface_event(&mut runtime.store, &surface_id, &control_id, &value_json)?
+            .map_err(anyhow::Error::msg)?;
+        if state.len() > SETTINGS_VALUE_LIMIT {
+            anyhow::bail!("surface event state exceeds the 64 KiB limit");
+        }
+        if state_json_len.is_null() {
+            anyhow::bail!("surface state length output is null");
+        }
+        unsafe { *state_json_len = state.len() };
+        if state.len() > state_json_capacity || (!state.is_empty() && state_json.is_null()) {
+            anyhow::bail!("surface state output capacity is too small");
+        }
+        if !state.is_empty() {
+            unsafe {
+                ptr::copy_nonoverlapping(state.as_ptr(), state_json.cast(), state.len());
+            }
+        }
+        Ok(())
+    })();
+    ffi_result(result, error, error_capacity)
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ocpn_portable_runtime_on_job_event(
     runtime: *mut Runtime,
     job_id: *const c_char,

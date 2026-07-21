@@ -41,6 +41,16 @@ org.example.weather-2.3.1.ocpnp
 
 ZIP entry names are UTF-8, forward-slash, NFC-normalised relative paths. Reject absolute paths, `..`, empty components, backslashes, NUL/control characters, duplicate or case-fold-colliding names, symlinks, hard links, devices and encrypted entries. Manifest limits set upper bounds below host policy; host policy always wins. Signing input uses canonical manifest bytes plus a canonical ordered `(path, size, SHA-256)` list. ZIP metadata/order/compression do not affect the content identity but reproducible producers use fixed timestamps/order/modes.
 
+The prototype installer admits at most a 512 MiB compressed archive, 1 GiB
+uncompressed content, 32,768 archive entries, a 1 MiB manifest and a 200:1
+per-entry compression ratio.  The relatively generous entry limit is required
+because the audited ecCodes definition data contains thousands of small files,
+and a complete package can carry helpers for seven target environments.  These
+are **plugin installation limits only**: they do not limit the byte size, grid
+extent, point count or message count of a user-selected or downloaded GRIB.
+Environmental datasets remain outside the immutable package and are handled by
+the separately supervised, streaming and batched environment service.
+
 The WIT copies are documentation; the component's embedded type information is authoritative and must match the declared world. The host never executes a core Wasm module disguised as a component.
 
 ## Manifest essentials

@@ -4,6 +4,7 @@ import importlib.util
 import hashlib
 import json
 import pathlib
+import shutil
 import stat
 import subprocess
 import sys
@@ -161,6 +162,221 @@ class PackageToolsTest(unittest.TestCase):
         with self.assertRaisesRegex(installer.PackageError, "signature-untrusted"):
             installer.validate(package, {}, developer=True)
 
+    def test_verified_target_packages_form_one_signed_archive(self):
+        private_key = Ed25519PrivateKey.generate()
+        private_path = self.base / "private.pem"
+        public_path = self.base / "public.pem"
+        private_path.write_bytes(
+            private_key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        )
+        public_path.write_bytes(
+            private_key.public_key().public_bytes(
+                serialization.Encoding.PEM,
+                serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+        )
+        manifest = json.loads((self.source / "manifest.json").read_text())
+        manifest["helpers"] = {
+            "decoder": {
+                "required": True,
+                "protocol": 1,
+                "targets": ["linux-gnu-x86_64", "macos-aarch64"],
+            }
+        }
+        (self.source / "manifest.json").write_text(json.dumps(manifest))
+
+        packages = []
+        for target in ("linux-gnu-x86_64", "macos-aarch64"):
+            shutil.rmtree(self.source / "helpers", ignore_errors=True)
+            helper = self.source / "helpers" / target / "decoder"
+            helper.parent.mkdir(parents=True)
+            helper.write_bytes(target.encode("ascii"))
+            helper.chmod(0o755)
+            package = self.base / f"{target}.ocpnp"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(TOOLS / "build_package.py"),
+                    "--root",
+                    str(self.source),
+                    "--output",
+                    str(package),
+                    "--signing-key",
+                    str(private_path),
+                    "--key-id",
+                    "test-key",
+                ],
+                check=True,
+            )
+            packages.append(package)
+
+        merged = self.base / "multi-target.ocpnp"
+        command = [
+            sys.executable,
+            str(TOOLS / "assemble_multitarget_package.py"),
+            "--trusted-key",
+            f"test-key={public_path}",
+            "--output",
+            str(merged),
+            "--signing-key",
+            str(private_path),
+            "--key-id",
+            "test-key",
+        ]
+        for package in packages:
+            command.extend(["--package", str(package)])
+        for target in ("linux-gnu-x86_64", "macos-aarch64"):
+            command.extend(["--require-target", target])
+        subprocess.run(command, check=True, capture_output=True, text=True)
+        _, entries = installer.validate(
+            merged, {"test-key": public_path}, developer=True
+        )
+        self.assertIn("helpers/linux-gnu-x86_64/decoder", entries)
+        self.assertIn("helpers/macos-aarch64/decoder", entries)
+
+    def test_helper_root_dereferences_only_in_tree_file_symlinks(self):
+        private_key = Ed25519PrivateKey.generate()
+        private_path = self.base / "private.pem"
+        public_path = self.base / "public.pem"
+        private_path.write_bytes(
+            private_key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        )
+        public_path.write_bytes(
+            private_key.public_key().public_bytes(
+                serialization.Encoding.PEM,
+                serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+        )
+        manifest = json.loads((self.source / "manifest.json").read_text())
+        manifest["helpers"] = {
+            "decoder": {
+                "required": True,
+                "protocol": 1,
+                "targets": ["linux-gnu-x86_64", "flatpak-x86_64"],
+            }
+        }
+        (self.source / "manifest.json").write_text(json.dumps(manifest))
+        decoder = self.source / "helpers/linux-gnu-x86_64/decoder"
+        decoder.parent.mkdir(parents=True)
+        decoder.write_bytes(b"linux decoder")
+        decoder.chmod(0o755)
+        package = self.base / "linux.ocpnp"
+        subprocess.run(
+            [
+                sys.executable,
+                str(TOOLS / "build_package.py"),
+                "--root",
+                str(self.source),
+                "--output",
+                str(package),
+                "--signing-key",
+                str(private_path),
+                "--key-id",
+                "test-key",
+            ],
+            check=True,
+        )
+        helper_root = self.base / "flatpak"
+        (helper_root / "lib").mkdir(parents=True)
+        (helper_root / "igrib-environment-helper").write_bytes(b"decoder")
+        (helper_root / "environmental-grib").write_bytes(b"generator")
+        real_library = helper_root / "lib/libexample.so.1.2"
+        real_library.write_bytes(b"library bytes")
+        (helper_root / "lib/libexample.so.1").symlink_to(real_library.name)
+        merged = self.base / "with-soname.ocpnp"
+        subprocess.run(
+            [
+                sys.executable,
+                str(TOOLS / "assemble_multitarget_package.py"),
+                "--package",
+                str(package),
+                "--helper-root",
+                f"flatpak-x86_64={helper_root}",
+                "--trusted-key",
+                f"test-key={public_path}",
+                "--require-target",
+                "linux-gnu-x86_64",
+                "--require-target",
+                "flatpak-x86_64",
+                "--output",
+                str(merged),
+                "--signing-key",
+                str(private_path),
+                "--key-id",
+                "test-key",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        _, entries = installer.validate(
+            merged, {"test-key": public_path}, developer=True
+        )
+        alias = "helpers/flatpak-x86_64/lib/libexample.so.1"
+        with zipfile.ZipFile(merged) as archive:
+            self.assertEqual(archive.read(alias), b"library bytes")
+            self.assertTrue(stat.S_ISREG(entries[alias].external_attr >> 16))
+
+        generator = helper_root / "environmental-grib"
+        generator.unlink()
+        incomplete = subprocess.run(
+            [
+                sys.executable,
+                str(TOOLS / "assemble_multitarget_package.py"),
+                "--package",
+                str(package),
+                "--helper-root",
+                f"flatpak-x86_64={helper_root}",
+                "--trusted-key",
+                f"test-key={public_path}",
+                "--output",
+                str(self.base / "missing-generator.ocpnp"),
+                "--signing-key",
+                str(private_path),
+                "--key-id",
+                "test-key",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(incomplete.returncode, 0)
+        self.assertIn("generator helper is absent", incomplete.stderr)
+        generator.write_bytes(b"generator")
+
+        outside = self.base / "outside.so"
+        outside.write_bytes(b"outside")
+        (helper_root / "lib/escape.so").symlink_to(outside)
+        rejected = subprocess.run(
+            [
+                sys.executable,
+                str(TOOLS / "assemble_multitarget_package.py"),
+                "--package",
+                str(package),
+                "--helper-root",
+                f"flatpak-x86_64={helper_root}",
+                "--trusted-key",
+                f"test-key={public_path}",
+                "--output",
+                str(self.base / "escape.ocpnp"),
+                "--signing-key",
+                str(private_path),
+                "--key-id",
+                "test-key",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("symlink escapes", rejected.stderr)
+
     def test_checksum_tamper_is_rejected(self):
         original = self.build("original.ocpnp")
         tampered = self.base / "tampered.ocpnp"
@@ -178,6 +394,14 @@ class PackageToolsTest(unittest.TestCase):
         with zipfile.ZipFile(package, "w") as archive:
             archive.writestr("../outside", b"bad")
         with self.assertRaisesRegex(installer.PackageError, "archive-policy"):
+            installer.validate(package, developer=True)
+
+    def test_entry_count_remains_bounded(self):
+        package = self.base / "too-many-entries.ocpnp"
+        with zipfile.ZipFile(package, "w") as archive:
+            for index in range(installer.MAX_ENTRIES + 1):
+                archive.writestr(f"resources/entry-{index:05d}", b"")
+        with self.assertRaisesRegex(installer.PackageError, "too many entries"):
             installer.validate(package, developer=True)
 
     def test_symlink_is_rejected(self):

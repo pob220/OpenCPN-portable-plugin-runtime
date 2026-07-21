@@ -1,25 +1,109 @@
 {
-  "schema_version": 1,
-  "surface_id": "igrib.viewer",
+  "schema_version": 2,
+  "surface_id": "environment.viewer",
+  "role": "environmental-data-viewer",
   "kind": "floating-panel",
   "title": "iGRIB — Portable Environmental Data",
+  "layout": {
+    "family": "xgrib-control-bar",
+    "preferred_width": 940,
+    "preferred_height": 430,
+    "supports_horizontal": true,
+    "supports_vertical": true,
+    "cursor_panel": "attached-or-detached"
+  },
+  "helpers": {
+    "decoder_executable": "igrib-environment-helper",
+    "generator_executable": "environmental-grib",
+    "credential_environment": "OCPN_IGRIB_COPERNICUS_PASSWORD"
+  },
+  "generator": {
+    "title": "iGRIB Environmental GRIB Generator",
+    "output_basename": "environment_igrib",
+    "maximum_hours": 360,
+    "safety_notice": "Generated environmental data is model output for planning and experimentation; it is not an official navigation product."
+  },
+  "credential_catalog": {
+    "copernicus": {
+      "label": "Copernicus Marine",
+      "account_label": "Create or manage a free Copernicus Marine account",
+      "account_url": "https://data.marine.copernicus.eu/register",
+      "username_label": "Copernicus username or email",
+      "secret_label": "Copernicus password",
+      "service_suffix": "Copernicus Marine",
+      "request_username_key": "copernicusUsername",
+      "job_environment_key": "copernicusPasswordEnvironment"
+    }
+  },
   "controls": [
     {"id": "file", "type": "status", "label": "File"},
+    {"id": "previous", "type": "button", "label": "Previous forecast"},
     {"id": "timeline", "type": "choice", "label": "Forecast time"},
-    {"id": "previous", "type": "button", "label": "Previous"},
-    {"id": "next", "type": "button", "label": "Next"},
+    {"id": "time-slider", "type": "slider", "label": "Forecast timeline"},
+    {"id": "next", "type": "button", "label": "Next forecast"},
     {"id": "play", "type": "button", "label": "Play"},
     {"id": "now", "type": "button", "label": "Now"},
-    {"id": "wind", "type": "toggle", "label": "Wind", "default": true},
-    {"id": "pressure", "type": "toggle", "label": "Pressure", "default": true},
-    {"id": "waves", "type": "toggle", "label": "Waves", "default": true},
-    {"id": "current", "type": "toggle", "label": "Current", "default": true},
-    {"id": "air-temperature", "type": "toggle", "label": "Air Temp", "default": false},
-    {"id": "open", "type": "file-open", "label": "Open GRIB"},
+    {"id": "level", "type": "choice", "label": "Atmospheric level"},
+    {"id": "open", "type": "file-open-multiple", "label": "Open GRIB"},
     {"id": "settings", "type": "button", "label": "Settings"},
+    {"id": "weather-table", "type": "button", "label": "Weather table"},
     {"id": "download", "type": "button", "label": "Download GRIB"},
     {"id": "generate", "type": "button", "label": "Generate GRIB"},
     {"id": "cancel", "type": "cancel", "label": "Cancel"},
     {"id": "progress", "type": "progress", "label": "Progress"}
-  ]
+  ],
+  "levels": [
+    {"id": "surface", "label": "Surface"},
+    {"id": "850hpa", "label": "850 hPa", "value": 850},
+    {"id": "700hpa", "label": "700 hPa", "value": 700},
+    {"id": "500hpa", "label": "500 hPa", "value": 500},
+    {"id": "300hpa", "label": "300 hPa", "value": 300}
+  ],
+  "field_groups": [
+    {"id": "wind", "label": "Wind", "kind": "vector", "components": ["u", "v"], "levels": true, "default_visible": true, "default_colour": "#915819", "presentations": ["meteorological-barbs", "direction-arrows", "isotachs", "scalar-map", "numbers", "particles"]},
+    {"id": "wind-gust", "label": "Wind gust", "kind": "scalar", "default_visible": false, "default_colour": "#b05c20", "presentations": ["scalar-map", "numbers", "isotachs"]},
+    {"id": "pressure", "label": "Pressure", "kind": "scalar", "default_visible": true, "default_colour": "#285abe", "presentations": ["isobars", "scalar-map", "numbers"]},
+    {"id": "wave", "label": "Waves", "kind": "directional-scalar", "components": ["height", "period", "direction"], "marine": true, "default_visible": true, "default_colour": "#00b4d2", "presentations": ["wave-crests", "direction-arrows", "height-circles", "scalar-map", "numbers"]},
+    {"id": "current", "label": "Current", "kind": "vector", "components": ["u", "v"], "marine": true, "default_visible": true, "default_colour": "#1e5adc", "presentations": ["single-arrows", "double-arrows", "proportional-arrows", "scalar-map", "numbers", "particles"]},
+    {"id": "precipitation", "label": "Precipitation", "kind": "scalar", "default_visible": false, "default_colour": "#2060d0", "presentations": ["scalar-map", "numbers", "contours"]},
+    {"id": "cloud", "label": "Cloud cover", "kind": "scalar", "default_visible": false, "default_colour": "#808080", "presentations": ["scalar-map", "numbers"]},
+    {"id": "air-temperature", "label": "Air temperature", "kind": "scalar", "levels": true, "default_visible": false, "default_colour": "#dc4123", "presentations": ["scalar-map", "numbers", "isotherms"]},
+    {"id": "sea-temperature", "label": "Sea temperature", "kind": "scalar", "marine": true, "default_visible": false, "default_colour": "#0096a8", "presentations": ["scalar-map", "numbers", "isotherms"]},
+    {"id": "cape", "label": "CAPE", "kind": "scalar", "default_visible": false, "default_colour": "#c02080", "presentations": ["scalar-map", "numbers", "contours"]},
+    {"id": "composite-reflectivity", "label": "Composite reflectivity", "kind": "scalar", "default_visible": false, "default_colour": "#d02020", "presentations": ["scalar-map", "numbers", "contours"]},
+    {"id": "geopotential-height", "label": "Geopotential height", "kind": "scalar", "levels": true, "default_visible": false, "default_colour": "#7030a0", "presentations": ["contours", "scalar-map", "numbers"]},
+    {"id": "relative-humidity", "label": "Relative humidity", "kind": "scalar", "levels": true, "default_visible": false, "default_colour": "#208050", "presentations": ["scalar-map", "numbers", "contours"]}
+  ],
+  "provider_catalog": {
+    "weather": [
+      {"id": "gfs", "label": "NOAA GFS", "status": "production", "credential": "none", "fallback": true, "default": true, "requirements": "internet access", "limitations": "global model resolution and provider cycle availability"},
+      {"id": "noaa_hrrr", "label": "NOAA HRRR 3 km", "status": "production", "credential": "none", "coverage": "CONUS", "requirements": "internet access", "limitations": "requests outside CONUS are rejected"},
+      {"id": "ukmo_ukv", "label": "Met Office UKV 2 km", "status": "production", "credential": "none", "coverage": "United Kingdom", "requirements": "internet access and PROJ in this target helper", "limitations": "unavailable when a correct UKV coordinate transform cannot be created"},
+      {"id": "dwd_icon_eu", "label": "DWD ICON-EU 13 km", "status": "production", "credential": "none", "coverage": "Europe", "requirements": "internet access", "limitations": "provider forecast horizon and cadence apply"},
+      {"id": "ecmwf_ifs_open", "label": "ECMWF IFS Open Data", "status": "production", "credential": "none", "requirements": "internet access", "limitations": "open-data field set and publication cadence apply"},
+      {"id": "ecmwf_aifs_open", "label": "ECMWF AIFS", "status": "experimental", "credential": "none", "requirements": "internet access", "limitations": "upstream AIFS data remains experimental"},
+      {"id": "existing-file", "label": "Local weather GRIB file…", "status": "production", "credential": "file", "input_kind": "file", "input_label": "Local weather GRIB", "input_request_key": "weatherFile", "input_filter": "GRIB files (*.grb;*.grib;*.grb2)|*.grb;*.grib;*.grb2|All files (*.*)|*.*"},
+      {"id": "none", "label": "None", "status": "production", "credential": "none", "fallback": true, "disabled": true}
+    ],
+    "waves": [
+      {"id": "gfs_wave", "label": "NOAA GFS Wave", "status": "production", "credential": "none", "fallback": true, "default": true, "requirements": "internet access", "limitations": "global wave-model resolution and provider cycle availability"},
+      {"id": "copernicus_global_waves", "label": "Copernicus Marine Global Waves", "status": "production", "credential": "copernicus", "requirements": "internet access and a free Copernicus Marine account", "limitations": "remote catalogue and Zarr mirror availability"},
+      {"id": "none", "label": "None", "status": "production", "credential": "none", "fallback": true, "disabled": true}
+    ],
+    "current": [
+      {"id": "auto", "label": "Automatic best available", "status": "production", "credential": "conditional", "default": true, "requirements": "internet access; some selected regional sources require Copernicus credentials", "limitations": "selection is coverage-driven and never silently substitutes an unrelated model"},
+      {"id": "marine_ie_irish_sea", "label": "Marine.ie Irish Sea", "status": "production", "credential": "none", "coverage": "Irish Sea", "requirements": "internet access", "limitations": "regional coverage and publication availability"},
+      {"id": "copernicus_nws", "label": "Copernicus Marine North-West Shelf", "status": "production", "credential": "copernicus", "coverage": "20°W–13°E, 40°N–65°N", "requirements": "internet access and a free Copernicus Marine account", "limitations": "regional catalogue availability"},
+      {"id": "copernicus_ibi", "label": "Copernicus Marine Iberian-Biscay-Irish", "status": "production", "credential": "copernicus", "coverage": "IBI regional domain ending near 56.08°N", "requirements": "internet access and a free Copernicus Marine account", "limitations": "not substituted for North-West Shelf coverage"},
+      {"id": "copernicus_mediterranean", "label": "Copernicus Marine Mediterranean", "status": "production", "credential": "copernicus", "coverage": "Mediterranean regional domain", "requirements": "internet access and a free Copernicus Marine account", "limitations": "regional coverage"},
+      {"id": "copernicus_global", "label": "Copernicus Marine Global", "status": "production", "credential": "copernicus", "coverage": "global ocean", "requirements": "internet access and a free Copernicus Marine account", "limitations": "coarser than regional models"},
+      {"id": "noaa_rtofs_global", "label": "NOAA RTOFS", "status": "production", "credential": "none", "coverage": "global ocean", "requirements": "internet access", "limitations": "curvilinear source is regridded before GRIB publication"},
+      {"id": "existing-file", "label": "Local current GRIB file…", "status": "production", "credential": "file", "input_kind": "file", "input_label": "Local current GRIB", "input_request_key": "currentFile", "input_filter": "GRIB files (*.grb;*.grib;*.grb2)|*.grb;*.grib;*.grb2|All files (*.*)|*.*"},
+      {"id": "netcdf", "label": "Local current NetCDF file…", "status": "advanced", "credential": "file", "input_kind": "file", "input_label": "Local current NetCDF", "input_request_key": "inputNetcdf", "input_filter": "NetCDF files (*.nc)|*.nc|All files (*.*)|*.*"},
+      {"id": "tpxo-cache", "label": "TPXO prepared cache", "status": "optional-data", "credential": "file", "input_kind": "file", "input_label": "Prepared TPXO cache", "input_request_key": "inputCache", "input_filter": "TPXO cache (*.tpxocache)|*.tpxocache|All files (*.*)|*.*"},
+      {"id": "tpxo", "label": "TPXO10 local model", "status": "optional-data", "credential": "directory", "input_kind": "directory", "input_label": "TPXO10 model directory", "input_request_key": "tpxoModelDirectory"},
+      {"id": "offline-tidal", "label": "Offline XTD package", "status": "optional-data", "credential": "file", "fallback": true, "input_kind": "file", "input_label": "Offline tidal package", "input_request_key": "offlineTidalFile", "input_filter": "Offline tidal packages (*.xtd;*.zip)|*.xtd;*.zip|All files (*.*)|*.*", "mode_request_key": "offlineCurrentMode", "mode_options": [{"label": "Astronomical tide only", "value": "tide-only"}, {"label": "Astronomical tide plus expected seasonal current", "value": "tide-expected-seasonal"}]},
+      {"id": "none", "label": "None", "status": "production", "credential": "none", "fallback": true, "disabled": true}
+    ]
+  }
 }

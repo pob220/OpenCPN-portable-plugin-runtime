@@ -15,9 +15,12 @@ import unicodedata
 import zipfile
 
 
-MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
-MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
-MAX_ENTRIES = 2048
+# A complete seven-target package carries ecCodes GRIB definitions for the
+# self-contained Windows and Flatpak helpers.  Keep resource exhaustion
+# bounded while allowing those audited, signed payloads.
+MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
+MAX_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024
+MAX_ENTRIES = 32768
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_RATIO = 200
 SAFE_ID = re.compile(r"^[a-z0-9]+(?:[.-][a-z0-9]+)+$")

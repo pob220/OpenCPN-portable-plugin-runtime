@@ -265,6 +265,34 @@ bool NormalLifecycle(const char* component_path) {
   ok = ok && state.work_units == 40;
   ok = ok && state.environmental_viewer_opened;
 
+  const std::string surface = "environment.viewer";
+  const std::string control = "display-settings";
+  const std::string surface_value = "{\"wind\":true}";
+  std::array<char, 256> surface_state{};
+  size_t surface_state_length = 0;
+  ok = ok && CallSucceeded(
+                 ocpn_portable_runtime_on_surface_event(
+                     runtime, surface.data(), surface.size(), control.data(),
+                     control.size(), surface_value.data(), surface_value.size(),
+                     surface_state.data(), surface_state.size(),
+                     &surface_state_length, error, sizeof(error)),
+                 "surface-event", error);
+  ok = ok &&
+       std::string(surface_state.data(), surface_state_length) ==
+           surface_value &&
+       state.settings["surface.display-settings"] == surface_value;
+  const std::string restore_value = "{\"request\":\"restore\"}";
+  surface_state_length = 0;
+  ok = ok && CallSucceeded(
+                 ocpn_portable_runtime_on_surface_event(
+                     runtime, surface.data(), surface.size(), control.data(),
+                     control.size(), restore_value.data(), restore_value.size(),
+                     surface_state.data(), surface_state.size(),
+                     &surface_state_length, error, sizeof(error)),
+                 "surface-state-restore", error);
+  ok = ok &&
+       std::string(surface_state.data(), surface_state_length) == surface_value;
+
   const char* empty = "";
   const std::string http_action = "igrib.http-test";
   ok = ok && CallSucceeded(ocpn_portable_runtime_on_action(

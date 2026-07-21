@@ -1,6 +1,6 @@
 # Portable runtime implementation status
 
-Status date: 2026-07-20. Baseline: OpenCPN Release 5.14.0 in the separate
+Status date: 2026-07-21. Baseline: OpenCPN Release 5.14.0 in the separate
 Test-OpenCPN build/profile. The native xGRIB library was disabled and then
 moved to Test-OpenCPN's recoverable `plugins-disabled` directory for the final
 standalone test. The modified working OpenCPN 5.15 setup was not used.
@@ -22,8 +22,9 @@ default.
   chart-coverage batches, host HTTP-to-private-storage and bounded private
   reads. No pointers, wxWidgets objects or graphics handles cross the boundary.
 - Manifest-declared, versioned service discovery connects iGRIB's
-  `org.opencpn.environment.provider` implementation to iWeatherRouting without
-  native-plugin broadcast strings. Missing providers fail closed.
+  `org.opencpn.environment.provider@0.1.0` implementation to iWeatherRouting's
+  compatible SemVer range without native-plugin broadcast strings. Invalid
+  versions/ranges are rejected and missing/incompatible providers fail closed.
 - iWeatherRouting's adaptive time-layer route search executes in the portable
   Rust component. The host supplies a schema-validated declarative UI whose
   tabs and required form controls are package metadata, typed
@@ -33,7 +34,7 @@ default.
   safe arrival. Route endpoints can be resolved from the live vessel position,
   stable value snapshots of OpenCPN waypoints, the latest chart cursor or
   manual coordinates; no core navigation object crosses the boundary.
-- Host-rendered declarative iGRIB surface with readable UTC timeline
+- Host-rendered declarative UI v2 environmental surface with readable UTC timeline
   navigation/playback, chart-cursor values, progress/cancellation,
   open/settings/download/generate actions and native file pickers. Persistent
   per-field display profiles cover units, vectors, colour overlays, numeric
@@ -53,20 +54,34 @@ default.
   batches consumed by iWeatherRouting. Both the decoder and host reject GRIB
   missing-value sentinels and current vectors at or above 12 m/s before they
   reach drawing, cursor readout or route sampling.
-- Standalone ecCodes helper supporting bounded `inspect` and `frame` operations
+- The package owns all thirteen xGRIB field groups, surface/850/700/500/300 hPa
+  levels, provider metadata and controller state. The generic host renders
+  vector, scalar, number and contour forms for wind, gust, pressure, waves,
+  current, precipitation, cloud, air/sea temperature, CAPE, reflectivity,
+  geopotential height and relative humidity; it contains no provider IDs or
+  iGRIB-specific dialog class. Multi-file datasets are immutable ordered
+  snapshots with deterministic last-message-wins duplicate handling.
+- Standalone ecCodes helper supporting bounded `inspect`, `frame`, interpolated
+  frames and cursor weather-table operations
   with structured result/error JSON and atomic result publication. Sparse
   three-hourly wave height/period/direction records are selected within a
   bounded nearest-frame window on an hourly combined timeline, with their
   actual source time carried across the boundary and shown by the host.
 - Environmental generator helper using versioned job/result/progress messages,
-  GFS and UKMO providers, optional waves and authenticated Copernicus Marine
-  North-West Shelf or global current inputs, optional local weather/current
-  GRIB replacement inputs, user-selected output and automatic reopening of
-  completed output.
+  the production GFS/HRRR/UKV/ICON/ECMWF weather, GFS/Copernicus wave, and
+  Marine.ie/Copernicus/RTOFS/local/TPXO/offline-tidal current sources exposed by
+  its capability document. Package metadata supplies requirements, coverage,
+  limitations and deterministic long-range fallbacks. Completed output is
+  independently inspected before atomic activation; failure never replaces
+  the currently held valid dataset.
 - Linux helper containment with bubblewrap namespaces and explicit immutable
   input/output/CA grants, `prlimit` CPU/address-space limits, child termination
-  on cancellation/disable and deterministic cleanup. Other OS supervision
-  policies are designed but not yet implemented or tested.
+  on cancellation/disable and deterministic cleanup. Windows uses kill-on-close
+  Job Objects with process, memory, CPU and wall limits. macOS uses a
+  deny-default `sandbox-exec` profile with exact paths and optional outbound
+  network. Flatpak uses its outer application sandbox plus `prlimit`, exact
+  document/private paths and a distinct target payload; these non-Linux-native
+  paths require their CI execution evidence before support is claimed.
 - Deterministic `.ocpnp` packages, complete SHA-256 file inventory, Ed25519
   signature verification, executable-path restrictions, malicious archive
   rejection, immutable extracted files, atomic replacement and retained
@@ -77,11 +92,13 @@ default.
 ## Linux x86-64 evidence
 
 - Full Test-OpenCPN links with `-Werror`.
-- Five CTests pass: real component lifecycle/trap/identity and typed service
+- Twelve focused tests pass: real component lifecycle/trap/identity and typed service
   exercise (including four concurrent compute replicas and cancellation);
   package/signing/update security tests; beta-tool security checks; iGRIB
-  target package/helper conformance; and iWeatherRouting package/UI/service
-  conformance.
+  target package/helper conformance; all-field decode/generation/strict
+  validation; service-version negotiation; immutable real-GRIB routing
+  fixtures; polar parsing; generator merge/long-range rules; and
+  iWeatherRouting package/UI/service conformance.
 - The exact final executable and signed packages were launched again in a
   fresh isolated `/tmp` profile. Both components loaded, the broker discovered
   iGRIB's environmental-provider service, and the schema-rendered
@@ -95,6 +112,11 @@ default.
   from 18:00. The bounded conformance frame retained 7,760 samples. Both the
   first and last of the 84 distinct forecast frames were decoded and verified.
   Timeline playback advanced and overlays remained responsive.
+- A deterministic independent fixture exercises every one of the thirteen
+  field groups, all pressure levels, temporal interpolation, multi-file
+  ordering and weather-table output. Generated output must pass `codes_count`,
+  `grib_ls` and a fresh decoder process; a forced failed regeneration is checked
+  byte-for-byte not to replace the previous valid output.
 - Malformed input returned a structured `environment-decode-failed` result and
   did not affect OpenCPN.
 - The generator helper copied/validated the 44.8 MB fixture under containment
@@ -149,6 +171,13 @@ default.
   and bounded search controls. The host validates and persists these settings;
   the component enforces them during expansion and rechecks the exact final
   approach before returning a route.
+- iWeatherRouting acquires a private read-only snapshot with a revision,
+  byte-size and SHA-256 identity. A real GRIB routing fixture mutates the
+  original selected file after acquisition and proves route sampling continues
+  against the unchanged held dataset.
+- A clean Release build with `OCPN_ENABLE_PORTABLE_PLUGINS=OFF` completed and
+  contained no portable runtime symbols or objects. The native loader files
+  have no source diff.
 
 Measured conformance values for this machine are recorded in
 `conformance-linux-x86_64.md`. Values are observations, not release budgets.
@@ -156,15 +185,14 @@ Measured conformance values for this machine are recorded in
 ## Still experimental or incomplete
 
 - Windows x86-64, macOS Intel/Apple Silicon, Linux ARM64/Raspberry Pi and
-  Flatpak have not been built or executed in this session. Their helper
-  binaries, signing/notarisation and OS-specific process controls remain gates.
-- The package assembled here contains the Linux x86-64 helper payload. A single
-  multi-target archive requires the central build service to add all signed
-  target helpers; the Wasm component itself is unchanged across targets.
-- The UI is an xGRIB-style functional surface with the core bundled-GRIB
-  display workflow, not a pixel-for-pixel port of every xGRIB preference,
-  particle-map mode or provider dialog. Broader parity should be incremental,
-  not an expansion of the WIT boundary into wxWidgets.
+  Flatpak were not executed on this local Linux machine. A required CI workflow
+  now builds all seven target payloads, refuses platform-neutral payload drift,
+  signs one archive and runs native/real-Flatpak conformance. Until the current
+  workflow run is green, those rows remain `pending`, not inferred passes.
+- The UI supplies functional xGRIB workflow/settings parity through a generic
+  host renderer, not pixel-for-pixel inheritance of native wxWidgets. A future
+  visual refinement must remain package-driven and must not move provider code
+  back into core.
 - Chart coverage batching is real, but structured land/depth/drying/conflict
   safety evidence and route-shaped immutable caches are not yet implemented.
 - iWeatherRouting supports start/destination selection from live position,
@@ -191,16 +219,17 @@ Measured conformance values for this machine are recorded in
 - Guest entry dispatch and some host callbacks still need a dedicated serial
   runtime executor before production so no potentially long guest call can
   occupy the wx event thread.
-- CPU and memory quotas are enforced for the component and Linux helpers, but
-  per-plugin fair scheduling, cgroup/job-object/App Sandbox profiles and robust
-  helper restart throttling remain production work.
+- CPU and memory quotas are enforced for the component, Linux helpers and
+  Windows Job Object helpers; per-plugin fair scheduling, hardened macOS code
+  signing, Linux cgroups/seccomp and robust restart throttling remain production
+  work.
 
 ## Next release gates
 
-1. Run the same conformance package on every target and publish target-built
-   helpers in one signed multi-target archive.
-2. Add Windows Job Object/restricted-token, macOS sandbox/hardened-runtime and
-   Flatpak policy tests; add Linux seccomp/cgroup controls where deployable.
+1. Require a green seven-target workflow and publish its signed multi-target
+   archive plus reports; add GUI screenshots/manual checks on every host.
+2. Add a Windows restricted token, hardened/notarised macOS helper and Linux
+   seccomp/cgroup controls where deployable.
 3. Move runtime entry to a serial supervisor executor and add shutdown/leak
    soak tests.
 4. Replace the prototype GSHHS screen with structured chart-safety evidence,

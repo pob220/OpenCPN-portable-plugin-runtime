@@ -168,6 +168,8 @@ interface plugin {
   enable: func() -> result<_, string>;
   disable: func();
   on-action: func(action-id: string) -> result<_, string>;
+  on-surface-event: func(surface-id: string, control-id: string,
+                         value-json: string) -> result<string, string>;
   on-job-event: func(job-id: string, event: job-event);
   calculate-route: func(request: route-request) -> result<route-result, string>;
   test-trap: func();

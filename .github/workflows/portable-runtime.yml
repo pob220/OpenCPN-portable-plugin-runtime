@@ -1,0 +1,297 @@
+---
+name: Portable runtime conformance
+
+'on':
+  push:
+    branches: [portable-plugin-runtime]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PACKAGE_NAME: org.opencpn.igrib-0.1.0.ocpnp
+  RUST_BACKTRACE: 1
+
+jobs:
+  linux-source-and-stock-gate:
+    name: Linux x86-64 source beta and runtime-OFF gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - name: Install reviewed Linux prerequisites
+        run: portable-runtime/beta/debian-prerequisites.sh --install
+      - name: Build and test isolated Test-OpenCPN beta
+        run: portable-runtime/beta/build-linux.sh
+      - name: Build stock runtime-disabled OpenCPN
+        run: |
+          cmake -S . -B build-runtime-off -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DOCPN_ENABLE_PORTABLE_PLUGINS=OFF \
+            -DOCPN_BUILD_TEST=OFF -DOCPN_USE_GL=OFF
+          cmake --build build-runtime-off --target opencpn
+          ! nm -C build-runtime-off/opencpn | \
+            grep -E 'PortablePluginManager|PortableEnvironmentHost|ocpn_portable_runtime'
+      - name: Upload signed Linux package
+        uses: actions/upload-artifact@v4
+        with:
+          name: igrib-linux-base
+          path: build-portable-beta/opencpn/portable-runtime/packages/${{ env.PACKAGE_NAME }}
+          if-no-files-found: error
+          retention-days: 14
+
+  unix-helper-payloads:
+    name: ${{ matrix.target }} helper payload
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-gnu-aarch64
+            runner: ubuntu-24.04-arm
+            family: linux
+          - target: flatpak-x86_64
+            runner: ubuntu-24.04
+            family: linux
+          - target: flatpak-aarch64
+            runner: ubuntu-24.04-arm
+            family: linux
+          - target: macos-x86_64
+            runner: macos-15-intel
+            family: macos
+          - target: macos-aarch64
+            runner: macos-15
+            family: macos
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Linux helper dependencies
+        if: matrix.family == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build pkg-config \
+            libeccodes-dev libjsoncpp-dev libnetcdf-dev libcurl4-openssl-dev \
+            libqhull-dev libbz2-dev libblosc-dev libzip-dev libsodium-dev \
+            libzstd-dev libproj-dev python3
+      - name: Install macOS helper dependencies
+        if: matrix.family == 'macos'
+        run: |
+          brew update
+          brew install cmake ninja pkg-config eccodes jsoncpp netcdf curl \
+            qhull c-blosc libzip libsodium zstd proj bzip2
+      - name: Configure helper payload
+        run: |
+          cmake -S portable-runtime/helper -B helper-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$PWD/helper-stage" \
+            -DOCPN_PORTABLE_HELPER_TARGET=${{ matrix.target }} \
+            -DBUILD_TESTING=ON
+      - name: Build, test and stage helpers
+        run: |
+          cmake --build helper-build
+          ctest --test-dir helper-build --output-on-failure
+          cmake --install helper-build
+          if [[ "${{ matrix.target }}" == flatpak-* ]]; then
+            readelf -d helper-stage/helpers/${{ matrix.target }}/environmental-grib | \
+              grep -F '(RPATH)' | grep -F '$ORIGIN/lib'
+            readelf -d helper-stage/helpers/${{ matrix.target }}/igrib-environment-helper | \
+              grep -F '(RPATH)' | grep -F '$ORIGIN/lib'
+          fi
+          helper-stage/helpers/${{ matrix.target }}/environmental-grib capabilities \
+            > capabilities.json
+          python3 -c 'import json; assert json.load(open("capabilities.json"))["schemaVersion"] == 1'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: helper-${{ matrix.target }}
+          path: helper-stage/helpers/${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-helper-payload:
+    name: windows-x86_64 helper payload
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install vcpkg helper dependencies
+        shell: pwsh
+        run: |
+          vcpkg install --triplet x64-windows `
+            eccodes jsoncpp netcdf-c curl qhull blosc libzip libsodium zstd proj bzip2
+      - name: Configure, build and stage helpers
+        shell: pwsh
+        run: |
+          $toolchain = "$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          $codesInfo = "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/tools/eccodes/codes_info.exe"
+          cmake -S portable-runtime/helper -B helper-build -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            -DECCODES_INFO_EXECUTABLE="$codesInfo" `
+            -DCMAKE_INSTALL_PREFIX="$pwd/helper-stage" `
+            -DOCPN_PORTABLE_HELPER_TARGET=windows-x86_64 `
+            -DBUILD_TESTING=ON
+          cmake --build helper-build --config Release --parallel
+          ctest --test-dir helper-build -C Release --output-on-failure
+          cmake --install helper-build --config Release
+          $capabilities = & "$pwd/helper-stage/helpers/windows-x86_64/environmental-grib.exe" capabilities
+          if (($capabilities | ConvertFrom-Json).schemaVersion -ne 1) { exit 1 }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: helper-windows-x86_64
+          path: helper-stage/helpers/windows-x86_64
+          if-no-files-found: error
+          retention-days: 14
+
+  assemble-one-package:
+    name: Assemble and sign seven-target iGRIB package
+    needs:
+      - linux-source-and-stock-gate
+      - unix-helper-payloads
+      - windows-helper-payload
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install cryptography
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Assemble verified target payloads
+        run: |
+          python portable-runtime/tools/assemble_multitarget_package.py \
+            --package "artifacts/igrib-linux-base/$PACKAGE_NAME" \
+            --trusted-key "org.opencpn.development.igrib-2026=portable-runtime/development-keys/igrib-ed25519-public.pem" \
+            --helper-root linux-gnu-aarch64=artifacts/helper-linux-gnu-aarch64 \
+            --helper-root flatpak-x86_64=artifacts/helper-flatpak-x86_64 \
+            --helper-root flatpak-aarch64=artifacts/helper-flatpak-aarch64 \
+            --helper-root macos-x86_64=artifacts/helper-macos-x86_64 \
+            --helper-root macos-aarch64=artifacts/helper-macos-aarch64 \
+            --helper-root windows-x86_64=artifacts/helper-windows-x86_64 \
+            --require-target linux-gnu-x86_64 \
+            --require-target linux-gnu-aarch64 \
+            --require-target flatpak-x86_64 \
+            --require-target flatpak-aarch64 \
+            --require-target macos-x86_64 \
+            --require-target macos-aarch64 \
+            --require-target windows-x86_64 \
+            --output "dist/$PACKAGE_NAME" \
+            --signing-key portable-runtime/development-keys/igrib-ed25519-private.pem \
+            --key-id org.opencpn.development.igrib-2026 \
+            --report-json dist/multitarget-report.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: igrib-seven-target-signed
+          path: dist
+          if-no-files-found: error
+          retention-days: 30
+
+  native-package-conformance:
+    name: ${{ matrix.target }} signed-package conformance
+    needs: assemble-one-package
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-gnu-x86_64
+            runner: ubuntu-24.04
+            family: linux
+          - target: linux-gnu-aarch64
+            runner: ubuntu-24.04-arm
+            family: linux
+          - target: macos-x86_64
+            runner: macos-15-intel
+            family: macos
+          - target: macos-aarch64
+            runner: macos-15
+            family: macos
+          - target: windows-x86_64
+            runner: windows-2022
+            family: windows
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install cryptography
+      - uses: actions/download-artifact@v4
+        with:
+          name: igrib-seven-target-signed
+          path: dist
+      - name: Install Linux runtime dependencies
+        if: matrix.family == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libeccodes-dev libjsoncpp-dev \
+            libnetcdf-dev libcurl4-openssl-dev libqhull-dev libblosc-dev \
+            libzip-dev libsodium-dev libzstd-dev libproj-dev
+      - name: Install macOS runtime dependencies
+        if: matrix.family == 'macos'
+        run: |
+          brew install eccodes jsoncpp netcdf curl qhull c-blosc libzip \
+            libsodium zstd proj
+      - name: Run unchanged conformance runner
+        run: |
+          python portable-runtime/tests/conformance.py \
+            --package "dist/$PACKAGE_NAME" \
+            --trusted-key portable-runtime/development-keys/igrib-ed25519-public.pem \
+            --output-json "dist/conformance-${{ matrix.target }}.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: conformance-${{ matrix.target }}
+          path: dist/conformance-${{ matrix.target }}.json
+          if-no-files-found: error
+
+  flatpak-package-conformance:
+    name: ${{ matrix.target }} real-sandbox conformance
+    needs: assemble-one-package
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: flatpak-x86_64
+            runner: ubuntu-24.04
+          - target: flatpak-aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install cryptography
+      - uses: actions/download-artifact@v4
+        with:
+          name: igrib-seven-target-signed
+          path: dist
+      - name: Install Flatpak SDK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak
+          flatpak remote-add --user --if-not-exists flathub \
+            https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub org.freedesktop.Sdk//24.08
+      - name: Run helpers inside actual Flatpak sandbox
+        run: |
+          python portable-runtime/tests/flatpak_helper_conformance.py \
+            --package "dist/$PACKAGE_NAME" \
+            --trusted-key portable-runtime/development-keys/igrib-ed25519-public.pem
+...

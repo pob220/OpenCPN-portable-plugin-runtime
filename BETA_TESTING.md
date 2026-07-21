@@ -7,10 +7,15 @@ directory. They do not install into
 `/usr`, do not use a normal `~/.opencpn` profile and do not require removal of
 another OpenCPN version.
 
-The currently demonstrated target is 64-bit Linux on x86-64. Linux ARM64 and
-Flatpak remain conformance targets, not established beta support. Do not use
+The locally demonstrated target is 64-bit Linux on x86-64. The repository also
+contains a required seven-target CI matrix for Windows x86-64, macOS Intel and
+Apple Silicon, Linux x86-64/ARM64, and Flatpak x86-64/ARM64. A target is a
+supported beta target only when its current workflow job is green; a workflow
+definition is not evidence by itself. Do not use
 this experimental build as a primary navigation system. Its weather, overlays
 and chart-coverage observations are not authoritative navigation products.
+See the evidence rules and current rows in
+[conformance-matrix.md](docs/portable-plugin-runtime/conformance-matrix.md).
 
 ## What the beta kit contains
 
@@ -146,8 +151,12 @@ Use non-critical sample data and record each result:
    again and verify it returns to the directory containing the successfully
    loaded GRIB, rather than GTK's unrelated global file-chooser directory.
    Generated GRIBs should likewise become the remembered location.
-3. Toggle wind, pressure, waves, current and air-temperature layers. Move the
-   chart cursor and verify that decoded values are shown in the iGRIB window.
+3. Toggle all fields present in the file. The schema covers all thirteen xGRIB
+   groups: wind, gust, pressure, waves, current, precipitation, cloud, air
+   temperature, sea temperature, CAPE, composite reflectivity, geopotential
+   height and relative humidity. Select surface or the available 850, 700, 500
+   and 300 hPa levels. Move the chart cursor and verify that decoded values are
+   shown in the iGRIB window.
    Pan across a coastline and verify that current and wave symbols, scalar
    maps, numeric labels and cursor readouts stop at land while wind, pressure
    and air temperature remain available over land. The mask uses the bundled
@@ -157,9 +166,10 @@ Use non-critical sample data and record each result:
    among hourly weather/current records; on an intervening timeline step,
    verify that waves remain visible and iGRIB names the wave source time in its
    status line.
-4. Open **Settings**. Exercise the separate Wind, Pressure, Waves, Current and
-   Air temperature pages. Change units, each field's display colour, vectors,
-   colour overlay, values, spacing and the available contour controls. Verify
+4. Open **Settings**. Every declared field has a settings page. Change units,
+   each field's display colour, vectors, colour overlay/palette, values,
+   fixed-grid versus minimum-distance placement, spacing, contours and contour
+   labels where applicable. Verify
    proper meteorological wind barbs and the single/double/tidal-style
    proportional current arrow forms. Exercise all three wave-specific forms:
    crest-and-travel markers, travel-direction arrows and height circles with a
@@ -172,8 +182,17 @@ Use non-critical sample data and record each result:
    enabled deliberately if a magnitude map is wanted. Also change opacity,
    playback speed and timeline looping, then verify that all choices survive
    closing and reopening iGRIB.
-5. Step forward/backward and run timeline playback.
-6. Open **Generate GRIB**, request a very small GFS area and one or two time
+5. Step forward/backward, drag the time slider, run timeline playback, switch
+   pressure levels, enable interpolation, and open the cursor weather table.
+   Open multiple GRIB files in a deliberate order and verify deterministic
+   last-file-wins handling for duplicate messages.
+6. Open **Generate GRIB** and inspect each selector. Weather choices include
+   GFS, HRRR, UKV, ICON-EU, ECMWF IFS/AIFS and a local file. Waves include GFS
+   Wave and Copernicus global waves. Currents include automatic regional
+   selection, Marine.ie, Copernicus NWS/global/IBI/Mediterranean, RTOFS, local
+   GRIB/NetCDF, TPXO cache/direct and offline tidal sources. Each package-owned
+   entry states its account/file/model requirement, coverage and limitation.
+   For a first live run, request a very small GFS area and one or two time
    steps, select **Copernicus Marine North-West Shelf** currents, and enter a
    free Copernicus Marine account login. Set **Output GRIB** directly in the
    form, or use **Browse…** to choose it, then press **Generate GRIB**. This
@@ -187,6 +206,10 @@ Use non-critical sample data and record each result:
    preserved); a local current file replaces the online current source. The
    helper receives read-only access to only those selected files. Verify that
    the output opens automatically and contains the expected combined fields.
+   Repeat with a forecast beyond a primary provider's range and verify the
+   declared long-range fallback is used, or the job fails clearly when no
+   fallback was selected. A failed job or invalid result must leave the
+   previously open valid dataset and overlays unchanged.
 8. Start a larger operation and press **Cancel**; the UI must remain usable.
 9. Try a small text file renamed to `.grb`; the error must be contained and
    OpenCPN must remain operational.
@@ -356,8 +379,11 @@ this beta setup.
 
 ## Scope of this beta
 
-This is a functional architecture proof, not a claim of complete xGRIB parity
-or production readiness. The remaining gates—including broader chart-safety
-semantics, permission-consent UI, production trust/revocation, non-Linux
-helper sandboxes and multi-platform payload assembly—are tracked in
+This is a substantial functional architecture proof with portable equivalents
+for the xGRIB viewer/generator workflows; it is not production navigation
+software or a claim of pixel-identical wxWidgets rendering. Package-owned
+schema/controller/provider policy is rendered by reusable host services rather
+than iGRIB dialogs in core. Remaining production gates—including broader
+chart-safety semantics, permission-consent UI, catalogue trust/revocation,
+platform code-signing/notarisation and long-term security ownership—are tracked in
 `docs/portable-plugin-runtime/prototype-status.md`.

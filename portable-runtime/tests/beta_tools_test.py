@@ -58,10 +58,14 @@ class BetaToolsTest(unittest.TestCase):
         self.assertNotIn("Bearer-secret", redacted)
 
     def test_copernicus_password_stays_out_of_jobs_and_arguments(self):
-        source = (ROOT / "gui/src/portable_grib_host.cpp").read_text()
-        self.assertIn("copernicus_nws", source)
-        self.assertIn("copernicus_global", source)
-        self.assertIn("copernicusPasswordEnvironment", source)
+        source = (ROOT / "gui/src/portable_environment_host.cpp").read_text()
+        package = (ROOT / "portable-plugins/igrib/package/igrib-viewer.ui.json").read_text()
+        self.assertIn("copernicus_nws", package)
+        self.assertIn("copernicus_global", package)
+        self.assertNotIn("copernicus_nws", source)
+        self.assertNotIn("copernicus_global", source)
+        self.assertIn("copernicusPasswordEnvironment", package)
+        self.assertNotIn("copernicusPasswordEnvironment", source)
         self.assertIn("wxSecretStore", source)
         self.assertNotIn('request["copernicusPassword"]', source)
         self.assertNotIn('"--password"', source)

@@ -18,6 +18,15 @@ environmental generation outside OpenCPN. Neither plugin depends on a native
 xGRIB or Weather Routing plugin. Current evidence and remaining gates are in
 `docs/portable-plugin-runtime/prototype-status.md`.
 
+The environmental surface is declarative UI schema 2. Its package owns the
+thirteen field-group catalogue, pressure levels, provider choices,
+requirements, generator policy and persisted controller state. OpenCPN owns a
+generic environmental dataset/view/render service: it has no provider IDs or
+iGRIB-specific dialog class. `environment.provider@0.1` is negotiated using a
+real semantic-version range, and iWeatherRouting holds a private immutable
+dataset snapshot identified by size and SHA-256 for the lifetime of a route
+job.
+
 iWeatherRouting accepts real OpenCPN weather-routing `.pol` files and boat
 `.xml` manifests. OpenCPN parses and validates the user-selected file, then
 sends bounded value-only polar grids to the Wasm component for TWS/TWA
@@ -102,3 +111,14 @@ python3 portable-runtime/tests/routing_package_conformance.py \
 Do not enable this prototype in a navigation-critical profile. Plugin weather,
 overlays, chart-coverage observations and generated GRIBs are experimental
 planning data, not authoritative safety information.
+
+The `Portable runtime conformance` GitHub workflow builds target-qualified
+helpers, assembles one developer-signed package, then runs it on Windows,
+both macOS architectures, both native Linux architectures and inside actual
+Flatpak SDK sandboxes. Its aggregation tool refuses differing portable
+components, conflicting helpers, undeclared targets or an incomplete required
+matrix:
+
+```sh
+python3 portable-runtime/tools/assemble_multitarget_package.py --help
+```
