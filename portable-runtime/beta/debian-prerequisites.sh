@@ -19,6 +19,7 @@ packages=(
   libcurl4-openssl-dev
   libdrm-dev
   libeccodes-dev
+  libeccodes-tools
   libelf-dev
   libexif-dev
   libgdk-pixbuf-2.0-dev

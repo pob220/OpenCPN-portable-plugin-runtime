@@ -101,6 +101,7 @@ class BetaToolsTest(unittest.TestCase):
         source = (BETA / "debian-prerequisites.sh").read_text()
         for package in (
             "libeccodes-dev",
+            "libeccodes-tools",
             "libjsoncpp-dev",
             "libnetcdf-dev",
             "libcurl4-openssl-dev",
