@@ -85,10 +85,18 @@ def main():
         common = "dataDate=20260721,dataTime=0,stepRange=0"
         for index, (short_name, level_type, level) in enumerate(named_fields):
             output = root / f"named-{index}.grb"
+            # ecCodes releases before 2.30 cannot derive total precipitation
+            # from shortName alone when starting with the generic surface
+            # sample.  Parameter 228 is the stable WMO/ecCodes identity for
+            # this fixture and works across the supported distro versions.
+            parameter = (
+                "paramId=228" if short_name == "tp"
+                else f"shortName={short_name}"
+            )
             run(
                 grib_set,
                 "-s",
-                f"shortName={short_name},typeOfLevel={level_type},"
+                f"{parameter},typeOfLevel={level_type},"
                 f"level={level},{common}",
                 template,
                 output,
