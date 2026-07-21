@@ -131,6 +131,10 @@ def main():
             if not directory.is_dir():
                 raise ValueError(f"helper root is not a directory: {directory}")
             suffix = ".exe" if target == "windows-x86_64" else ""
+            executable_names = {
+                f"igrib-environment-helper{suffix}",
+                f"environmental-grib{suffix}",
+            }
             if not (directory / f"igrib-environment-helper{suffix}").is_file():
                 raise ValueError(f"decoder helper is absent from {target}")
             if not (directory / f"environmental-grib{suffix}").is_file():
@@ -161,7 +165,15 @@ def main():
                 if name in helpers and helpers[name] != data:
                     raise ValueError(f"conflicting duplicate helper: {name}")
                 helpers[name] = data
-                helper_modes[name] = payload_source.stat().st_mode
+                # actions/upload-artifact intentionally normalises regular
+                # files to 0644. Restore execute permission only for the two
+                # validated entry points; dependency libraries and data stay
+                # non-executable.
+                helper_modes[name] = (
+                    stat.S_IFREG | 0o755
+                    if relative in executable_names
+                    else stat.S_IFREG | 0o644
+                )
         available = {pathlib.PurePosixPath(name).parts[1] for name in helpers}
         missing = required - available
         if missing:

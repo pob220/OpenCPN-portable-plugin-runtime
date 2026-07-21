@@ -321,9 +321,20 @@ class PackageToolsTest(unittest.TestCase):
             merged, {"test-key": public_path}, developer=True
         )
         alias = "helpers/flatpak-x86_64/lib/libexample.so.1"
+        packaged_decoder = (
+            "helpers/flatpak-x86_64/igrib-environment-helper"
+        )
+        packaged_generator = "helpers/flatpak-x86_64/environmental-grib"
         with zipfile.ZipFile(merged) as archive:
             self.assertEqual(archive.read(alias), b"library bytes")
             self.assertTrue(stat.S_ISREG(entries[alias].external_attr >> 16))
+            self.assertFalse((entries[alias].external_attr >> 16) & stat.S_IXUSR)
+            self.assertTrue(
+                (entries[packaged_decoder].external_attr >> 16) & stat.S_IXUSR
+            )
+            self.assertTrue(
+                (entries[packaged_generator].external_attr >> 16) & stat.S_IXUSR
+            )
 
         generator = helper_root / "environmental-grib"
         generator.unlink()
