@@ -7,13 +7,17 @@ use exports::opencpn::portable::plugin::{
     PolarGrid, RouteEnvironmentPoint, RouteInspectionLine, RoutePoint, RouteRequest, RouteResult,
 };
 use opencpn::portable::host::{
-    self, ChartCoverageState, EnvironmentSampleRequest, GeoPoint, GeoSegment, LogLevel,
+    self, ChartCoverageState, ChartSegmentResult, EnvironmentSampleRequest, GeoPoint, GeoSegment,
+    LogLevel,
 };
 use std::collections::{BTreeSet, HashMap};
 
 struct IWeatherRouting;
 const ACTION_OPEN: &str = "iweather-routing.open";
 const EARTH_NM: f64 = 3440.065;
+// Keep portable chart queries comfortably below the runtime's per-call
+// resource ceiling. The ordering of both probes and results is significant.
+const CHART_SEGMENT_BATCH_LIMIT: usize = 4096;
 
 #[derive(Clone)]
 struct Node {
@@ -683,7 +687,29 @@ fn clearance_segments(segment: &GeoSegment, margin_nm: f64) -> Vec<GeoSegment> {
     result
 }
 
-fn chart_corridor_is_covered(results: &[opencpn::portable::host::ChartSegmentResult]) -> bool {
+fn query_chart_segments_with<F>(
+    segments: &[GeoSegment],
+    mut query: F,
+) -> Result<Vec<ChartSegmentResult>, String>
+where
+    F: FnMut(&[GeoSegment]) -> Result<Vec<ChartSegmentResult>, String>,
+{
+    let mut results = Vec::with_capacity(segments.len());
+    for batch in segments.chunks(CHART_SEGMENT_BATCH_LIMIT) {
+        let mut batch_results = query(batch)?;
+        if batch_results.len() != batch.len() {
+            return Err("chart service returned the wrong batch length".into());
+        }
+        results.append(&mut batch_results);
+    }
+    Ok(results)
+}
+
+fn query_chart_segments(segments: &[GeoSegment]) -> Result<Vec<ChartSegmentResult>, String> {
+    query_chart_segments_with(segments, host::charts_query_segments)
+}
+
+fn chart_corridor_is_covered(results: &[ChartSegmentResult]) -> bool {
     !results.is_empty()
         && results
             .iter()
@@ -906,7 +932,7 @@ fn validate_delivered_route(request: &RouteRequest, points: &[RoutePoint]) -> Re
         return Err("independent validation received the wrong environmental batch length".into());
     }
     if request.avoid_unsafe_charts {
-        let chart_results = host::charts_query_segments(&segments)?;
+        let chart_results = query_chart_segments(&segments)?;
         if chart_results.len() != segments.len() {
             return Err("independent validation received the wrong chart batch length".into());
         }
@@ -1321,7 +1347,7 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
             return Err("no viable states remain after environmental limits".into());
         }
         let chart_results = if request.avoid_unsafe_charts {
-            host::charts_query_segments(&chart_segments)?
+            query_chart_segments(&chart_segments)?
         } else {
             Vec::new()
         };
@@ -1576,7 +1602,7 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
     if request.avoid_unsafe_charts {
         let final_probes =
             clearance_segments(&final_segment, request.land_safety_margin_nautical_miles);
-        let final_chart_result = host::charts_query_segments(&final_probes)?;
+        let final_chart_result = query_chart_segments(&final_probes)?;
         if final_chart_result.len() != final_probes.len() {
             return Err("chart service returned the wrong final-approach batch length".into());
         }
@@ -1671,3 +1697,65 @@ impl exports::opencpn::portable::plugin::Guest for IWeatherRouting {
 }
 
 export!(IWeatherRouting);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_segment() -> GeoSegment {
+        GeoSegment {
+            start: GeoPoint {
+                latitude: 53.0,
+                longitude: -5.0,
+            },
+            end: GeoPoint {
+                latitude: 53.1,
+                longitude: -4.9,
+            },
+        }
+    }
+
+    #[test]
+    fn chart_queries_are_split_without_reordering_results() {
+        let segment_count = CHART_SEGMENT_BATCH_LIMIT * 2 + 5;
+        let segments = vec![test_segment(); segment_count];
+        let mut batch_sizes = Vec::new();
+        let mut next_result = 0u32;
+
+        let results = query_chart_segments_with(&segments, |batch| {
+            batch_sizes.push(batch.len());
+            Ok(batch
+                .iter()
+                .map(|_| {
+                    let result = ChartSegmentResult {
+                        state: ChartCoverageState::Covered,
+                        charts_considered: next_result,
+                        diagnostic: String::new(),
+                    };
+                    next_result += 1;
+                    result
+                })
+                .collect())
+        })
+        .expect("large chart query should be split into valid batches");
+
+        assert_eq!(
+            batch_sizes,
+            vec![CHART_SEGMENT_BATCH_LIMIT, CHART_SEGMENT_BATCH_LIMIT, 5]
+        );
+        assert_eq!(results.len(), segment_count);
+        assert!(
+            results
+                .iter()
+                .enumerate()
+                .all(|(index, result)| result.charts_considered == index as u32)
+        );
+    }
+
+    #[test]
+    fn chart_query_batch_length_mismatch_fails_closed() {
+        let error = query_chart_segments_with(&[test_segment()], |_| Ok(Vec::new()))
+            .expect_err("missing chart results must reject the route");
+        assert_eq!(error, "chart service returned the wrong batch length");
+    }
+}
