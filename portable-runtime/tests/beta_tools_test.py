@@ -68,6 +68,8 @@ class BetaToolsTest(unittest.TestCase):
         self.assertIn("copernicusPasswordEnvironment", package)
         self.assertNotIn("copernicusPasswordEnvironment", source)
         self.assertIn("wxSecretStore", source)
+        self.assertIn("#if wxUSE_SECRETSTORE", source)
+        self.assertIn("held in memory for this generation only", source)
         self.assertNotIn('request["copernicusPassword"]', source)
         self.assertNotIn('"--password"', source)
         self.assertNotIn("TPXO model directory", source)

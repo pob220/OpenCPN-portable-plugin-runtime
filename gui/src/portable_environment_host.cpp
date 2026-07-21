@@ -3014,15 +3014,23 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
   const wxString credential_service =
       "OpenCPN portable " + plugin_id + " " +
       credential_definition["service_suffix"].AsString();
-  wxSecretStore secret_store = wxSecretStore::GetDefault();
   wxString secret_store_error;
-  const bool secret_store_available =
-      credential_access && secret_store.IsOk(&secret_store_error);
+  bool secret_store_available = false;
   wxString stored_username;
   wxSecretValue stored_password;
-  bool have_stored_credentials =
+  bool have_stored_credentials = false;
+#if wxUSE_SECRETSTORE
+  wxSecretStore secret_store = wxSecretStore::GetDefault();
+  secret_store_available =
+      credential_access && secret_store.IsOk(&secret_store_error);
+  have_stored_credentials =
       secret_store_available && !credential_scheme.empty() &&
       secret_store.Load(credential_service, stored_username, stored_password);
+#else
+  secret_store_error =
+      "this wxWidgets build has no operating-system secret-store support; "
+      "the login will be held in memory for this generation only";
+#endif
 
   const wxString generator_title =
       generator_definition["title"].IsString()
@@ -3376,6 +3384,7 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
       fallback_current_data->SetValue(input_dialog.GetPath());
   });
   forget->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
+#if wxUSE_SECRETSTORE
     if (have_stored_credentials && secret_store.Delete(credential_service)) {
       have_stored_credentials = false;
       stored_username.clear();
@@ -3384,6 +3393,10 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
       remember->SetValue(false);
       forget->Enable(false);
     }
+#else
+    // The button is disabled when wxWidgets has no secret-store backend.
+    wxUnusedVar(have_stored_credentials);
+#endif
   });
   browse_output->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
     wxFileName selected(output_path->GetValue());
@@ -3512,6 +3525,7 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
       return;
     }
     provider_secret = wxSecretValue(provider_password);
+#if wxUSE_SECRETSTORE
     if (remember->GetValue() &&
         !secret_store.Save(credential_service, provider_username,
                            provider_secret)) {
@@ -3520,6 +3534,7 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
           "used for this generation only.",
           surface_title, wxOK | wxICON_WARNING, frame);
     }
+#endif
   }
   password->Clear();
 
