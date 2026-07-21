@@ -6,11 +6,13 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <limits>
 #include <list>
@@ -18,10 +20,12 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #if defined(__linux__) || defined(__APPLE__)
+#include <signal.h>
 #include <spawn.h>
 #include <sys/wait.h>
 
@@ -88,7 +92,14 @@ constexpr int kProgressTimerId = wxID_HIGHEST + 712;
 constexpr int kPlaybackTimerId = wxID_HIGHEST + 713;
 constexpr int kAnimationTimerId = wxID_HIGHEST + 714;
 constexpr size_t kMaximumResultBytes = 32U * 1024U * 1024U;
+constexpr size_t kMaximumFrameResultBytes = 64U * 1024U * 1024U;
 constexpr double kPi = 3.14159265358979323846;
+enum WeatherTablePositionSource {
+  kWeatherTableChartCursor = 0,
+  kWeatherTableVessel = 1,
+  kWeatherTableWaypoint = 2,
+  kWeatherTableManual = 3,
+};
 // This is a deliberately conservative physical ceiling, not a display clamp.
 // Values at or above common GRIB/NetCDF fill sentinels (for example 9999)
 // must be discarded rather than rendered or supplied to route calculations.
@@ -114,10 +125,14 @@ struct Sample {
 };
 
 struct DecodedEnvironmentFrame {
+  wxString time;
+  size_t sample_count = 0;
   std::map<wxString, std::vector<Sample>> fields;
   std::map<wxString, wxString> units;
   std::map<wxString, wxString> source_times;
 };
+
+using DecodedFramePtr = std::shared_ptr<const DecodedEnvironmentFrame>;
 
 size_t EstimatedFrameBytes(const DecodedEnvironmentFrame& frame) {
   size_t bytes = sizeof(frame);
@@ -129,6 +144,65 @@ size_t EstimatedFrameBytes(const DecodedEnvironmentFrame& frame) {
   for (const auto& [name, value] : frame.source_times)
     bytes += (name.length() + value.length()) * sizeof(wxChar);
   return bytes;
+}
+
+DecodedFramePtr InterpolateDecodedFrames(const DecodedFramePtr& first,
+                                         const DecodedFramePtr& second,
+                                         const wxString& requested_time,
+                                         double factor) {
+  if (!first) return second;
+  if (!second || factor <= 0.0) return first;
+  if (factor >= 1.0) return second;
+  auto output = std::make_shared<DecodedEnvironmentFrame>();
+  output->time = requested_time;
+  output->units = first->units;
+  output->source_times = first->source_times;
+  for (const auto& [kind, left_samples] : first->fields) {
+    const auto right = second->fields.find(kind);
+    if (right == second->fields.end()) {
+      output->fields[kind] = left_samples;
+      output->sample_count += left_samples.size();
+      continue;
+    }
+    if (right->second.size() != left_samples.size()) {
+      output->fields[kind] = factor < 0.5 ? left_samples : right->second;
+      output->sample_count += output->fields[kind].size();
+      continue;
+    }
+    auto& samples = output->fields[kind];
+    samples.reserve(left_samples.size());
+    bool compatible = true;
+    for (size_t index = 0; index < left_samples.size(); ++index) {
+      const auto& left = left_samples[index];
+      const auto& right_sample = right->second[index];
+      if (std::abs(left.latitude - right_sample.latitude) > 1e-6 ||
+          std::abs(left.longitude - right_sample.longitude) > 1e-6) {
+        compatible = false;
+        break;
+      }
+      double value = left.value + factor * (right_sample.value - left.value);
+      if (kind == "wave-direction") {
+        const double delta =
+            std::fmod(right_sample.value - left.value + 540.0, 360.0) - 180.0;
+        value = std::fmod(left.value + factor * delta + 360.0, 360.0);
+      }
+      samples.push_back({left.latitude, left.longitude, value});
+    }
+    if (!compatible) samples = factor < 0.5 ? left_samples : right->second;
+    output->sample_count += samples.size();
+    output->source_times[kind] = requested_time;
+  }
+  for (const auto& [kind, right_samples] : second->fields) {
+    if (output->fields.count(kind)) continue;
+    output->fields[kind] = right_samples;
+    output->sample_count += right_samples.size();
+    const auto unit = second->units.find(kind);
+    if (unit != second->units.end()) output->units[kind] = unit->second;
+    const auto source_time = second->source_times.find(kind);
+    if (source_time != second->source_times.end())
+      output->source_times[kind] = source_time->second;
+  }
+  return output;
 }
 
 bool PlausibleDecodedValue(const wxString& kind, double value) {
@@ -153,6 +227,9 @@ bool ParseDecodedFrame(wxJSONValue& value, DecodedEnvironmentFrame* decoded,
     if (error) *error = "decoder returned an incompatible frame schema";
     return false;
   }
+  decoded->time = value["time"].AsString();
+  decoded->sample_count =
+      static_cast<size_t>(std::max(0, value["sampleCount"].AsInt()));
   for (int i = 0; i < value["fields"].Size(); ++i) {
     wxJSONValue field = value["fields"][i];
     if (!field.IsObject() || !field["kind"].IsString() ||
@@ -181,6 +258,128 @@ bool ParseDecodedFrame(wxJSONValue& value, DecodedEnvironmentFrame* decoded,
     return false;
   }
   return true;
+}
+
+bool ReadExact(std::istream& input, char* output, size_t size) {
+  input.read(output, static_cast<std::streamsize>(size));
+  return input.good() || (input.eof() &&
+                          static_cast<size_t>(input.gcount()) == size);
+}
+
+bool ReadU32(std::istream& input, uint32_t* value) {
+  std::array<unsigned char, 4> bytes{};
+  if (!value || !ReadExact(input, reinterpret_cast<char*>(bytes.data()),
+                           bytes.size()))
+    return false;
+  *value = 0;
+  for (unsigned index = 0; index < bytes.size(); ++index)
+    *value |= static_cast<uint32_t>(bytes[index]) << (index * 8);
+  return true;
+}
+
+bool ReadU64(std::istream& input, uint64_t* value) {
+  std::array<unsigned char, 8> bytes{};
+  if (!value || !ReadExact(input, reinterpret_cast<char*>(bytes.data()),
+                           bytes.size()))
+    return false;
+  *value = 0;
+  for (unsigned index = 0; index < bytes.size(); ++index)
+    *value |= static_cast<uint64_t>(bytes[index]) << (index * 8);
+  return true;
+}
+
+bool ReadDouble(std::istream& input, double* value) {
+  uint64_t bits = 0;
+  if (!value || !ReadU64(input, &bits)) return false;
+  static_assert(sizeof(double) == sizeof(bits),
+                "portable frame protocol requires binary64 doubles");
+  std::memcpy(value, &bits, sizeof(bits));
+  return true;
+}
+
+bool ReadFrameString(std::istream& input, wxString* value) {
+  uint32_t length = 0;
+  if (!value || !ReadU32(input, &length) || length > 4096) return false;
+  std::string encoded(length, '\0');
+  if (length && !ReadExact(input, encoded.data(), encoded.size())) return false;
+  *value = wxString::FromUTF8(encoded.data(), encoded.size());
+  return length == 0 || !value->empty();
+}
+
+bool ReadBinaryFrames(const wxString& path,
+                      std::vector<DecodedEnvironmentFrame>* frames,
+                      wxString* error) {
+  if (!frames || !wxFileExists(path)) {
+    if (error) *error = "decoder did not publish a binary frame";
+    return false;
+  }
+  const auto size = wxFileName(path).GetSize();
+  if (size == wxInvalidSize || size.GetValue() < 12 ||
+      size.GetValue() > kMaximumFrameResultBytes) {
+    if (error) *error = "binary frame exceeded the service size limit";
+    return false;
+  }
+  std::ifstream input(path.ToStdString(), std::ios::binary);
+  std::array<char, 8> magic{};
+  constexpr std::array<char, 8> expected = {'O', 'C', 'P', 'N',
+                                             'F', 'R', 'M', '1'};
+  uint32_t frame_count = 0;
+  if (!input || !ReadExact(input, magic.data(), magic.size()) ||
+      magic != expected || !ReadU32(input, &frame_count) || frame_count == 0 ||
+      frame_count > 32) {
+    if (error) *error = "decoder returned an incompatible binary frame";
+    return false;
+  }
+  std::vector<DecodedEnvironmentFrame> decoded_frames;
+  decoded_frames.reserve(frame_count);
+  for (uint32_t frame_index = 0; frame_index < frame_count; ++frame_index) {
+    DecodedEnvironmentFrame decoded;
+    uint32_t field_count = 0;
+    uint64_t declared_samples = 0;
+    if (!ReadFrameString(input, &decoded.time) || decoded.time.empty() ||
+        !ReadU32(input, &field_count) || field_count == 0 || field_count > 64 ||
+        !ReadU64(input, &declared_samples) || declared_samples > 6400000)
+      goto incompatible;
+    for (uint32_t field_index = 0; field_index < field_count; ++field_index) {
+      wxString kind;
+      wxString unit;
+      wxString source_time;
+      uint32_t sample_count = 0;
+      if (!ReadFrameString(input, &kind) || kind.empty() ||
+          !ReadFrameString(input, &unit) ||
+          !ReadFrameString(input, &source_time) ||
+          !ReadU32(input, &sample_count) || sample_count > 100000 ||
+          decoded.fields.count(kind))
+        goto incompatible;
+      auto& samples = decoded.fields[kind];
+      samples.reserve(sample_count);
+      for (uint32_t sample_index = 0; sample_index < sample_count;
+           ++sample_index) {
+        Sample sample;
+        if (!ReadDouble(input, &sample.latitude) ||
+            !ReadDouble(input, &sample.longitude) ||
+            !ReadDouble(input, &sample.value) ||
+            !std::isfinite(sample.latitude) || sample.latitude < -90.0 ||
+            sample.latitude > 90.0 || !std::isfinite(sample.longitude) ||
+            sample.longitude < -180.0 || sample.longitude > 180.0 ||
+            !PlausibleDecodedValue(kind, sample.value))
+          goto incompatible;
+        samples.push_back(sample);
+      }
+      decoded.sample_count += samples.size();
+      decoded.units[kind] = unit;
+      if (!source_time.empty()) decoded.source_times[kind] = source_time;
+    }
+    if (decoded.sample_count != declared_samples) goto incompatible;
+    decoded_frames.push_back(std::move(decoded));
+  }
+  if (input.peek() != std::char_traits<char>::eof()) goto incompatible;
+  *frames = std::move(decoded_frames);
+  return true;
+
+incompatible:
+  if (error) *error = "decoder returned a malformed binary frame";
+  return false;
 }
 
 struct LayerDisplaySettings {
@@ -262,13 +461,16 @@ bool ParseGribTime(const wxString& value, wxDateTime* result) {
                        static_cast<int>(year),
                        static_cast<wxDateTime::wxDateTime_t>(hour),
                        static_cast<wxDateTime::wxDateTime_t>(minute));
-  return result->IsValid();
+  if (!result->IsValid()) return false;
+  result->MakeFromTimezone(wxDateTime::UTC);
+  return true;
 }
 
 wxString FormatGribTime(const wxString& value) {
   wxDateTime time;
-  return ParseGribTime(value, &time) ? time.Format("%a %d %b %Y  %H:%M UTC")
-                                     : value;
+  return ParseGribTime(value, &time)
+             ? time.ToUTC().Format("%a %d %b %Y  %H:%M UTC")
+             : value;
 }
 
 double PressureHpa(double value) {
@@ -987,6 +1189,7 @@ wxString MakeResultPath(const wxString& directory, const wxString& operation) {
 // wrong thread. Routing helpers are already wrapped by prlimit and bubblewrap;
 // launch that argv directly without involving wxWidgets' GUI process layer.
 bool RunHeadlessProcess(const std::vector<wxString>& arguments, long* exit_code,
+                        const std::function<bool()>& cancelled,
                         wxString* error) {
 #if defined(__linux__) || defined(__APPLE__)
   if (arguments.empty() || !exit_code) {
@@ -1017,18 +1220,49 @@ bool RunHeadlessProcess(const std::vector<wxString>& arguments, long* exit_code,
                wxString::FromUTF8(std::strerror(spawn_error));
     return false;
   }
+  constexpr auto kDecoderDeadline = std::chrono::minutes(2);
+  const auto deadline = std::chrono::steady_clock::now() + kDecoderDeadline;
   int status = 0;
   pid_t waited = -1;
-  do {
-    waited = waitpid(child, &status, 0);
-  } while (waited < 0 && errno == EINTR);
+  bool stopping = false;
+  while (true) {
+    waited = waitpid(child, &status, WNOHANG);
+    if (waited == child) break;
+    if (waited < 0 && errno != EINTR) break;
+    const bool timed_out = std::chrono::steady_clock::now() >= deadline;
+    if ((cancelled && cancelled()) || timed_out) {
+      stopping = true;
+      kill(child, SIGTERM);
+      const auto grace = std::chrono::steady_clock::now() +
+                         std::chrono::milliseconds(500);
+      do {
+        waited = waitpid(child, &status, WNOHANG);
+        if (waited == child) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      } while (std::chrono::steady_clock::now() < grace);
+      if (waited != child) {
+        kill(child, SIGKILL);
+        do {
+          waited = waitpid(child, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+      }
+      if (error)
+        *error = timed_out ? "contained decoder exceeded its two minute deadline"
+                           : "contained decoder was cancelled";
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
   if (waited != child) {
     if (error)
       *error = "could not wait for supervised decoder: " +
                wxString::FromUTF8(std::strerror(errno));
     return false;
   }
-  if (WIFEXITED(status))
+  if (stopping) {
+    *exit_code = 124;
+    return false;
+  } else if (WIFEXITED(status))
     *exit_code = WEXITSTATUS(status);
   else if (WIFSIGNALED(status))
     *exit_code = 128 + WTERMSIG(status);
@@ -1096,11 +1330,23 @@ bool RunHeadlessProcess(const std::vector<wxString>& arguments, long* exit_code,
     return false;
   }
   ResumeThread(process.hThread);
-  const DWORD wait_result = WaitForSingleObject(process.hProcess, 45'000);
+  constexpr DWORD kPollMilliseconds = 20;
+  constexpr DWORD kDeadlineMilliseconds = 120'000;
+  DWORD elapsed = 0;
+  DWORD wait_result = WAIT_TIMEOUT;
+  while (elapsed < kDeadlineMilliseconds) {
+    wait_result = WaitForSingleObject(process.hProcess, kPollMilliseconds);
+    if (wait_result != WAIT_TIMEOUT || (cancelled && cancelled())) break;
+    elapsed += kPollMilliseconds;
+  }
   DWORD code = 127;
-  if (wait_result == WAIT_TIMEOUT) {
+  const bool was_cancelled = cancelled && cancelled();
+  if (was_cancelled) {
+    TerminateJobObject(job, 125);
+    if (error) *error = "contained decoder was cancelled";
+  } else if (wait_result == WAIT_TIMEOUT) {
     TerminateJobObject(job, 124);
-    if (error) *error = "contained decoder exceeded its 45 second deadline";
+    if (error) *error = "contained decoder exceeded its two minute deadline";
   } else if (wait_result != WAIT_OBJECT_0 ||
              !GetExitCodeProcess(process.hProcess, &code)) {
     TerminateJobObject(job, 127);
@@ -1109,11 +1355,14 @@ bool RunHeadlessProcess(const std::vector<wxString>& arguments, long* exit_code,
   CloseHandle(process.hThread);
   CloseHandle(process.hProcess);
   CloseHandle(job);
-  *exit_code = wait_result == WAIT_OBJECT_0 ? static_cast<long>(code) : 124;
-  return wait_result == WAIT_OBJECT_0;
+  *exit_code = wait_result == WAIT_OBJECT_0 && !was_cancelled
+                   ? static_cast<long>(code)
+                   : 124;
+  return wait_result == WAIT_OBJECT_0 && !was_cancelled;
 #else
   static_cast<void>(arguments);
   static_cast<void>(exit_code);
+  static_cast<void>(cancelled);
   if (error)
     *error = "headless helper supervision is not implemented for this host";
   return false;
@@ -1176,7 +1425,10 @@ public:
   Impl(wxWindow* parent_value, wxString plugin_id_value,
        wxString package_root_value, wxString surface_resource_value,
        bool credential_access_value, ocpn_portable_runtime* runtime_value,
-       std::shared_ptr<std::mutex> runtime_mutex_value)
+       std::shared_ptr<std::mutex> runtime_mutex_value,
+       std::function<std::vector<PortableEnvironmentPosition>()>
+           list_waypoints_value,
+       std::function<bool(PortableEnvironmentPosition*)> vessel_position_value)
       : parent(parent_value),
         plugin_id(std::move(plugin_id_value)),
         package_root(std::move(package_root_value)),
@@ -1184,6 +1436,8 @@ public:
         credential_access(credential_access_value),
         runtime(runtime_value),
         runtime_mutex(std::move(runtime_mutex_value)),
+        list_waypoints(std::move(list_waypoints_value)),
+        vessel_position(std::move(vessel_position_value)),
         progress_timer(this, kProgressTimerId),
         playback_timer(this, kPlaybackTimerId),
         animation_timer(this, kAnimationTimerId) {
@@ -1208,6 +1462,7 @@ public:
       std::vector<PortableEnvironmentSample>* results, wxString* error) const;
   wxString DatasetSummary() const;
   bool DisplayedTime(int64_t* unix_time) const;
+  void RequestStop();
   void SetCursorPosition(double latitude, double longitude);
   void Shutdown();
 
@@ -1222,15 +1477,26 @@ private:
   bool StageDataset(const wxArrayString& paths, const wxString& display_name,
                     wxString* staged_path, wxString* error);
   void ShowWeatherTable();
+  void CreateWeatherTableDialog();
+  void RefreshWeatherTablePositions(bool initial = false);
+  bool ApplyWeatherTablePosition(bool report_error = true);
+  bool WeatherTablePositionCovered(double latitude, double longitude) const;
+  void StartWeatherTable();
   void StartInspect(const wxString& path,
                     const wxString& display_name = wxEmptyString);
   void StartFrame(size_t index);
+  void StartSliderFrame(int slider_value);
   void StartFrameTime(const wxString& time, int slider_value,
                       size_t source_index);
+  bool ComposeCachedDisplayFrame(const wxString& time, size_t source_index,
+                                 DecodedFramePtr* decoded) const;
+  void RebuildTimelineChoices();
   void PrefetchNextFrame(int slider_value);
   void HandlePrefetchFrame(wxJSONValue& value);
+  void HandlePrefetchFrame(DecodedEnvironmentFrame decoded);
+  void HandlePrefetchFrames(std::vector<DecodedEnvironmentFrame> decoded);
   void ApplyDisplayedFrame(const wxString& requested_time,
-                           const DecodedEnvironmentFrame& decoded,
+                           DecodedFramePtr decoded,
                            size_t sample_count, bool cached);
   wxString TimeForSlider(int value, size_t* source_index = nullptr) const;
   void ShowGenerator();
@@ -1261,17 +1527,19 @@ private:
   void UpdateAnimationTimer();
   void HandleInspect(wxJSONValue& value);
   void HandleFrame(wxJSONValue& value);
+  void HandleFrame(DecodedEnvironmentFrame decoded);
+  void HandleFrames(std::vector<DecodedEnvironmentFrame> decoded);
   void HandleWeatherTable(wxJSONValue& value);
   void HandleGenerate(wxJSONValue& value);
   bool DecodeRoutingFrame(const wxString& source, const wxString& time,
-                          DecodedEnvironmentFrame* decoded,
+                          DecodedFramePtr* decoded,
                           wxString* error) const;
   void CacheRoutingFrame(const wxString& source, const wxString& time,
-                         const DecodedEnvironmentFrame& decoded) const;
+                         DecodedFramePtr decoded) const;
   wxString FrameCacheKey(const wxString& source,
                          const wxString& time) const;
   bool FindCachedFrame(const wxString& source, const wxString& time,
-                       DecodedEnvironmentFrame* decoded) const;
+                       DecodedFramePtr* decoded) const;
   void TrimFrameCache() const;
   bool IsMarinePoint(double latitude, double longitude) const;
   void SetBusy(bool busy, const wxString& status);
@@ -1285,6 +1553,8 @@ private:
   bool credential_access = false;
   ocpn_portable_runtime* runtime = nullptr;
   std::shared_ptr<std::mutex> runtime_mutex;
+  std::function<std::vector<PortableEnvironmentPosition>()> list_waypoints;
+  std::function<bool(PortableEnvironmentPosition*)> vessel_position;
   wxJSONValue surface_definition;
   wxString surface_title;
   wxString decoder_executable;
@@ -1317,6 +1587,14 @@ private:
   wxButton* open_button = nullptr;
   wxButton* generate_button = nullptr;
   wxButton* play_button = nullptr;
+  wxDialog* weather_table_dialog = nullptr;
+  wxChoice* weather_table_source = nullptr;
+  wxChoice* weather_table_waypoint = nullptr;
+  wxTextCtrl* weather_table_latitude = nullptr;
+  wxTextCtrl* weather_table_longitude = nullptr;
+  wxStaticText* weather_table_position = nullptr;
+  wxListCtrl* weather_table = nullptr;
+  wxButton* weather_table_update = nullptr;
   wxTimer progress_timer;
   wxTimer playback_timer;
   wxTimer animation_timer;
@@ -1331,23 +1609,27 @@ private:
   wxString selected_display_name;
   wxString pending_file;
   wxString pending_display_name;
+  wxString pending_index_file;
+  wxString selected_index_file;
   wxString pending_frame_time;
+  size_t pending_frame_source = 0;
   wxString pending_prefetch_time;
   wxString queued_frame_time;
   int queued_frame_slider = 0;
   size_t queued_frame_source = 0;
   wxString displayed_time;
+  wxString weather_table_position_name;
+  uint64_t weather_table_dataset_revision = 0;
   uint64_t dataset_revision = 0;
   wxString generated_output_path;
   bool generated_open_after = true;
   wxString last_grib_directory;
   std::vector<wxString> times;
-  std::map<wxString, std::vector<Sample>> fields;
-  std::map<wxString, wxString> field_units;
-  std::map<wxString, wxString> field_source_times;
+  std::vector<PortableEnvironmentPosition> weather_table_waypoints;
+  DecodedFramePtr displayed_frame;
   mutable std::mutex field_mutex;
   mutable std::mutex routing_decode_mutex;
-  mutable std::map<wxString, DecodedEnvironmentFrame> routing_frames;
+  mutable std::map<wxString, DecodedFramePtr> routing_frames;
   mutable std::list<wxString> routing_frame_lru;
   mutable std::map<wxString, size_t> routing_frame_bytes;
   mutable size_t routing_frame_cache_bytes = 0;
@@ -1377,7 +1659,8 @@ private:
   int overlay_opacity = 145;
   int playback_interval_ms = 1200;
   size_t frame_cache_budget_bytes = 256U * 1024U * 1024U;
-  bool stopped = false;
+  std::atomic<bool> stop_requested{false};
+  std::atomic<bool> stopped{false};
 };
 
 wxString PortableEnvironmentHost::Impl::DecoderHelper() const {
@@ -1733,13 +2016,13 @@ void PortableEnvironmentHost::Impl::CreateFrame() {
                              [this](wxCommandEvent&) { ShowWeatherTable(); });
   previous->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
     const int selected = timeline->GetSelection();
-    if (selected > 0) StartFrame(static_cast<size_t>(selected - 1));
+    if (selected > 0) StartSliderFrame(selected - 1);
   });
   next->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
     const int selected = timeline->GetSelection();
     if (selected != wxNOT_FOUND &&
         static_cast<unsigned>(selected + 1) < timeline->GetCount())
-      StartFrame(static_cast<size_t>(selected + 1));
+      StartSliderFrame(selected + 1);
   });
   now->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
     if (times.empty()) return;
@@ -1765,7 +2048,7 @@ void PortableEnvironmentHost::Impl::CreateFrame() {
   });
   timeline->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
     const int selected = timeline->GetSelection();
-    if (selected != wxNOT_FOUND) StartFrame(static_cast<size_t>(selected));
+    if (selected != wxNOT_FOUND) StartSliderFrame(selected);
   });
   for (auto& group : field_groups)
     group.visible->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
@@ -1779,16 +2062,12 @@ void PortableEnvironmentHost::Impl::CreateFrame() {
     });
   time_slider->Bind(wxEVT_SLIDER, [this](wxCommandEvent&) {
     const int value = time_slider->GetValue();
-    if (value >= 0) {
-      size_t source_index = 0;
-      const wxString time = TimeForSlider(value, &source_index);
-      if (!time.empty()) StartFrameTime(time, value, source_index);
-    }
+    if (value >= 0) StartSliderFrame(value);
   });
   level_choice->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
-    const int selected = timeline->GetSelection();
+    const int selected = time_slider ? time_slider->GetValue() : wxNOT_FOUND;
     if (selected != wxNOT_FOUND && !process)
-      StartFrame(static_cast<size_t>(selected));
+      StartSliderFrame(selected);
     else if (top_frame::Get())
       top_frame::Get()->RefreshAllCanvas(false);
   });
@@ -2529,6 +2808,7 @@ void PortableEnvironmentHost::Impl::ShowSettings() {
                         (interpolate_timeline ? interpolation_slices : 1);
     time_slider->SetRange(0, maximum);
     time_slider->SetValue(std::clamp(time_slider->GetValue(), 0, maximum));
+    RebuildTimelineChoices();
   }
   if (playback_timer.IsRunning()) playback_timer.Start(playback_interval_ms);
   UpdateAnimationTimer();
@@ -2611,10 +2891,9 @@ bool PortableEnvironmentHost::Impl::StageDataset(const wxArrayString& paths,
   }
   const auto ticks =
       std::chrono::steady_clock::now().time_since_epoch().count();
-  const wxString target =
+  const wxString temporary =
       private_directory + wxFILE_SEP_PATH +
-      wxString::Format("dataset-%lld.grb", static_cast<long long>(ticks));
-  const wxString temporary = target + ".tmp";
+      wxString::Format("dataset-%lld.tmp", static_cast<long long>(ticks));
   wxFFileOutputStream output(temporary);
   bool valid = output.IsOk();
   for (size_t index = 0; valid && index < paths.size(); ++index) {
@@ -2626,34 +2905,319 @@ bool PortableEnvironmentHost::Impl::StageDataset(const wxArrayString& paths,
     }
   }
   output.Close();
-  valid = valid && wxRenameFile(temporary, target, false);
   if (!valid) {
     if (wxFileExists(temporary)) wxRemoveFile(temporary);
-    if (wxFileExists(target)) wxRemoveFile(target);
     if (error)
       *error = "Could not construct the immutable environmental dataset '" +
                display_name + "'.";
     return false;
   }
+  uint64_t byte_size = 0;
+  wxString sha256;
+  if (!SnapshotIdentity(temporary, &byte_size, &sha256, error)) {
+    wxRemoveFile(temporary);
+    return false;
+  }
+  const wxString target = private_directory + wxFILE_SEP_PATH + "dataset-" +
+                          sha256 + ".grb";
+  if (wxFileExists(target)) {
+    uint64_t existing_size = 0;
+    wxString existing_sha256;
+    wxString identity_error;
+    if (!SnapshotIdentity(target, &existing_size, &existing_sha256,
+                          &identity_error) ||
+        existing_size != byte_size || existing_sha256 != sha256) {
+      wxRemoveFile(temporary);
+      if (error)
+        *error = "An incompatible environmental snapshot already uses the "
+                 "requested content identity.";
+      return false;
+    }
+    wxRemoveFile(temporary);
+  } else if (!wxRenameFile(temporary, target, false)) {
+    // Another viewer may have published the identical immutable snapshot
+    // between the existence check and rename. Accept only an exact match.
+    uint64_t existing_size = 0;
+    wxString existing_sha256;
+    wxString identity_error;
+    if (!wxFileExists(target) ||
+        !SnapshotIdentity(target, &existing_size, &existing_sha256,
+                          &identity_error) ||
+        existing_size != byte_size || existing_sha256 != sha256) {
+      wxRemoveFile(temporary);
+      if (error)
+        *error = "Could not publish the immutable environmental dataset '" +
+                 display_name + "'.";
+      return false;
+    }
+    wxRemoveFile(temporary);
+  }
   // The viewer and consumers read a private snapshot, never the mutable file
   // selected by the user. This also makes deterministic last-file-wins merge
-  // ordering stable for the complete lifetime of a held dataset handle.
+  // ordering stable for the complete lifetime of a held dataset handle. The
+  // content address reuses an identical snapshot instead of copying it on
+  // every reopen.
   wxChmod(target, 0400);
   *staged_path = target;
   return true;
 }
 
 void PortableEnvironmentHost::Impl::ShowWeatherTable() {
-  if (process || selected_file.empty()) return;
-  if (!have_cursor) {
-    wxMessageBox("Move the chart cursor to the position for the weather table.",
-                 surface_title, wxOK | wxICON_INFORMATION, frame);
+  if (selected_file.empty()) return;
+  if (!weather_table_dialog) CreateWeatherTableDialog();
+  RefreshWeatherTablePositions(false);
+  weather_table_dialog->Show();
+  weather_table_dialog->Raise();
+  if (!process &&
+      (weather_table->GetItemCount() == 0 ||
+       weather_table_dataset_revision != dataset_revision))
+    StartWeatherTable();
+}
+
+void PortableEnvironmentHost::Impl::CreateWeatherTableDialog() {
+  weather_table_dialog =
+      new wxDialog(frame, wxID_ANY, surface_title + " — weather table",
+                   wxDefaultPosition, wxSize(1180, 650),
+                   wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+  auto* root = new wxBoxSizer(wxVERTICAL);
+  auto* selector = new wxStaticBoxSizer(
+      wxVERTICAL, weather_table_dialog, "Weather table position");
+  auto* source_row = new wxBoxSizer(wxHORIZONTAL);
+  const wxArrayString sources = {
+      "Latest chart cursor position", "Current boat position",
+      "OpenCPN waypoint", "Manual coordinates"};
+  weather_table_source =
+      new wxChoice(weather_table_dialog, wxID_ANY, wxDefaultPosition,
+                   wxDefaultSize, sources);
+  weather_table_waypoint = new wxChoice(weather_table_dialog, wxID_ANY);
+  auto* refresh =
+      new wxButton(weather_table_dialog, wxID_REFRESH, "Refresh positions");
+  source_row->Add(new wxStaticText(weather_table_dialog, wxID_ANY, "Position"),
+                  0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+  source_row->Add(weather_table_source, 0, wxRIGHT, 8);
+  source_row->Add(weather_table_waypoint, 1, wxRIGHT, 8);
+  source_row->Add(refresh, 0);
+  selector->Add(source_row, 0, wxEXPAND | wxALL, 6);
+
+  auto* coordinates = new wxBoxSizer(wxHORIZONTAL);
+  weather_table_latitude = new wxTextCtrl(weather_table_dialog, wxID_ANY);
+  weather_table_longitude = new wxTextCtrl(weather_table_dialog, wxID_ANY);
+  weather_table_update =
+      new wxButton(weather_table_dialog, wxID_ANY, "Update table");
+  coordinates->Add(
+      new wxStaticText(weather_table_dialog, wxID_ANY, "Latitude"), 0,
+      wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+  coordinates->Add(weather_table_latitude, 1, wxRIGHT, 10);
+  coordinates->Add(
+      new wxStaticText(weather_table_dialog, wxID_ANY, "Longitude"), 0,
+      wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+  coordinates->Add(weather_table_longitude, 1, wxRIGHT, 10);
+  coordinates->Add(weather_table_update, 0);
+  selector->Add(coordinates, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
+  root->Add(selector, 0, wxEXPAND | wxALL, 8);
+
+  weather_table_position = new wxStaticText(
+      weather_table_dialog, wxID_ANY,
+      "Select a position within the loaded GRIB coverage");
+  root->Add(weather_table_position, 0,
+            wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
+  weather_table =
+      new wxListCtrl(weather_table_dialog, wxID_ANY, wxDefaultPosition,
+                     wxDefaultSize,
+                     wxLC_REPORT | wxLC_HRULES | wxLC_VRULES);
+  weather_table->InsertColumn(0, "Forecast time", wxLIST_FORMAT_LEFT, 190);
+  for (size_t column = 0; column < field_groups.size(); ++column)
+    weather_table->InsertColumn(static_cast<int>(column + 1),
+                                field_groups[column].label,
+                                wxLIST_FORMAT_RIGHT, 120);
+  root->Add(weather_table, 1, wxEXPAND | wxLEFT | wxRIGHT, 8);
+  auto* close = new wxButton(weather_table_dialog, wxID_CLOSE, "Close");
+  auto* buttons = new wxBoxSizer(wxHORIZONTAL);
+  buttons->AddStretchSpacer();
+  buttons->Add(close);
+  root->Add(buttons, 0, wxEXPAND | wxALL, 8);
+  weather_table_dialog->SetSizer(root);
+  weather_table_dialog->SetMinSize(wxSize(760, 480));
+
+  weather_table_source->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
+    ApplyWeatherTablePosition();
+  });
+  weather_table_waypoint->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
+    ApplyWeatherTablePosition();
+  });
+  refresh->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+    RefreshWeatherTablePositions(false);
+  });
+  weather_table_update->Bind(wxEVT_BUTTON,
+                             [this](wxCommandEvent&) { StartWeatherTable(); });
+  close->Bind(wxEVT_BUTTON,
+              [this](wxCommandEvent&) { weather_table_dialog->Hide(); });
+  weather_table_dialog->Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent& event) {
+    weather_table_dialog->Hide();
+    event.Veto();
+  });
+  RefreshWeatherTablePositions(true);
+}
+
+void PortableEnvironmentHost::Impl::RefreshWeatherTablePositions(bool initial) {
+  if (!weather_table_dialog) return;
+  wxString selected_id;
+  const int old_selection = weather_table_waypoint->GetSelection();
+  if (old_selection != wxNOT_FOUND &&
+      static_cast<size_t>(old_selection) < weather_table_waypoints.size())
+    selected_id = weather_table_waypoints[static_cast<size_t>(old_selection)].id;
+  weather_table_waypoints =
+      list_waypoints ? list_waypoints()
+                     : std::vector<PortableEnvironmentPosition>();
+  weather_table_waypoint->Clear();
+  int restored = wxNOT_FOUND;
+  for (size_t index = 0; index < weather_table_waypoints.size(); ++index) {
+    const auto& point = weather_table_waypoints[index];
+    weather_table_waypoint->Append(wxString::Format(
+        "%s  —  %.5f, %.5f", point.name, point.latitude, point.longitude));
+    if (point.id == selected_id) restored = static_cast<int>(index);
+  }
+  if (!weather_table_waypoints.empty())
+    weather_table_waypoint->SetSelection(restored == wxNOT_FOUND ? 0
+                                                                 : restored);
+  if (initial || weather_table_source->GetSelection() == wxNOT_FOUND) {
+    PortableEnvironmentPosition vessel;
+    if (have_cursor)
+      weather_table_source->SetSelection(kWeatherTableChartCursor);
+    else if (vessel_position && vessel_position(&vessel))
+      weather_table_source->SetSelection(kWeatherTableVessel);
+    else if (!weather_table_waypoints.empty())
+      weather_table_source->SetSelection(kWeatherTableWaypoint);
+    else
+      weather_table_source->SetSelection(kWeatherTableManual);
+  }
+  ApplyWeatherTablePosition(false);
+}
+
+bool PortableEnvironmentHost::Impl::ApplyWeatherTablePosition(
+    bool report_error) {
+  if (!weather_table_source || !weather_table_waypoint ||
+      !weather_table_latitude || !weather_table_longitude)
+    return false;
+  const int source = weather_table_source->GetSelection();
+  weather_table_waypoint->Enable(source == kWeatherTableWaypoint &&
+                                 !weather_table_waypoints.empty());
+  const bool manual = source == kWeatherTableManual;
+  weather_table_latitude->SetEditable(manual);
+  weather_table_longitude->SetEditable(manual);
+  if (manual) {
+    weather_table_position_name = "Manual coordinates";
+    return true;
+  }
+  PortableEnvironmentPosition selected;
+  bool available = false;
+  if (source == kWeatherTableChartCursor && have_cursor) {
+    selected = {"opencpn:chart-cursor", "Latest chart cursor position",
+                cursor_latitude, cursor_longitude};
+    available = true;
+  } else if (source == kWeatherTableVessel && vessel_position) {
+    available = vessel_position(&selected);
+  } else if (source == kWeatherTableWaypoint) {
+    const int index = weather_table_waypoint->GetSelection();
+    if (index != wxNOT_FOUND &&
+        static_cast<size_t>(index) < weather_table_waypoints.size()) {
+      selected = weather_table_waypoints[static_cast<size_t>(index)];
+      available = true;
+    }
+  }
+  if (!available) {
+    if (report_error && weather_table_position)
+      weather_table_position->SetLabel(
+          "The selected position is currently unavailable");
+    return false;
+  }
+  weather_table_position_name = selected.name;
+  weather_table_latitude->SetValue(
+      wxString::Format("%.6f", selected.latitude));
+  weather_table_longitude->SetValue(
+      wxString::Format("%.6f", selected.longitude));
+  if (weather_table_position)
+    weather_table_position->SetLabel(wxString::Format(
+        "Selected: %s (%.5f°, %.5f°)", selected.name, selected.latitude,
+        selected.longitude));
+  return true;
+}
+
+bool PortableEnvironmentHost::Impl::WeatherTablePositionCovered(
+    double latitude, double longitude) const {
+  DecodedFramePtr frame_snapshot;
+  {
+    std::lock_guard<std::mutex> lock(field_mutex);
+    frame_snapshot = displayed_frame;
+  }
+  if (!frame_snapshot) return false;
+  const auto& fields = frame_snapshot->fields;
+  double minimum_latitude = 90.0;
+  double maximum_latitude = -90.0;
+  std::vector<double> longitudes;
+  for (const auto& [id, samples] : fields) {
+    for (const auto& sample : samples) {
+      if (!std::isfinite(sample.latitude) ||
+          !std::isfinite(sample.longitude))
+        continue;
+      minimum_latitude = std::min(minimum_latitude, sample.latitude);
+      maximum_latitude = std::max(maximum_latitude, sample.latitude);
+      double normalized = std::fmod(sample.longitude, 360.0);
+      if (normalized < 0.0) normalized += 360.0;
+      longitudes.push_back(normalized);
+    }
+  }
+  constexpr double kCoverageTolerance = 0.5;
+  if (longitudes.empty() ||
+      latitude < minimum_latitude - kCoverageTolerance ||
+      latitude > maximum_latitude + kCoverageTolerance)
+    return false;
+  std::sort(longitudes.begin(), longitudes.end());
+  double maximum_gap = longitudes.front() + 360.0 - longitudes.back();
+  size_t gap_end = 0;
+  for (size_t index = 1; index < longitudes.size(); ++index) {
+    const double gap = longitudes[index] - longitudes[index - 1];
+    if (gap > maximum_gap) {
+      maximum_gap = gap;
+      gap_end = index;
+    }
+  }
+  const double coverage_start = longitudes[gap_end % longitudes.size()];
+  const double coverage_span = 360.0 - maximum_gap;
+  double target = std::fmod(longitude, 360.0);
+  if (target < 0.0) target += 360.0;
+  double relative = std::fmod(target - coverage_start + 360.0, 360.0);
+  return relative <= coverage_span + kCoverageTolerance ||
+         relative >= 360.0 - kCoverageTolerance;
+}
+
+void PortableEnvironmentHost::Impl::StartWeatherTable() {
+  if (process || selected_file.empty() ||
+      !ApplyWeatherTablePosition(true))
+    return;
+  double latitude = 0.0;
+  double longitude = 0.0;
+  if (!weather_table_latitude->GetValue().ToDouble(&latitude) ||
+      !weather_table_longitude->GetValue().ToDouble(&longitude) ||
+      !std::isfinite(latitude) || !std::isfinite(longitude) ||
+      latitude < -90.0 || latitude > 90.0 || longitude < -180.0 ||
+      longitude > 180.0) {
+    weather_table_position->SetLabel(
+        "Enter valid latitude and longitude coordinates");
     return;
   }
+  if (!WeatherTablePositionCovered(latitude, longitude)) {
+    weather_table_position->SetLabel(
+        "The selected position is outside the loaded GRIB coverage");
+    return;
+  }
+  weather_table_position->SetLabel(wxString::Format(
+      "Loading %s at %.5f°, %.5f°…", weather_table_position_name, latitude,
+      longitude));
   const wxString result = MakeResultPath(private_directory, "weather-table");
   const std::vector<wxString> options = {
-      wxString::Format("%.8f", cursor_latitude),
-      wxString::Format("%.8f", cursor_longitude)};
+      wxString::Format("%.8f", latitude),
+      wxString::Format("%.8f", longitude)};
   Launch(DecoderCommand("table", selected_file, wxEmptyString, result, options),
          Operation::WeatherTable, result,
          "Building weather table in supervised decoder…");
@@ -2662,13 +3226,36 @@ void PortableEnvironmentHost::Impl::ShowWeatherTable() {
 std::vector<wxString> PortableEnvironmentHost::Impl::DecoderCommand(
     const wxString& verb, const wxString& input, const wxString& time,
     const wxString& result, const std::vector<wxString>& options) const {
+  const bool inspect = verb == "inspect";
+  const bool batch_frames =
+      verb == "frames" && !selected_index_file.empty() &&
+      wxFileExists(selected_index_file) && !options.empty();
+  const bool indexed_frame =
+      verb == "frame" && !selected_index_file.empty() &&
+      wxFileExists(selected_index_file);
+  const wxString helper_verb = inspect        ? "inspect-indexed"
+                               : batch_frames  ? "frames-indexed-bin"
+                               : indexed_frame ? "frame-indexed-bin"
+                                                : verb;
 #if defined(__linux__)
   if (HelperSupervisionAvailable()) {
     std::vector<wxString> command = {"/usr/bin/prlimit", "--as=536870912",
                                      "--cpu=30", "--"};
     if (IsFlatpakRuntime()) {
-      command.insert(command.end(), {DecoderHelper(), verb, input});
-      if (verb == "frame") {
+      command.insert(command.end(), {DecoderHelper(), helper_verb, input});
+      if (inspect) {
+        command.push_back(pending_index_file);
+      } else if (batch_frames) {
+        command.push_back(selected_index_file);
+        command.push_back(high_definition ? "30000" : "12000");
+        command.push_back(result);
+        command.insert(command.end(), options.begin(), options.end());
+        return command;
+      } else if (indexed_frame) {
+        command.push_back(selected_index_file);
+        command.push_back(time);
+        command.push_back(high_definition ? "30000" : "12000");
+      } else if (verb == "frame") {
         command.push_back(time);
         command.push_back(high_definition ? "30000" : "12000");
       } else {
@@ -2704,10 +3291,24 @@ std::vector<wxString> PortableEnvironmentHost::Impl::DecoderCommand(
         private_directory,
         "/output",
         "/helper/" + wxFileName(DecoderHelper()).GetFullName(),
-        verb,
+        helper_verb,
         "/input.grb"};
     command.insert(command.end(), sandbox.begin(), sandbox.end());
-    if (verb == "frame") {
+    if (inspect) {
+      command.push_back("/output/" + wxFileName(pending_index_file).GetFullName());
+    } else if (batch_frames) {
+      command.push_back("/output/" +
+                        wxFileName(selected_index_file).GetFullName());
+      command.push_back(high_definition ? "30000" : "12000");
+      command.push_back("/output/" + wxFileName(result).GetFullName());
+      command.insert(command.end(), options.begin(), options.end());
+      return command;
+    } else if (indexed_frame) {
+      command.push_back("/output/" +
+                        wxFileName(selected_index_file).GetFullName());
+      command.push_back(time);
+      command.push_back(high_definition ? "30000" : "12000");
+    } else if (verb == "frame") {
       command.push_back(time);
       command.push_back(high_definition ? "30000" : "12000");
     } else {
@@ -2724,9 +3325,21 @@ std::vector<wxString> PortableEnvironmentHost::Impl::DecoderCommand(
         MacSandboxProfile(DecoderHelper(), {input}, private_directory,
                           private_directory, false),
         DecoderHelper(),
-        verb,
+        helper_verb,
         input};
-    if (verb == "frame") {
+    if (inspect) {
+      command.push_back(pending_index_file);
+    } else if (batch_frames) {
+      command.push_back(selected_index_file);
+      command.push_back(high_definition ? "30000" : "12000");
+      command.push_back(result);
+      command.insert(command.end(), options.begin(), options.end());
+      return command;
+    } else if (indexed_frame) {
+      command.push_back(selected_index_file);
+      command.push_back(time);
+      command.push_back(high_definition ? "30000" : "12000");
+    } else if (verb == "frame") {
       command.push_back(time);
       command.push_back(high_definition ? "30000" : "12000");
     } else {
@@ -2737,8 +3350,20 @@ std::vector<wxString> PortableEnvironmentHost::Impl::DecoderCommand(
   }
 #elif defined(_WIN32)
   if (HelperSupervisionAvailable()) {
-    std::vector<wxString> command = {DecoderHelper(), verb, input};
-    if (verb == "frame") {
+    std::vector<wxString> command = {DecoderHelper(), helper_verb, input};
+    if (inspect) {
+      command.push_back(pending_index_file);
+    } else if (batch_frames) {
+      command.push_back(selected_index_file);
+      command.push_back(high_definition ? "30000" : "12000");
+      command.push_back(result);
+      command.insert(command.end(), options.begin(), options.end());
+      return command;
+    } else if (indexed_frame) {
+      command.push_back(selected_index_file);
+      command.push_back(time);
+      command.push_back(high_definition ? "30000" : "12000");
+    } else if (verb == "frame") {
       command.push_back(time);
       command.push_back(high_definition ? "30000" : "12000");
     } else {
@@ -2933,7 +3558,12 @@ bool PortableEnvironmentHost::Impl::Launch(
 #endif
   operation = next_operation;
   result_path = result;
-  if (next_operation != Operation::PrefetchFrame) SetBusy(true, status);
+  if (next_operation != Operation::PrefetchFrame &&
+      next_operation != Operation::DecodeFrame)
+    SetBusy(true, status);
+  else if (next_operation == Operation::DecodeFrame && data_status &&
+           !status.empty())
+    data_status->SetLabel(status);
   return true;
 }
 
@@ -2947,6 +3577,7 @@ void PortableEnvironmentHost::Impl::StartInspect(const wxString& path,
   pending_file = path;
   pending_display_name =
       display_name.empty() ? wxFileName(path).GetFullName() : display_name;
+  pending_index_file = MakeResultPath(private_directory, "dataset-index");
   const wxString result = MakeResultPath(private_directory, "inspect");
   Launch(DecoderCommand("inspect", path, wxEmptyString, result),
          Operation::Inspect, result, "Inspecting GRIB metadata…");
@@ -2956,6 +3587,12 @@ void PortableEnvironmentHost::Impl::StartFrame(size_t index) {
   if (index >= times.size()) return;
   const int slices = interpolate_timeline ? interpolation_slices : 1;
   StartFrameTime(times[index], static_cast<int>(index) * slices, index);
+}
+
+void PortableEnvironmentHost::Impl::StartSliderFrame(int slider_value) {
+  size_t source_index = 0;
+  const wxString time = TimeForSlider(slider_value, &source_index);
+  if (!time.empty()) StartFrameTime(time, slider_value, source_index);
 }
 
 wxString PortableEnvironmentHost::Impl::TimeForSlider(
@@ -2980,55 +3617,100 @@ wxString PortableEnvironmentHost::Impl::TimeForSlider(
   return result.ToUTC().Format("%Y%m%dT%H%MZ");
 }
 
+bool PortableEnvironmentHost::Impl::ComposeCachedDisplayFrame(
+    const wxString& time, size_t source_index, DecodedFramePtr* decoded) const {
+  if (!decoded || source_index >= times.size()) return false;
+  std::lock_guard<std::mutex> decode_lock(routing_decode_mutex);
+  DecodedFramePtr direct;
+  if (FindCachedFrame(selected_file, time, &direct)) {
+    *decoded = std::move(direct);
+    return true;
+  }
+  DecodedFramePtr first;
+  if (!FindCachedFrame(selected_file, times[source_index], &first)) return false;
+  if (time == times[source_index] || source_index + 1 >= times.size()) {
+    *decoded = std::move(first);
+    return true;
+  }
+  DecodedFramePtr second;
+  if (!FindCachedFrame(selected_file, times[source_index + 1], &second))
+    return false;
+  wxDateTime requested;
+  wxDateTime lower;
+  wxDateTime upper;
+  if (!ParseGribTime(time, &requested) ||
+      !ParseGribTime(times[source_index], &lower) ||
+      !ParseGribTime(times[source_index + 1], &upper) || upper == lower)
+    return false;
+  const double factor =
+      static_cast<double>(requested.GetTicks() - lower.GetTicks()) /
+      static_cast<double>(upper.GetTicks() - lower.GetTicks());
+  *decoded = InterpolateDecodedFrames(first, second, time,
+                                      std::clamp(factor, 0.0, 1.0));
+  return static_cast<bool>(*decoded);
+}
+
 void PortableEnvironmentHost::Impl::StartFrameTime(const wxString& time,
                                                    int slider_value,
                                                    size_t source_index) {
   if (time.empty() || source_index >= times.size()) return;
-  timeline->SetSelection(static_cast<int>(source_index));
+  timeline->SetSelection(slider_value);
   if (time_slider) time_slider->SetValue(slider_value);
   if (process) {
-    if (operation == Operation::PrefetchFrame) {
+    if (operation == Operation::PrefetchFrame ||
+        operation == Operation::DecodeFrame) {
       queued_frame_time = time;
       queued_frame_slider = slider_value;
       queued_frame_source = source_index;
     }
     return;
   }
-  DecodedEnvironmentFrame cached;
-  bool cache_hit = false;
-  {
-    std::lock_guard<std::mutex> decode_lock(routing_decode_mutex);
-    cache_hit = FindCachedFrame(selected_file, time, &cached);
-  }
-  if (cache_hit) {
-    ApplyDisplayedFrame(time, cached, 0, true);
+  DecodedFramePtr cached;
+  if (ComposeCachedDisplayFrame(time, source_index, &cached)) {
+    ApplyDisplayedFrame(time, std::move(cached), 0, true);
     CallAfter([this, slider_value] {
       if (!stopped) PrefetchNextFrame(slider_value);
     });
     return;
   }
+  std::vector<wxString> missing;
+  {
+    std::lock_guard<std::mutex> decode_lock(routing_decode_mutex);
+    DecodedFramePtr ignored;
+    if (!FindCachedFrame(selected_file, times[source_index], &ignored))
+      missing.push_back(times[source_index]);
+    if (time != times[source_index] && source_index + 1 < times.size() &&
+        !FindCachedFrame(selected_file, times[source_index + 1], &ignored))
+      missing.push_back(times[source_index + 1]);
+  }
+  if (missing.empty()) return;
   pending_frame_time = time;
+  pending_frame_source = source_index;
   const wxString result = MakeResultPath(private_directory, "frame");
-  Launch(DecoderCommand("frame", selected_file, time, result),
+  Launch(DecoderCommand("frames", selected_file, wxEmptyString, result, missing),
          Operation::DecodeFrame, result, "Decoding environmental frame…");
 }
 
 void PortableEnvironmentHost::Impl::PrefetchNextFrame(int slider_value) {
   if (process || selected_file.empty() || times.empty() || !time_slider) return;
-  const int maximum = time_slider->GetMax();
-  if (slider_value >= maximum) return;
-  const int next_slider = slider_value + 1;
-  size_t source_index = 0;
-  const wxString time = TimeForSlider(next_slider, &source_index);
-  if (time.empty()) return;
-  DecodedEnvironmentFrame cached;
+  const int slices = interpolate_timeline ? interpolation_slices : 1;
+  const size_t source_index =
+      std::min<size_t>(static_cast<size_t>(std::max(0, slider_value) / slices),
+                       times.size() - 1);
+  std::vector<wxString> missing;
   {
     std::lock_guard<std::mutex> decode_lock(routing_decode_mutex);
-    if (FindCachedFrame(selected_file, time, &cached)) return;
+    for (size_t index = source_index + 1;
+         index < times.size() && index <= source_index + 4; ++index) {
+      DecodedFramePtr cached;
+      if (!FindCachedFrame(selected_file, times[index], &cached))
+        missing.push_back(times[index]);
+    }
   }
-  pending_prefetch_time = time;
+  if (missing.empty()) return;
+  pending_prefetch_time = missing.front();
   const wxString result = MakeResultPath(private_directory, "prefetch-frame");
-  Launch(DecoderCommand("frame", selected_file, time, result),
+  Launch(DecoderCommand("frames", selected_file, wxEmptyString, result, missing),
          Operation::PrefetchFrame, result, wxEmptyString);
 }
 
@@ -3037,6 +3719,10 @@ void PortableEnvironmentHost::Impl::SetBusy(bool busy, const wxString& status) {
   open_button->Enable(!busy);
   generate_button->Enable(!busy);
   timeline->Enable(!busy);
+  if (weather_table_button)
+    weather_table_button->Enable(!busy && !selected_file.empty());
+  if (weather_table_update)
+    weather_table_update->Enable(!busy && !selected_file.empty());
   if (time_slider) time_slider->Enable(!busy);
   if (level_choice) level_choice->Enable(!busy);
   cancel_button->Enable(busy);
@@ -3080,6 +3766,21 @@ void PortableEnvironmentHost::Impl::OnPlaybackTimer(wxTimerEvent&) {
   StartFrameTime(TimeForSlider(next, &source_index), next, source_index);
 }
 
+void PortableEnvironmentHost::Impl::RebuildTimelineChoices() {
+  if (!timeline) return;
+  const int selected = time_slider ? time_slider->GetValue() : 0;
+  const int slices = interpolate_timeline ? interpolation_slices : 1;
+  const int maximum = times.empty()
+                          ? 0
+                          : static_cast<int>(times.size() - 1) * slices;
+  timeline->Freeze();
+  timeline->Clear();
+  for (int value = 0; value <= maximum && !times.empty(); ++value)
+    timeline->Append(FormatGribTime(TimeForSlider(value)));
+  if (!times.empty()) timeline->SetSelection(std::clamp(selected, 0, maximum));
+  timeline->Thaw();
+}
+
 void PortableEnvironmentHost::Impl::UpdateAnimationTimer() {
   const bool animate = std::any_of(
       field_groups.begin(), field_groups.end(), [](const auto& group) {
@@ -3116,15 +3817,35 @@ void PortableEnvironmentHost::Impl::OnProcessEnded(wxProcessEvent& event) {
     windows_helper_job = nullptr;
   }
 #endif
-  SetBusy(false, wxEmptyString);
+  if (completed != Operation::PrefetchFrame &&
+      completed != Operation::DecodeFrame)
+    SetBusy(false, wxEmptyString);
   if (stopped) return;
 
   wxJSONValue value;
+  std::vector<DecodedEnvironmentFrame> binary_frames;
   wxString error;
-  if (!ReadJson(completed_result, &value, &error)) {
+  const bool binary_result = completed == Operation::DecodeFrame ||
+                             completed == Operation::PrefetchFrame;
+  bool read = binary_result
+                  ? ReadBinaryFrames(completed_result, &binary_frames, &error)
+                  : ReadJson(completed_result, &value, &error);
+  if (!read && binary_result) {
+    // A helper failure is deliberately published as the normal bounded JSON
+    // error envelope so diagnostics remain useful even when frame transport
+    // uses the binary fast path.
+    wxJSONValue failure;
+    wxString failure_error;
+    if (!ReadJson(completed_result, &failure, &failure_error) &&
+        !failure_error.empty())
+      error = failure_error;
+  }
+  if (!read) {
     if (completed == Operation::Inspect) {
       pending_file.clear();
       pending_display_name.clear();
+      if (wxFileExists(pending_index_file)) wxRemoveFile(pending_index_file);
+      pending_index_file.clear();
     }
     if (completed == Operation::PrefetchFrame) {
       pending_prefetch_time.clear();
@@ -3136,7 +3857,9 @@ void PortableEnvironmentHost::Impl::OnProcessEnded(wxProcessEvent& event) {
                  event.GetExitCode(), error);
     }
     wxRemoveFile(completed_result);
-    if (completed == Operation::PrefetchFrame && !queued_frame_time.empty()) {
+    if ((completed == Operation::PrefetchFrame ||
+         completed == Operation::DecodeFrame) &&
+        !queued_frame_time.empty()) {
       const wxString queued_time = queued_frame_time;
       const int queued_slider = queued_frame_slider;
       const size_t queued_source = queued_frame_source;
@@ -3153,6 +3876,8 @@ void PortableEnvironmentHost::Impl::OnProcessEnded(wxProcessEvent& event) {
     if (completed == Operation::Inspect) {
       pending_file.clear();
       pending_display_name.clear();
+      if (wxFileExists(pending_index_file)) wxRemoveFile(pending_index_file);
+      pending_index_file.clear();
     }
     if (completed == Operation::PrefetchFrame) {
       pending_prefetch_time.clear();
@@ -3162,7 +3887,9 @@ void PortableEnvironmentHost::Impl::OnProcessEnded(wxProcessEvent& event) {
       data_status->SetLabel(
           wxString::Format("Helper exited with status %d", event.GetExitCode()));
     }
-    if (completed == Operation::PrefetchFrame && !queued_frame_time.empty()) {
+    if ((completed == Operation::PrefetchFrame ||
+         completed == Operation::DecodeFrame) &&
+        !queued_frame_time.empty()) {
       const wxString queued_time = queued_frame_time;
       const int queued_slider = queued_frame_slider;
       const size_t queued_source = queued_frame_source;
@@ -3179,10 +3906,10 @@ void PortableEnvironmentHost::Impl::OnProcessEnded(wxProcessEvent& event) {
       HandleInspect(value);
       break;
     case Operation::DecodeFrame:
-      HandleFrame(value);
+      HandleFrames(std::move(binary_frames));
       break;
     case Operation::PrefetchFrame:
-      HandlePrefetchFrame(value);
+      HandlePrefetchFrames(std::move(binary_frames));
       break;
     case Operation::WeatherTable:
       HandleWeatherTable(value);
@@ -3193,7 +3920,9 @@ void PortableEnvironmentHost::Impl::OnProcessEnded(wxProcessEvent& event) {
     default:
       break;
   }
-  if (completed == Operation::PrefetchFrame && !queued_frame_time.empty()) {
+  if ((completed == Operation::PrefetchFrame ||
+       completed == Operation::DecodeFrame) &&
+      !queued_frame_time.empty()) {
     const wxString queued_time = queued_frame_time;
     const int queued_slider = queued_frame_slider;
     const size_t queued_source = queued_frame_source;
@@ -3205,10 +3934,13 @@ void PortableEnvironmentHost::Impl::OnProcessEnded(wxProcessEvent& event) {
 }
 
 void PortableEnvironmentHost::Impl::HandleInspect(wxJSONValue& value) {
-  if (!value["times"].IsArray() || !value["fields"].IsArray()) {
+  if (!value["times"].IsArray() || !value["fields"].IsArray() ||
+      pending_index_file.empty() || !wxFileExists(pending_index_file)) {
     data_status->SetLabel("Decoder returned an incompatible metadata schema");
     pending_file.clear();
     pending_display_name.clear();
+    if (wxFileExists(pending_index_file)) wxRemoveFile(pending_index_file);
+    pending_index_file.clear();
     return;
   }
   {
@@ -3218,24 +3950,29 @@ void PortableEnvironmentHost::Impl::HandleInspect(wxJSONValue& value) {
     routing_frame_lru.clear();
     routing_frame_bytes.clear();
     routing_frame_cache_bytes = 0;
-    fields.clear();
-    field_units.clear();
-    field_source_times.clear();
+    displayed_frame.reset();
     times.clear();
     displayed_time.clear();
     selected_file = pending_file;
     selected_display_name = pending_display_name;
+    if (!selected_index_file.empty() &&
+        selected_index_file != pending_index_file &&
+        wxFileExists(selected_index_file))
+      wxRemoveFile(selected_index_file);
+    selected_index_file = pending_index_file;
     ++dataset_revision;
   }
   pending_file.clear();
   pending_display_name.clear();
+  pending_index_file.clear();
   std::vector<wxString> decoded_times;
-  timeline->Clear();
   for (int i = 0; i < value["times"].Size(); ++i) {
     if (!value["times"][i].IsString()) continue;
     decoded_times.push_back(value["times"][i].AsString());
-    timeline->Append(FormatGribTime(decoded_times.back()));
   }
+  std::sort(decoded_times.begin(), decoded_times.end());
+  decoded_times.erase(std::unique(decoded_times.begin(), decoded_times.end()),
+                      decoded_times.end());
   if (time_slider) {
     const int slices = interpolate_timeline ? interpolation_slices : 1;
     time_slider->SetRange(0,
@@ -3247,6 +3984,7 @@ void PortableEnvironmentHost::Impl::HandleInspect(wxJSONValue& value) {
     std::lock_guard<std::mutex> field_lock(field_mutex);
     times = decoded_times;
   }
+  RebuildTimelineChoices();
   file_label->SetLabel("File: " + selected_display_name);
   const wxString opened_directory = wxFileName(selected_file).GetPath();
   if (wxDirExists(opened_directory) && opened_directory != private_directory &&
@@ -3276,10 +4014,38 @@ void PortableEnvironmentHost::Impl::HandleFrame(wxJSONValue& value) {
     data_status->SetLabel(error);
     return;
   }
-  const wxString requested_time = value["time"].AsString();
-  ApplyDisplayedFrame(requested_time.empty() ? pending_frame_time
-                                             : requested_time,
-                      decoded, value["sampleCount"].AsInt(), false);
+  HandleFrame(std::move(decoded));
+}
+
+void PortableEnvironmentHost::Impl::HandleFrame(
+    DecodedEnvironmentFrame decoded) {
+  std::vector<DecodedEnvironmentFrame> frames;
+  frames.push_back(std::move(decoded));
+  HandleFrames(std::move(frames));
+}
+
+void PortableEnvironmentHost::Impl::HandleFrames(
+    std::vector<DecodedEnvironmentFrame> decoded) {
+  {
+    std::lock_guard<std::mutex> decode_lock(routing_decode_mutex);
+    for (auto& frame : decoded) {
+      if (frame.time.empty()) continue;
+      const wxString frame_time = frame.time;
+      CacheRoutingFrame(
+          selected_file, frame_time,
+          std::make_shared<const DecodedEnvironmentFrame>(std::move(frame)));
+    }
+  }
+  const wxString requested_time = pending_frame_time;
+  DecodedFramePtr displayed;
+  if (!ComposeCachedDisplayFrame(requested_time, pending_frame_source,
+                                 &displayed)) {
+    data_status->SetLabel("Decoded source frames could not be composed");
+    return;
+  }
+  const size_t sample_count = displayed->sample_count;
+  ApplyDisplayedFrame(requested_time, std::move(displayed), sample_count,
+                      false);
   const int slider_value = time_slider ? time_slider->GetValue() : 0;
   CallAfter([this, slider_value] {
     if (!stopped) PrefetchNextFrame(slider_value);
@@ -3287,21 +4053,27 @@ void PortableEnvironmentHost::Impl::HandleFrame(wxJSONValue& value) {
 }
 
 void PortableEnvironmentHost::Impl::ApplyDisplayedFrame(
-    const wxString& requested_time, const DecodedEnvironmentFrame& decoded,
+    const wxString& requested_time, DecodedFramePtr decoded,
     size_t sample_count, bool cached) {
-  std::lock_guard<std::mutex> decode_lock(routing_decode_mutex);
-  std::lock_guard<std::mutex> lock(field_mutex);
-  fields = decoded.fields;
-  field_units = decoded.units;
-  field_source_times = decoded.source_times;
-  displayed_time = requested_time;
-  pending_frame_time.clear();
-  CacheRoutingFrame(selected_file, requested_time, decoded);
+  if (!decoded) return;
   wxString source_note;
-  const auto wave_source = field_source_times.find("wave-height");
-  if (wave_source != field_source_times.end() &&
-      wave_source->second != requested_time)
-    source_note = " · waves sampled at " + FormatGribTime(wave_source->second);
+  {
+    std::lock_guard<std::mutex> decode_lock(routing_decode_mutex);
+    std::lock_guard<std::mutex> lock(field_mutex);
+    displayed_frame = decoded;
+    displayed_time = requested_time;
+    pending_frame_time.clear();
+    // Interpolated display frames are inexpensive composites of cached source
+    // frames. Retaining each synthetic slider slice would multiply the LRU by
+    // the configured interpolation count without avoiding any decoder work.
+    if (std::binary_search(times.begin(), times.end(), requested_time))
+      CacheRoutingFrame(selected_file, requested_time, decoded);
+    const auto wave_source = decoded->source_times.find("wave-height");
+    if (wave_source != decoded->source_times.end() &&
+        wave_source->second != requested_time)
+      source_note =
+          " · waves sampled at " + FormatGribTime(wave_source->second);
+  }
   data_status->SetLabel(
       wxString::Format(
           "%s — %zu samples retained by OpenCPN%s",
@@ -3309,7 +4081,7 @@ void PortableEnvironmentHost::Impl::ApplyDisplayedFrame(
           sample_count ? sample_count :
                          [&decoded] {
                            size_t total = 0;
-                           for (const auto& [name, samples] : decoded.fields)
+                           for (const auto& [name, samples] : decoded->fields)
                              total += samples.size();
                            return total;
                          }(),
@@ -3327,46 +4099,52 @@ void PortableEnvironmentHost::Impl::HandlePrefetchFrame(wxJSONValue& value) {
     pending_prefetch_time.clear();
     return;
   }
-  const wxString requested_time = value["time"].IsString()
-                                      ? value["time"].AsString()
-                                      : pending_prefetch_time;
+  HandlePrefetchFrame(std::move(decoded));
+}
+
+void PortableEnvironmentHost::Impl::HandlePrefetchFrame(
+    DecodedEnvironmentFrame decoded) {
+  std::vector<DecodedEnvironmentFrame> frames;
+  frames.push_back(std::move(decoded));
+  HandlePrefetchFrames(std::move(frames));
+}
+
+void PortableEnvironmentHost::Impl::HandlePrefetchFrames(
+    std::vector<DecodedEnvironmentFrame> decoded) {
   {
     std::lock_guard<std::mutex> decode_lock(routing_decode_mutex);
-    CacheRoutingFrame(selected_file, requested_time, decoded);
+    for (auto& frame : decoded) {
+      if (frame.time.empty()) continue;
+      const wxString frame_time = frame.time;
+      CacheRoutingFrame(
+          selected_file, frame_time,
+          std::make_shared<const DecodedEnvironmentFrame>(std::move(frame)));
+    }
   }
   pending_prefetch_time.clear();
 }
 
 void PortableEnvironmentHost::Impl::HandleWeatherTable(wxJSONValue& value) {
   if (!value["rows"].IsArray()) {
-    data_status->SetLabel("Decoder returned an incompatible weather table");
+    if (weather_table_position)
+      weather_table_position->SetLabel(
+          "Decoder returned an incompatible weather table");
     return;
   }
-  wxDialog dialog(frame, wxID_ANY, surface_title + " — weather table",
-                  wxDefaultPosition, wxSize(1180, 600),
-                  wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
-  auto* root = new wxBoxSizer(wxVERTICAL);
-  auto* position = new wxStaticText(
-      &dialog, wxID_ANY,
-      wxString::Format("Nearest model samples to %.4f°, %.4f° · model output; "
-                       "not navigation-authoritative",
-                       value["latitude"].AsDouble(),
-                       value["longitude"].AsDouble()));
-  root->Add(position, 0, wxEXPAND | wxALL, 8);
-  auto* table =
-      new wxListCtrl(&dialog, wxID_ANY, wxDefaultPosition, wxDefaultSize,
-                     wxLC_REPORT | wxLC_HRULES | wxLC_VRULES);
-  table->InsertColumn(0, "Forecast time", wxLIST_FORMAT_LEFT, 190);
-  for (size_t column = 0; column < field_groups.size(); ++column)
-    table->InsertColumn(static_cast<int>(column + 1),
-                        field_groups[column].label, wxLIST_FORMAT_RIGHT, 120);
+  if (!weather_table_dialog) CreateWeatherTableDialog();
+  weather_table_position->SetLabel(wxString::Format(
+      "%s — nearest model samples to %.4f°, %.4f° · model output; not "
+      "navigation-authoritative",
+      weather_table_position_name, value["latitude"].AsDouble(),
+      value["longitude"].AsDouble()));
+  weather_table->DeleteAllItems();
   const bool marine_position = IsMarinePoint(value["latitude"].AsDouble(),
                                              value["longitude"].AsDouble());
   for (int row_index = 0; row_index < value["rows"].Size(); ++row_index) {
     wxJSONValue row = value["rows"][row_index];
     wxJSONValue row_fields = row["fields"];
-    const long item =
-        table->InsertItem(row_index, FormatGribTime(row["time"].AsString()));
+    const long item = weather_table->InsertItem(
+        row_index, FormatGribTime(row["time"].AsString()));
     auto read = [&](const wxString& id, double* output,
                     wxString* unit = nullptr) {
       if (!row_fields.IsObject() || !row_fields.HasMember(id) ||
@@ -3407,26 +4185,24 @@ void PortableEnvironmentHost::Impl::HandleWeatherTable(wxJSONValue& value) {
           }
         }
       }
-      table->SetItem(item, static_cast<int>(column + 1), text);
+      weather_table->SetItem(item, static_cast<int>(column + 1), text);
     }
   }
-  root->Add(table, 1, wxEXPAND | wxLEFT | wxRIGHT, 8);
-  root->Add(dialog.CreateSeparatedButtonSizer(wxCLOSE), 0, wxEXPAND | wxALL, 8);
-  dialog.SetSizer(root);
-  dialog.SetMinSize(wxSize(760, 420));
-  dialog.ShowModal();
+  weather_table_dataset_revision = dataset_revision;
+  weather_table_dialog->Show();
+  weather_table_dialog->Raise();
 }
 
 void PortableEnvironmentHost::Impl::CacheRoutingFrame(
     const wxString& source, const wxString& time,
-    const DecodedEnvironmentFrame& decoded) const {
-  if (source.empty() || time.empty()) return;
+    DecodedFramePtr decoded) const {
+  if (source.empty() || time.empty() || !decoded) return;
   const wxString key = FrameCacheKey(source, time);
   const auto old_bytes = routing_frame_bytes.find(key);
   if (old_bytes != routing_frame_bytes.end())
     routing_frame_cache_bytes -= old_bytes->second;
-  routing_frames[key] = decoded;
-  const size_t bytes = EstimatedFrameBytes(decoded);
+  routing_frames[key] = std::move(decoded);
+  const size_t bytes = EstimatedFrameBytes(*routing_frames[key]);
   routing_frame_bytes[key] = bytes;
   routing_frame_cache_bytes += bytes;
   routing_frame_lru.remove(key);
@@ -3441,7 +4217,7 @@ wxString PortableEnvironmentHost::Impl::FrameCacheKey(
 
 bool PortableEnvironmentHost::Impl::FindCachedFrame(
     const wxString& source, const wxString& time,
-    DecodedEnvironmentFrame* decoded) const {
+    DecodedFramePtr* decoded) const {
   if (!decoded || source.empty() || time.empty()) return false;
   const wxString key = FrameCacheKey(source, time);
   const auto found = routing_frames.find(key);
@@ -3486,7 +4262,7 @@ bool PortableEnvironmentHost::Impl::IsMarinePoint(double latitude,
 
 bool PortableEnvironmentHost::Impl::DecodeRoutingFrame(
     const wxString& source, const wxString& time,
-    DecodedEnvironmentFrame* decoded, wxString* error) const {
+    DecodedFramePtr* decoded, wxString* error) const {
   const wxString result = MakeResultPath(private_directory, "routing-frame");
   const auto arguments = DecoderCommand("frame", source, time, result);
   if (arguments.empty()) {
@@ -3494,9 +4270,23 @@ bool PortableEnvironmentHost::Impl::DecodeRoutingFrame(
     return false;
   }
   long exit_code = -1;
-  if (!RunHeadlessProcess(arguments, &exit_code, error)) return false;
-  wxJSONValue value;
-  const bool read = ReadJson(result, &value, error);
+  if (stop_requested.load()) {
+    if (error) *error = "environmental service request was cancelled";
+    return false;
+  }
+  if (!RunHeadlessProcess(
+          arguments, &exit_code,
+          [this]() { return stop_requested.load(); }, error))
+    return false;
+  std::vector<DecodedEnvironmentFrame> frames;
+  const bool read = ReadBinaryFrames(result, &frames, error);
+  if (!read) {
+    wxJSONValue failure;
+    wxString failure_error;
+    if (!ReadJson(result, &failure, &failure_error) && !failure_error.empty() &&
+        error)
+      *error = failure_error;
+  }
   if (wxFileExists(result)) wxRemoveFile(result);
   if (exit_code != 0) {
     if (error && error->empty())
@@ -3504,7 +4294,10 @@ bool PortableEnvironmentHost::Impl::DecodeRoutingFrame(
                                 exit_code);
     return false;
   }
-  return read && ParseDecodedFrame(value, decoded, error);
+  if (!read || frames.size() != 1) return false;
+  *decoded =
+      std::make_shared<const DecodedEnvironmentFrame>(std::move(frames.front()));
+  return true;
 }
 
 void PortableEnvironmentHost::Impl::HandleGenerate(wxJSONValue& value) {
@@ -4360,7 +5153,19 @@ void PortableEnvironmentHost::Impl::SetCursorPosition(double latitude,
 }
 
 void PortableEnvironmentHost::Impl::UpdateCursorStatus() {
-  if (!cursor_status || !have_cursor || fields.empty()) return;
+  if (!cursor_status || !have_cursor) return;
+  DecodedFramePtr frame_snapshot;
+  {
+    std::lock_guard<std::mutex> lock(field_mutex);
+    frame_snapshot = displayed_frame;
+  }
+  if (!frame_snapshot || frame_snapshot->fields.empty()) return;
+  const auto& fields = frame_snapshot->fields;
+  const auto& field_units = frame_snapshot->units;
+  auto field_unit = [&field_units](const wxString& kind) {
+    const auto found = field_units.find(kind);
+    return found == field_units.end() ? wxString() : found->second;
+  };
   auto nearest = [&](const wxString& kind, double* value,
                      bool marine_only = false) {
     const auto found = fields.find(kind);
@@ -4461,7 +5266,7 @@ void PortableEnvironmentHost::Impl::UpdateCursorStatus() {
       label = wxString::Format("%.0f %%", value);
     } else if (group.id == "precipitation") {
       label = wxString::Format("%.2f %s", value,
-                               field_units[ActiveFieldId(group.id)]);
+                               field_unit(ActiveFieldId(group.id)));
     } else if (group.id == "cape") {
       label = wxString::Format("%.0f J/kg", value);
     } else if (group.id == "composite-reflectivity") {
@@ -4471,7 +5276,7 @@ void PortableEnvironmentHost::Impl::UpdateCursorStatus() {
                   ? wxString::Format("%.0f ft", value * 3.2808399)
                   : wxString::Format("%.0f m", value);
     } else {
-      const wxString unit = field_units[ActiveFieldId(group.id)];
+      const wxString unit = field_unit(ActiveFieldId(group.id));
       label = wxString::Format("%.2f", value) +
               (unit.empty() ? wxString() : wxString(" ") + unit);
     }
@@ -4486,8 +5291,13 @@ void PortableEnvironmentHost::Impl::UpdateCursorStatus() {
 
 bool PortableEnvironmentHost::Impl::Render(ocpnDC& dc,
                                            const ViewPort& viewport) {
-  std::lock_guard<std::mutex> lock(field_mutex);
-  if (fields.empty()) return false;
+  DecodedFramePtr frame_snapshot;
+  {
+    std::lock_guard<std::mutex> lock(field_mutex);
+    frame_snapshot = displayed_frame;
+  }
+  if (!frame_snapshot || frame_snapshot->fields.empty()) return false;
+  const auto& fields = frame_snapshot->fields;
   bool rendered = false;
   ViewPort projection = viewport;
 
@@ -4917,18 +5727,45 @@ bool PortableEnvironmentHost::Impl::Render(ocpnDC& dc,
       for (auto& sample : output) sample.value = convert(sample.value);
     return output;
   };
-  const auto wind_speed = vector_samples(ActiveFieldId("wind", "u"),
-                                         ActiveFieldId("wind", "v"), false);
-  const auto current_speed = vector_samples("current-u", "current-v", true);
-  const auto pressure = field_samples("pressure", PressureHpa);
-  const auto waves = field_samples("wave-height", nullptr, true);
+  auto needs_scalar_samples = [](bool visible,
+                                 const LayerDisplaySettings& settings) {
+    return visible &&
+           (settings.overlay || settings.numbers || settings.contours);
+  };
+  const bool wind_visible = show_wind && show_wind->GetValue();
+  const bool pressure_visible = show_pressure && show_pressure->GetValue();
+  const bool wave_visible = show_waves && show_waves->GetValue();
+  const bool current_visible = show_current && show_current->GetValue();
+  const bool temperature_visible =
+      show_temperature && show_temperature->GetValue();
+  const auto wind_speed =
+      needs_scalar_samples(wind_visible, wind_display)
+          ? vector_samples(ActiveFieldId("wind", "u"),
+                           ActiveFieldId("wind", "v"), false)
+          : std::vector<Sample>();
+  const auto current_speed =
+      needs_scalar_samples(current_visible, current_display)
+          ? vector_samples("current-u", "current-v", true)
+          : std::vector<Sample>();
+  const auto pressure =
+      needs_scalar_samples(pressure_visible, pressure_display)
+          ? field_samples("pressure", PressureHpa)
+          : std::vector<Sample>();
+  const auto waves = needs_scalar_samples(wave_visible, wave_display)
+                         ? field_samples("wave-height", nullptr, true)
+                         : std::vector<Sample>();
   const auto temperature =
-      field_samples(ActiveFieldId("air-temperature"), TemperatureCelsius);
+      needs_scalar_samples(temperature_visible, temperature_display)
+          ? field_samples(ActiveFieldId("air-temperature"),
+                          TemperatureCelsius)
+          : std::vector<Sample>();
   std::map<wxString, std::vector<Sample>> additional_scalars;
   for (const auto& group : field_groups) {
     if (group.id == "wind" || group.id == "pressure" || group.id == "wave" ||
         group.id == "current" || group.id == "air-temperature")
       continue;
+    const bool visible = group.visible && group.visible->GetValue();
+    if (!needs_scalar_samples(visible, group.display)) continue;
     double (*conversion)(double) = nullptr;
     if (group.id == "sea-temperature") conversion = TemperatureCelsius;
     additional_scalars[group.id] =
@@ -5187,8 +6024,8 @@ bool PortableEnvironmentHost::Impl::Render(ocpnDC& dc,
 }
 
 void PortableEnvironmentHost::Impl::Shutdown() {
-  if (stopped) return;
-  stopped = true;
+  RequestStop();
+  if (stopped.exchange(true)) return;
   progress_timer.Stop();
   playback_timer.Stop();
   animation_timer.Stop();
@@ -5211,9 +6048,7 @@ void PortableEnvironmentHost::Impl::Shutdown() {
   }
   std::lock_guard<std::mutex> decode_lock(routing_decode_mutex);
   std::lock_guard<std::mutex> lock(field_mutex);
-  fields.clear();
-  field_units.clear();
-  field_source_times.clear();
+  displayed_frame.reset();
   routing_frames.clear();
   routing_frame_lru.clear();
   routing_frame_bytes.clear();
@@ -5222,6 +6057,10 @@ void PortableEnvironmentHost::Impl::Shutdown() {
     std::lock_guard<std::mutex> land_lock(land_mask_mutex);
     land_mask_cache.clear();
   }
+}
+
+void PortableEnvironmentHost::Impl::RequestStop() {
+  stop_requested.store(true);
 }
 
 bool PortableEnvironmentHost::Impl::SampleBatch(
@@ -5287,7 +6126,6 @@ bool PortableEnvironmentHost::Impl::SampleBatch(
   for (const auto& key : forecast_times) {
     wxDateTime parsed;
     if (!ParseGribTime(key, &parsed)) continue;
-    parsed.MakeFromTimezone(wxDateTime::UTC);
     parsed_times.push_back({key, parsed.GetTicks()});
   }
   if (parsed_times.empty()) {
@@ -5387,7 +6225,7 @@ bool PortableEnvironmentHost::Impl::SampleBatch(
     const wxString cache_key = FrameCacheKey(source, request_time);
     auto cached = routing_frames.find(cache_key);
     if (cached == routing_frames.end()) {
-      DecodedEnvironmentFrame decoded;
+      DecodedFramePtr decoded;
       if (!DecodeRoutingFrame(source, request_time, &decoded, error))
         return false;
       CacheRoutingFrame(source, request_time, decoded);
@@ -5400,7 +6238,7 @@ bool PortableEnvironmentHost::Impl::SampleBatch(
     }
     routing_frame_lru.remove(cache_key);
     routing_frame_lru.push_front(cache_key);
-    const auto& frame = cached->second;
+    const auto& frame = *cached->second;
     for (const size_t index : indices) {
       const auto& request = requests[index];
       auto& sample = (*results)[index];
@@ -5435,7 +6273,8 @@ wxString PortableEnvironmentHost::Impl::DatasetSummary() const {
                           selected_display_name.empty()
                               ? wxFileName(selected_file).GetFullName()
                               : selected_display_name,
-                          times.size(), fields.size());
+                          times.size(),
+                          displayed_frame ? displayed_frame->fields.size() : 0);
 }
 
 bool PortableEnvironmentHost::Impl::DisplayedTime(int64_t* unix_time) const {
@@ -5450,10 +6289,14 @@ bool PortableEnvironmentHost::Impl::DisplayedTime(int64_t* unix_time) const {
 PortableEnvironmentHost::PortableEnvironmentHost(
     wxWindow* parent, const wxString& plugin_id, const wxString& package_root,
     const wxString& surface_resource, bool credential_access,
-    ocpn_portable_runtime* runtime, std::shared_ptr<std::mutex> runtime_mutex)
+    ocpn_portable_runtime* runtime, std::shared_ptr<std::mutex> runtime_mutex,
+    std::function<std::vector<PortableEnvironmentPosition>()> list_waypoints,
+    std::function<bool(PortableEnvironmentPosition*)> vessel_position)
     : m_impl(std::make_unique<Impl>(parent, plugin_id, package_root,
                                     surface_resource, credential_access,
-                                    runtime, std::move(runtime_mutex))) {}
+                                    runtime, std::move(runtime_mutex),
+                                    std::move(list_waypoints),
+                                    std::move(vessel_position))) {}
 
 PortableEnvironmentHost::~PortableEnvironmentHost() = default;
 
@@ -5497,3 +6340,5 @@ bool PortableEnvironmentHost::DisplayedTime(int64_t* unix_time) const {
 }
 
 void PortableEnvironmentHost::Shutdown() { m_impl->Shutdown(); }
+
+void PortableEnvironmentHost::RequestStop() { m_impl->RequestStop(); }

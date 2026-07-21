@@ -19,6 +19,7 @@
   "permissions": [
     "ui.commands",
     "navigation.position.read",
+    "navigation.objects.read",
     "settings.read-write",
     "overlay.submit",
     "jobs.compute",

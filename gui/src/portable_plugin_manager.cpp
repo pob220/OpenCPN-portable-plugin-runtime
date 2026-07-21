@@ -550,11 +550,48 @@ int32_t PortablePluginManager::Impl::OpenEnvironmentalViewer(void* user_data) {
                  instance->id);
       return -2;
     }
+    auto waypoints = [owner = instance->owner, instance]() {
+      std::vector<PortableEnvironmentPosition> result;
+      if (!owner->HasPermission(*instance, "navigation.objects.read"))
+        return result;
+      const wxArrayString ids = GetWaypointGUIDArray();
+      result.reserve(std::min(ids.size(), kNavigationObjectLimit));
+      for (size_t index = 0;
+           index < ids.size() && result.size() < kNavigationObjectLimit;
+           ++index) {
+        auto waypoint = GetWaypoint_Plugin(ids[index]);
+        if (!waypoint || waypoint->m_GUID.empty() ||
+            !std::isfinite(waypoint->m_lat) ||
+            !std::isfinite(waypoint->m_lon) || waypoint->m_lat < -90.0 ||
+            waypoint->m_lat > 90.0 || waypoint->m_lon < -180.0 ||
+            waypoint->m_lon > 180.0)
+          continue;
+        wxString name = waypoint->m_MarkName;
+        if (name.empty()) name = "Unnamed waypoint";
+        result.push_back(
+            {waypoint->m_GUID, name, waypoint->m_lat, waypoint->m_lon});
+      }
+      std::stable_sort(result.begin(), result.end(),
+                       [](const auto& left, const auto& right) {
+                         return left.name.CmpNoCase(right.name) < 0;
+                       });
+      return result;
+    };
+    auto vessel = [owner = instance->owner,
+                   instance](PortableEnvironmentPosition* output) {
+      if (!output ||
+          !owner->HasPermission(*instance, "navigation.position.read") ||
+          !bGPSValid || !std::isfinite(gLat) || !std::isfinite(gLon))
+        return false;
+      *output = {"opencpn:vessel", "Current boat position", gLat, gLon};
+      return true;
+    };
     instance->environmental_host = std::make_unique<PortableEnvironmentHost>(
         instance->owner->plugin_manager->GetParentFrame(), instance->id,
         instance->package_root, instance->environment_surface,
         instance->owner->HasPermission(*instance, "credentials.provider"),
-        instance->runtime, instance->runtime_mutex);
+        instance->runtime, instance->runtime_mutex, std::move(waypoints),
+        std::move(vessel));
   }
 
   // Host callbacks run while HandleToolbarAction owns runtime_mutex.  Opening

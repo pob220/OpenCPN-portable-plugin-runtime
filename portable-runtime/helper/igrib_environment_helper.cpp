@@ -2,9 +2,10 @@
  * Isolated environmental-data decoder for the iGRIB reference component.
  *
  * This process intentionally has no OpenCPN or wxWidgets dependency.  It
- * accepts a file capability as an explicit command-line path and emits only
- * bounded JSON value data.  The host supervisor is responsible for sandboxing,
- * timeouts, process limits and path grants.
+ * accepts file capabilities as explicit command-line paths and emits bounded,
+ * versioned value data.  Metadata and low-volume operations use JSON; frame
+ * data can use a compact binary protocol.  The host supervisor is responsible
+ * for sandboxing, timeouts, process limits and path grants.
  */
 
 #include <eccodes.h>
@@ -13,8 +14,10 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -51,6 +54,36 @@ struct FieldDescriptor {
   long level = 0;
   bool marine = false;
 };
+
+struct Candidate {
+  std::string value;
+  long long minutes = 0;
+  uint64_t offset = 0;
+};
+
+using CandidateIndex =
+    std::map<std::string, std::map<long long, Candidate>>;
+
+uint64_t FileOffset(FILE* file) {
+#ifdef _WIN32
+  const auto offset = ::_ftelli64(file);
+#else
+  const auto offset = ::ftello(file);
+#endif
+  if (offset < 0) throw Error("could not determine GRIB message offset");
+  return static_cast<uint64_t>(offset);
+}
+
+void SeekFile(FILE* file, uint64_t offset) {
+  if (offset > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+    throw Error("GRIB message offset is out of range");
+#ifdef _WIN32
+  const int result = ::_fseeki64(file, static_cast<int64_t>(offset), SEEK_SET);
+#else
+  const int result = ::fseeko(file, static_cast<off_t>(offset), SEEK_SET);
+#endif
+  if (result != 0) throw Error("could not seek to indexed GRIB message");
+}
 
 std::string GetString(codes_handle* handle, const char* key) {
   std::array<char, 512> value{};
@@ -271,12 +304,16 @@ Handle Next(FILE* file) {
   return handle;
 }
 
-Json::Value Inspect(const std::filesystem::path& path) {
+Json::Value Inspect(const std::filesystem::path& path,
+                    Json::Value* message_index = nullptr) {
   auto file = Open(path);
   std::set<std::string> times;
   std::map<std::string, std::pair<FieldDescriptor, size_t>> fields;
   size_t messages = 0;
-  while (auto handle = Next(file.get())) {
+  while (true) {
+    const uint64_t offset = FileOffset(file.get());
+    auto handle = Next(file.get());
+    if (!handle) break;
     ++messages;
     if (messages > 100000) throw Error("GRIB message limit exceeded");
     const auto time = ValidTime(handle.get());
@@ -286,6 +323,13 @@ Json::Value Inspect(const std::filesystem::path& path) {
       auto& entry = fields[field.id];
       entry.first = field;
       ++entry.second;
+      if (message_index && !time.empty()) {
+        Json::Value indexed(Json::objectValue);
+        indexed["fieldId"] = field.id;
+        indexed["time"] = time;
+        indexed["offset"] = Json::UInt64(offset);
+        (*message_index)["messages"].append(std::move(indexed));
+      }
     }
   }
   if (messages == 0) throw Error("file contains no GRIB messages");
@@ -302,27 +346,74 @@ Json::Value Inspect(const std::filesystem::path& path) {
     field["messageCount"] = Json::UInt64(entry.second);
     result["fields"].append(field);
   }
+  if (message_index) {
+    (*message_index)["schemaVersion"] = 1;
+    (*message_index)["byteCount"] = result["byteCount"];
+    (*message_index)["messageCount"] = result["messageCount"];
+  }
   return result;
+}
+
+Json::Value ReadJsonFile(const std::filesystem::path& path) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) throw Error("could not read GRIB message index");
+  Json::CharReaderBuilder builder;
+  Json::Value value;
+  std::string errors;
+  if (!Json::parseFromStream(builder, input, &value, &errors) ||
+      !value.isObject())
+    throw Error("GRIB message index is malformed");
+  return value;
+}
+
+CandidateIndex LoadCandidateIndex(const std::filesystem::path& path,
+                                  const std::filesystem::path& index_path) {
+  const Json::Value index = ReadJsonFile(index_path);
+  const uint64_t byte_count = std::filesystem::file_size(path);
+  if (index["schemaVersion"].asInt() != 1 ||
+      !index["byteCount"].isUInt64() ||
+      index["byteCount"].asUInt64() != byte_count ||
+      !index["messages"].isArray() || index["messages"].size() > 100000)
+    throw Error("GRIB message index does not match the immutable dataset");
+  CandidateIndex candidates;
+  for (const auto& message : index["messages"]) {
+    if (!message.isObject() || !message["fieldId"].isString() ||
+        !message["time"].isString() || !message["offset"].isUInt64())
+      throw Error("GRIB message index has an incompatible entry");
+    const std::string id = message["fieldId"].asString();
+    const std::string time = message["time"].asString();
+    const uint64_t offset = message["offset"].asUInt64();
+    long long minutes = 0;
+    if (id.empty() || id.size() > 256 || !TimeMinutes(time, &minutes) ||
+        offset >= byte_count)
+      throw Error("GRIB message index contains an invalid value");
+    // Identical field/time entries preserve concatenated-file last-wins
+    // semantics because inspection records messages in file order.
+    candidates[id][minutes] = {time, minutes, offset};
+  }
+  if (candidates.empty()) throw Error("GRIB message index contains no fields");
+  return candidates;
 }
 
 Json::Value DecodeFrame(const std::filesystem::path& path,
                         const std::string& requested_time,
-                        size_t maximum_points) {
+                        size_t maximum_points,
+                        const std::filesystem::path& index_path = {}) {
   if (maximum_points < 16 || maximum_points > 100000)
     throw Error("max-points must be between 16 and 100000");
   long long requested_minutes = 0;
   if (!TimeMinutes(requested_time, &requested_minutes))
     throw Error("requested time is invalid");
-  struct Candidate {
-    std::string value;
-    long long minutes = 0;
-    size_t message_index = 0;
-  };
-  std::map<std::string, std::map<long long, Candidate>> candidates;
-  {
+  CandidateIndex candidates;
+  if (!index_path.empty()) {
+    candidates = LoadCandidateIndex(path, index_path);
+  } else {
     auto metadata_file = Open(path);
     size_t metadata_messages = 0;
-    while (auto handle = Next(metadata_file.get())) {
+    while (true) {
+      const uint64_t offset = FileOffset(metadata_file.get());
+      auto handle = Next(metadata_file.get());
+      if (!handle) break;
       if (++metadata_messages > 100000)
         throw Error("GRIB message limit exceeded");
       const auto field = DescribeField(handle.get());
@@ -333,7 +424,7 @@ Json::Value DecodeFrame(const std::filesystem::path& path,
       // Multiple selected files are concatenated in user-selected order.
       // Replacing this map entry makes conflicts deterministic: the last
       // message for an identical field/time wins.
-      candidates[field.id][minutes] = {time, minutes, metadata_messages};
+      candidates[field.id][minutes] = {time, minutes, offset};
     }
   }
   struct Selection {
@@ -345,7 +436,7 @@ Json::Value DecodeFrame(const std::filesystem::path& path,
   std::map<std::string, Selection> selections;
   constexpr long long kMaximumNearestMinutes = 180;
   constexpr long long kMaximumInterpolationSpanMinutes = 360;
-  std::set<size_t> selected_messages;
+  std::set<uint64_t> selected_messages;
   for (const auto& [id, available] : candidates) {
     Selection selection;
     const auto after = available.lower_bound(requested_minutes);
@@ -364,8 +455,8 @@ Json::Value DecodeFrame(const std::filesystem::path& path,
     if (selection.have_before && selection.have_after &&
         selection.after.minutes - selection.before.minutes <=
             kMaximumInterpolationSpanMinutes) {
-      selected_messages.insert(selection.before.message_index);
-      selected_messages.insert(selection.after.message_index);
+      selected_messages.insert(selection.before.offset);
+      selected_messages.insert(selection.after.offset);
     } else {
       const long long before_distance =
           selection.have_before ? requested_minutes - selection.before.minutes
@@ -382,7 +473,7 @@ Json::Value DecodeFrame(const std::filesystem::path& path,
         selection.before = selection.after;
         selection.have_before = selection.have_after;
       }
-      selected_messages.insert(selection.before.message_index);
+      selected_messages.insert(selection.before.offset);
     }
     selections[id] = selection;
   }
@@ -400,12 +491,12 @@ Json::Value DecodeFrame(const std::filesystem::path& path,
     long long minutes = 0;
     std::vector<PointValue> samples;
   };
-  std::map<size_t, DecodedMessage> decoded_messages;
+  std::map<uint64_t, DecodedMessage> decoded_messages;
   auto file = Open(path);
-  size_t messages = 0;
-  while (auto handle = Next(file.get())) {
-    if (++messages > 100000) throw Error("GRIB message limit exceeded");
-    if (!selected_messages.count(messages)) continue;
+  for (const uint64_t offset : selected_messages) {
+    SeekFile(file.get(), offset);
+    auto handle = Next(file.get());
+    if (!handle) throw Error("indexed GRIB message is unavailable");
     const auto descriptor = DescribeField(handle.get());
     if (descriptor.id.empty()) continue;
     size_t value_count = 0;
@@ -445,20 +536,20 @@ Json::Value DecodeFrame(const std::filesystem::path& path,
       decoded.samples.push_back(
           {latitude, longitude > 180.0 ? longitude - 360.0 : longitude, value});
     }
-    decoded_messages[messages] = std::move(decoded);
+    decoded_messages[offset] = std::move(decoded);
   }
 
   Json::Value fields(Json::arrayValue);
   size_t total_points = 0;
   for (const auto& [id, selection] : selections) {
-    const auto before = decoded_messages.find(selection.before.message_index);
-    const auto after = decoded_messages.find(selection.after.message_index);
+    const auto before = decoded_messages.find(selection.before.offset);
+    const auto after = decoded_messages.find(selection.after.offset);
     if (before == decoded_messages.end() || after == decoded_messages.end())
       continue;
     const auto& first = before->second;
     const auto& second = after->second;
     const bool can_interpolate =
-        selection.before.message_index != selection.after.message_index &&
+        selection.before.offset != selection.after.offset &&
         first.samples.size() == second.samples.size() &&
         second.minutes > first.minutes;
     const double factor =
@@ -609,6 +700,88 @@ void WriteResult(const Json::Value& value, const std::filesystem::path& path) {
   }
 }
 
+void WriteU32(std::ostream& output, uint32_t value) {
+  for (unsigned shift = 0; shift < 32; shift += 8)
+    output.put(static_cast<char>((value >> shift) & 0xff));
+}
+
+void WriteU64(std::ostream& output, uint64_t value) {
+  for (unsigned shift = 0; shift < 64; shift += 8)
+    output.put(static_cast<char>((value >> shift) & 0xff));
+}
+
+void WriteDouble(std::ostream& output, double value) {
+  static_assert(sizeof(double) == sizeof(uint64_t),
+                "portable frame protocol requires binary64 doubles");
+  uint64_t bits = 0;
+  std::memcpy(&bits, &value, sizeof(bits));
+  WriteU64(output, bits);
+}
+
+void WriteString(std::ostream& output, const std::string& value) {
+  if (value.size() > 4096) throw Error("binary frame string is too large");
+  WriteU32(output, static_cast<uint32_t>(value.size()));
+  output.write(value.data(), static_cast<std::streamsize>(value.size()));
+}
+
+void WriteFrameBody(std::ostream& output, const Json::Value& frame) {
+  if (!frame.isObject() || !frame["time"].isString() ||
+      !frame["fields"].isArray() || frame["fields"].size() > 64)
+    throw Error("cannot encode incompatible binary frame");
+  WriteString(output, frame["time"].asString());
+  WriteU32(output, static_cast<uint32_t>(frame["fields"].size()));
+  WriteU64(output, frame["sampleCount"].asUInt64());
+  uint64_t counted_samples = 0;
+  for (const auto& field : frame["fields"]) {
+    if (!field.isObject() || !field["kind"].isString() ||
+        !field["samples"].isArray() || field["samples"].size() > 100000)
+      throw Error("cannot encode incompatible binary field");
+    WriteString(output, field["kind"].asString());
+    WriteString(output,
+                field["unit"].isString() ? field["unit"].asString() : "");
+    WriteString(output, field["sourceTime"].isString()
+                            ? field["sourceTime"].asString()
+                            : "");
+    WriteU32(output, static_cast<uint32_t>(field["samples"].size()));
+    for (const auto& sample : field["samples"]) {
+      if (!sample.isArray() || sample.size() != 3)
+        throw Error("cannot encode incompatible binary sample");
+      WriteDouble(output, sample[0].asDouble());
+      WriteDouble(output, sample[1].asDouble());
+      WriteDouble(output, sample[2].asDouble());
+      ++counted_samples;
+    }
+  }
+  if (counted_samples != frame["sampleCount"].asUInt64())
+    throw Error("binary frame sample count is inconsistent");
+}
+
+void WriteBinaryFrames(const std::vector<Json::Value>& frames,
+                       const std::filesystem::path& path) {
+  if (frames.empty() || frames.size() > 32)
+    throw Error("binary frame batch size is invalid");
+  const auto temporary = path.string() + ".tmp";
+  {
+    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+    if (!output) throw Error("could not create binary frame result");
+    constexpr std::array<char, 8> magic = {'O', 'C', 'P', 'N',
+                                            'F', 'R', 'M', '1'};
+    output.write(magic.data(), static_cast<std::streamsize>(magic.size()));
+    WriteU32(output, static_cast<uint32_t>(frames.size()));
+    for (const auto& frame : frames) WriteFrameBody(output, frame);
+    output.flush();
+    if (!output) throw Error("could not write binary frame result");
+  }
+  std::error_code error;
+  std::filesystem::remove(path, error);
+  error.clear();
+  std::filesystem::rename(temporary, path, error);
+  if (error) {
+    std::filesystem::remove(temporary);
+    throw Error("could not publish binary frame result");
+  }
+}
+
 size_t ParseLimit(const std::string& value) {
   size_t parsed = 0;
   try {
@@ -640,10 +813,19 @@ void ConfigureBundledDefinitions(const char* executable) {
 int main(int argc, char** argv) {
   if (argc > 0) ConfigureBundledDefinitions(argv[0]);
   const bool inspect_to_file = argc == 4 && std::string(argv[1]) == "inspect";
+  const bool inspect_indexed =
+      argc == 5 && std::string(argv[1]) == "inspect-indexed";
   const bool frame_to_file = argc == 6 && std::string(argv[1]) == "frame";
+  const bool frame_indexed_binary =
+      argc == 7 && std::string(argv[1]) == "frame-indexed-bin";
+  const bool frames_indexed_binary =
+      argc >= 7 && std::string(argv[1]) == "frames-indexed-bin";
   const bool table_to_file = argc == 6 && std::string(argv[1]) == "table";
   const char* result_path = inspect_to_file ? argv[3]
+                            : inspect_indexed ? argv[4]
                             : frame_to_file ? argv[5]
+                            : frame_indexed_binary ? argv[6]
+                            : frames_indexed_binary ? argv[5]
                             : table_to_file ? argv[5]
                                             : nullptr;
   try {
@@ -655,12 +837,34 @@ int main(int argc, char** argv) {
         Print(result);
       return 0;
     }
+    if (inspect_indexed) {
+      Json::Value index(Json::objectValue);
+      const auto result = Inspect(argv[2], &index);
+      WriteResult(index, argv[3]);
+      WriteResult(result, result_path);
+      return 0;
+    }
     if ((argc == 5 || frame_to_file) && std::string(argv[1]) == "frame") {
       const auto result = DecodeFrame(argv[2], argv[3], ParseLimit(argv[4]));
       if (result_path)
         WriteResult(result, result_path);
       else
         Print(result);
+      return 0;
+    }
+    if (frame_indexed_binary) {
+      const auto frame = DecodeFrame(argv[2], argv[4], ParseLimit(argv[5]),
+                                     std::filesystem::path(argv[3]));
+      WriteBinaryFrames({frame}, result_path);
+      return 0;
+    }
+    if (frames_indexed_binary) {
+      std::vector<Json::Value> frames;
+      frames.reserve(static_cast<size_t>(argc - 6));
+      for (int index = 6; index < argc; ++index)
+        frames.push_back(DecodeFrame(argv[2], argv[index], ParseLimit(argv[4]),
+                                     std::filesystem::path(argv[3])));
+      WriteBinaryFrames(frames, result_path);
       return 0;
     }
     if (table_to_file) {
@@ -670,8 +874,14 @@ int main(int argc, char** argv) {
       return 0;
     }
     std::cerr << "usage: igrib-environment-helper inspect FILE [RESULT_JSON]\n"
+                 "       igrib-environment-helper inspect-indexed FILE "
+                 "INDEX_JSON RESULT_JSON\n"
                  "       igrib-environment-helper frame FILE TIME MAX_POINTS "
                  "[RESULT_JSON]\n"
+                 "       igrib-environment-helper frame-indexed-bin FILE "
+                 "INDEX_JSON TIME MAX_POINTS RESULT_BIN\n"
+                 "       igrib-environment-helper frames-indexed-bin FILE "
+                 "INDEX_JSON MAX_POINTS RESULT_BIN TIME...\n"
                  "       igrib-environment-helper table FILE LAT LON "
                  "RESULT_JSON\n";
     return 2;

@@ -13,6 +13,11 @@ The current proof implements:
 - persistent display settings for wind barbs/arrows, vector and scalar
   density, overlay opacity, playback interval and timeline looping;
 - ecCodes metadata and frame decoding in a separately supervised helper;
+- one bounded GRIB metadata scan per opened snapshot, followed by validated
+  message-offset lookups and compact binary frame batches for playback;
+- content-addressed immutable dataset snapshots, shared decoded source frames,
+  chronological host-side interpolation and look-ahead caching without
+  retaining duplicate synthetic timeline slices;
 - GFS/UKMO environmental generation plus optional waves and authenticated
   Copernicus Marine North-West Shelf or global current
   inputs through the signed `environmental-grib` helper;

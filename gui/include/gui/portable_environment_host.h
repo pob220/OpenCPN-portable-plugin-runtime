@@ -13,6 +13,7 @@
 
 #include <memory>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <vector>
 
@@ -38,6 +39,14 @@ struct PortableEnvironmentSample {
   unsigned available = 0;
 };
 
+/** Stable, value-based navigation position offered to the weather table. */
+struct PortableEnvironmentPosition {
+  wxString id;
+  wxString name;
+  double latitude = 0.0;
+  double longitude = 0.0;
+};
+
 /** Immutable value snapshot selected by a portable environmental consumer. */
 struct PortableEnvironmentDataset {
   uint64_t revision = 0;
@@ -56,7 +65,13 @@ public:
                                    const wxString& surface_resource,
                                    bool credential_access,
                                    ocpn_portable_runtime* runtime,
-                                   std::shared_ptr<std::mutex> runtime_mutex);
+                                   std::shared_ptr<std::mutex> runtime_mutex,
+                                   std::function<std::vector<
+                                       PortableEnvironmentPosition>()>
+                                       list_waypoints,
+                                   std::function<bool(
+                                       PortableEnvironmentPosition*)>
+                                       vessel_position);
   ~PortableEnvironmentHost();
 
   PortableEnvironmentHost(const PortableEnvironmentHost&) = delete;
@@ -76,6 +91,12 @@ public:
       std::vector<PortableEnvironmentSample>* results, wxString* error) const;
   wxString DatasetSummary() const;
   bool DisplayedTime(int64_t* unix_time) const;
+  /**
+   * Signal in-flight headless service work to stop without destroying the UI
+   * or dataset.  Used as the first phase of application/plugin shutdown so a
+   * consumer worker cannot keep the GUI thread blocked while it is joined.
+   */
+  void RequestStop();
   void Shutdown();
 
 private:

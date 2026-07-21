@@ -5,6 +5,7 @@ import json
 import hashlib
 import pathlib
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -34,6 +35,54 @@ def run(*arguments):
         capture_output=True,
         text=True,
     )
+
+
+def parse_binary_frames(path):
+    """Decode the deliberately small host/helper frame protocol."""
+    payload = pathlib.Path(path).read_bytes()
+    cursor = 0
+
+    def take(size):
+        nonlocal cursor
+        if cursor + size > len(payload):
+            raise RuntimeError("binary frame result is truncated")
+        result = payload[cursor:cursor + size]
+        cursor += size
+        return result
+
+    def uint32():
+        return struct.unpack("<I", take(4))[0]
+
+    def uint64():
+        return struct.unpack("<Q", take(8))[0]
+
+    def number():
+        return struct.unpack("<d", take(8))[0]
+
+    def string():
+        return take(uint32()).decode("utf-8")
+
+    if take(8) != b"OCPNFRM1":
+        raise RuntimeError("binary frame result has the wrong signature")
+    frames = []
+    for _ in range(uint32()):
+        frame_time = string()
+        field_count = uint32()
+        frame = {"time": frame_time, "fields": [], "sampleCount": uint64()}
+        for _ in range(field_count):
+            field = {
+                "kind": string(),
+                "unit": string(),
+                "sourceTime": string(),
+                "samples": [],
+            }
+            for _ in range(uint32()):
+                field["samples"].append([number(), number(), number()])
+            frame["fields"].append(field)
+        frames.append(frame)
+    if cursor != len(payload):
+        raise RuntimeError("binary frame result has trailing data")
+    return frames
 
 
 def main():
@@ -183,6 +232,73 @@ def main():
             raise RuntimeError("temporal interpolation was not reported")
         if abs(float(gust["samples"][0][2]) - 10.0) > 0.01:
             raise RuntimeError("temporal interpolation produced the wrong value")
+
+        index_path = root / "all-fields.index.json"
+        indexed_metadata_path = root / "indexed-metadata.json"
+        run(helper, "inspect-indexed", fixture, index_path,
+            indexed_metadata_path)
+        indexed_metadata = json.loads(indexed_metadata_path.read_text())
+        if indexed_metadata != metadata:
+            raise RuntimeError("indexed inspection changed public metadata")
+        message_index = json.loads(index_path.read_text())
+        if message_index.get("schemaVersion") != 1:
+            raise RuntimeError("decoder did not publish message-index schema 1")
+        if message_index.get("byteCount") != fixture.stat().st_size:
+            raise RuntimeError("message index is not tied to the GRIB bytes")
+        if not message_index.get("messages") or any(
+            not {"fieldId", "time", "offset"}.issubset(message)
+            for message in message_index["messages"]
+        ):
+            raise RuntimeError("message index omitted required lookup data")
+
+        binary_path = root / "frame.bin"
+        run(helper, "frame-indexed-bin", fixture, index_path,
+            "20260721T0000Z", "100000", binary_path)
+        binary_frames = parse_binary_frames(binary_path)
+        if len(binary_frames) != 1:
+            raise RuntimeError("single binary decode returned the wrong count")
+        binary_frame = binary_frames[0]
+        if binary_frame["time"] != frame["time"]:
+            raise RuntimeError("binary frame reported a different time")
+        if {field["kind"] for field in binary_frame["fields"]} != set(field_ids):
+            raise RuntimeError("binary frame omitted decoded fields")
+        if binary_frame["sampleCount"] != sum(
+            len(field["samples"]) for field in binary_frame["fields"]
+        ):
+            raise RuntimeError("binary frame sample count is inconsistent")
+        if binary_path.stat().st_size >= len(json.dumps(frame).encode("utf-8")):
+            raise RuntimeError("binary frame was not smaller than JSON")
+
+        batch_path = root / "frames.bin"
+        run(helper, "frames-indexed-bin", fixture, index_path, "100000",
+            batch_path, "20260721T0000Z", "20260721T0100Z")
+        binary_batch = parse_binary_frames(batch_path)
+        if [item["time"] for item in binary_batch] != [
+            "20260721T0000Z", "20260721T0100Z"
+        ]:
+            raise RuntimeError("batched binary decode changed frame order")
+        binary_gust = next(
+            field for field in binary_batch[1]["fields"]
+            if field["kind"] == "wind-gust"
+        )
+        if abs(float(binary_gust["samples"][0][2]) - 10.0) > 0.01:
+            raise RuntimeError("indexed binary interpolation is incorrect")
+
+        invalid_index_path = root / "invalid.index.json"
+        message_index["byteCount"] += 1
+        invalid_index_path.write_text(json.dumps(message_index))
+        invalid_result_path = root / "invalid-result.bin"
+        invalid = subprocess.run(
+            [str(helper), "frame-indexed-bin", str(fixture),
+             str(invalid_index_path), "20260721T0000Z", "100000",
+             str(invalid_result_path)], capture_output=True, text=True,
+        )
+        if invalid.returncode == 0:
+            raise RuntimeError("stale message index unexpectedly succeeded")
+        invalid_result = json.loads(invalid_result_path.read_text())
+        if invalid_result.get("error", {}).get("code") != "environment-decode-failed":
+            raise RuntimeError("stale message index omitted a diagnostic")
+
         table_result = root / "weather-table.json"
         run(helper, "table", fixture, "0", "0", table_result)
         table = json.loads(table_result.read_text())
