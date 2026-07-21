@@ -43,6 +43,7 @@
 #include "ocpndc.h"
 #include "navutil.h"
 #include "portable_polar.h"
+#include "portable_ui_menu.h"
 #include "viewport.h"
 
 namespace {
@@ -76,10 +77,10 @@ bool UtcTime(wxTextCtrl* control, int64_t* value) {
   return true;
 }
 bool LoadSurface(const wxString& package_root, const wxString& surface_resource,
-                 wxString* title,
-                 wxArrayString* tabs, std::map<wxString, wxString>* labels,
-                 wxJSONValue* definition,
-                 wxString* error) {
+                 wxString* title, wxArrayString* tabs,
+                 std::map<wxString, wxString>* labels,
+                 std::vector<PortableUiMenuDefinition>* menus,
+                 wxJSONValue* definition, wxString* error) {
   wxFileName relative(surface_resource);
   if (surface_resource.empty() || relative.IsAbsolute() ||
       surface_resource.Find("..") != wxNOT_FOUND) {
@@ -224,6 +225,7 @@ bool LoadSurface(const wxString& package_root, const wxString& surface_resource,
       return false;
     }
   }
+  if (!ParsePortableUiMenus(value, menus, error)) return false;
   *title = value["title"].AsString();
   *definition = value;
   return true;
@@ -709,6 +711,7 @@ private:
   wxArrayString surface_tabs;
   wxString configured_route_id;
   std::map<wxString, wxString> surface_labels;
+  std::vector<PortableUiMenuDefinition> surface_menus;
   wxJSONValue surface_definition;
   bool surface_loaded = false;
   std::function<wxString()> dataset_summary;
@@ -1727,6 +1730,11 @@ void PortableWeatherRoutingHost::Impl::CreateEditor() {
 
 void PortableWeatherRoutingHost::Impl::ShowEditor(size_t tab) {
   if (!editor) return;
+  // Developer startup actions can create the workbench before OpenCPN's
+  // deferred initialization has loaded navobj.db.  Refresh here so opening the
+  // configuration always sees the current waypoints and routes, even when the
+  // initial snapshot was necessarily empty.
+  RefreshNavigationPositions(false);
   if (notebook && tab < static_cast<size_t>(notebook->GetPageCount()))
     notebook->SetSelection(static_cast<int>(tab));
   provider->SetLabel("Environment: " + dataset_summary());
@@ -1852,26 +1860,19 @@ void PortableWeatherRoutingHost::Impl::CreateFrame() {
   frame->SetMinSize(frame->FromDIP(wxSize(720, 460)));
 
   auto* menu_bar = new wxMenuBar;
-  for (int menu_index = 0; menu_index < surface_definition["menus"].Size();
-       ++menu_index) {
-    wxJSONValue menu_definition =
-        surface_definition["menus"][menu_index];
+  for (const auto& menu_definition : surface_menus) {
     auto* menu = new wxMenu;
-    for (int item_index = 0; item_index < menu_definition["items"].Size();
-         ++item_index) {
-      wxJSONValue item_definition =
-          menu_definition["items"][item_index];
-      if (item_definition["separator"].AsBool()) {
+    for (const auto& item_definition : menu_definition.items) {
+      if (item_definition.separator) {
         menu->AppendSeparator();
         continue;
       }
-      const wxString action = item_definition["id"].AsString();
-      wxString label = item_definition["label"].AsString();
-      const wxString accelerator = item_definition["accelerator"].AsString();
+      const wxString& action = item_definition.id;
+      wxString label = item_definition.label;
+      const wxString& accelerator = item_definition.accelerator;
       if (!accelerator.empty()) label += "\t" + accelerator;
-      const wxItemKind kind = item_definition["checkable"].AsBool()
-                                  ? wxITEM_CHECK
-                                  : wxITEM_NORMAL;
+      const wxItemKind kind =
+          item_definition.checkable ? wxITEM_CHECK : wxITEM_NORMAL;
       wxMenuItem* item = menu->Append(wxID_ANY, label, wxEmptyString, kind);
       surface_menu_items[action] = item;
       frame->Bind(wxEVT_MENU,
@@ -1880,7 +1881,7 @@ void PortableWeatherRoutingHost::Impl::CreateFrame() {
                   },
                   item->GetId());
     }
-    menu_bar->Append(menu, menu_definition["label"].AsString());
+    menu_bar->Append(menu, menu_definition.label);
   }
   frame->SetMenuBar(menu_bar);
 
@@ -1987,8 +1988,9 @@ bool PortableWeatherRoutingHost::Impl::Show(wxString* error) {
     return false;
   }
   if (!surface_loaded) {
-    if (!LoadSurface(package_root, surface_resource, &surface_title, &surface_tabs,
-                     &surface_labels, &surface_definition, error))
+    if (!LoadSurface(package_root, surface_resource, &surface_title,
+                     &surface_tabs, &surface_labels, &surface_menus,
+                     &surface_definition, error))
       return false;
     surface_loaded = true;
   }

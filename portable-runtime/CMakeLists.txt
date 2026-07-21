@@ -412,6 +412,28 @@ if (OCPN_BUILD_TEST)
     COMMAND portable_polar_test
             "${_iwr_source}/package/Nicholson35_Mk1_cruising_realistic.pol"
   )
+  add_executable(
+    portable_ui_menu_test
+    tests/portable_ui_menu_test.cpp
+    "${CMAKE_SOURCE_DIR}/gui/src/portable_ui_menu.cpp"
+  )
+  target_compile_features(portable_ui_menu_test PRIVATE cxx_std_17)
+  if (MSVC)
+    target_compile_options(portable_ui_menu_test PRIVATE /W4)
+  else ()
+    target_compile_options(portable_ui_menu_test PRIVATE
+                           -Wall -Wextra -Wpedantic)
+  endif ()
+  target_include_directories(
+    portable_ui_menu_test PRIVATE "${CMAKE_SOURCE_DIR}/gui/include/gui"
+  )
+  target_link_libraries(portable_ui_menu_test PRIVATE
+                        ocpn::wxjson ${wxWidgets_LIBRARIES})
+  add_test(
+    NAME portable_ui_menu
+    COMMAND portable_ui_menu_test
+            "${_iwr_source}/package/iweather-routing.ui.json"
+  )
   add_executable(portable_runtime_smoke_test tests/bridge_smoke.cpp)
   target_compile_features(portable_runtime_smoke_test PRIVATE cxx_std_17)
   target_include_directories(
