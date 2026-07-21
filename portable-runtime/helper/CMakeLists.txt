@@ -19,6 +19,16 @@ else ()
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(ECCODES REQUIRED IMPORTED_TARGET eccodes)
   pkg_check_modules(JSONCPP REQUIRED IMPORTED_TARGET jsoncpp)
+  # Ubuntu arm64's eccodes.pc currently expands includedir relative to the
+  # multiarch pkgconfig directory and produces /usr/lib/include. Resolve the
+  # actual installed public header and replace that invalid imported property.
+  find_path(ECCODES_HEADER_DIRECTORY NAMES eccodes.h
+            HINTS ${ECCODES_INCLUDE_DIRS})
+  if (NOT ECCODES_HEADER_DIRECTORY)
+    message(FATAL_ERROR "Could not locate the ecCodes public headers")
+  endif ()
+  set_property(TARGET PkgConfig::ECCODES PROPERTY INTERFACE_INCLUDE_DIRECTORIES
+               "${ECCODES_HEADER_DIRECTORY}")
   set(_decoder_libraries PkgConfig::ECCODES PkgConfig::JSONCPP)
 endif ()
 
@@ -88,9 +98,14 @@ if (WIN32 OR OCPN_PORTABLE_HELPER_TARGET MATCHES "^flatpak-")
     # library's required definition data is installed below its pkg-config
     # prefix.  Do not make the packaged helper depend on that diagnostic tool.
     pkg_get_variable(ECCODES_PREFIX eccodes prefix)
-    set(ECCODES_DEFINITION_DIRECTORY
-        "${ECCODES_PREFIX}/share/eccodes/definitions")
-    set(ECCODES_SAMPLE_DIRECTORY "${ECCODES_PREFIX}/share/eccodes/samples")
+    find_path(ECCODES_DEFINITION_DIRECTORY NAMES boot.def
+              PATHS "${ECCODES_PREFIX}/share/eccodes/definitions"
+                    /usr/share/eccodes/definitions
+                    /usr/local/share/eccodes/definitions)
+    find_path(ECCODES_SAMPLE_DIRECTORY NAMES regular_ll_sfc_grib2.tmpl
+              PATHS "${ECCODES_PREFIX}/share/eccodes/samples"
+                    /usr/share/eccodes/samples
+                    /usr/local/share/eccodes/samples)
   else ()
     message(FATAL_ERROR "codes_info is required to stage Windows ecCodes data")
   endif ()
