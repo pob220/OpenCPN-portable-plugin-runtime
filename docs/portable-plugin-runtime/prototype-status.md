@@ -180,7 +180,11 @@ Measured conformance values for this machine are recorded in
   bounded value geometry. Variable-departure results expose a selectable
   comparison table (including unsuccessful attempts and route/environment
   metrics); selection consistently drives the emphasized overlay, inspection
-  layers and GPX output.
+  layers and GPX output. Environmental availability for every requested
+  departure is checked before compute workers start. Multi-time sampling
+  decodes and consumes frames incrementally so a route-statistics batch cannot
+  evict its own frames from the bounded cache; provider diagnostics cross host
+  ABI 9 as text instead of being reduced to an opaque numeric error.
 - Production catalogue/TUF metadata, revocation, user permission-consent UI,
   cross-platform credential-store conformance, state migrations and a
   security-response ownership agreement remain absent.

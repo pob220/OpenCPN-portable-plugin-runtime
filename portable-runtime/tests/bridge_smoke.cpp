@@ -26,6 +26,7 @@ struct HostState {
   bool job_cancelled = false;
   bool environmental_viewer_opened = false;
   bool weather_routing_opened = false;
+  std::atomic<bool> environment_failure{false};
   std::atomic<bool> routing_cancelled{false};
   std::atomic<unsigned> routing_progress_events{0};
   std::atomic<size_t> chart_segments_queried{0};
@@ -128,11 +129,21 @@ int32_t OpenWeatherRouting(void* data) {
   return 0;
 }
 
-int32_t EnvironmentSampleBatch(void*,
+int32_t EnvironmentSampleBatch(void* data,
                                const ocpn_portable_environment_sample_request*,
                                size_t count,
                                ocpn_portable_environment_sample* results,
-                               size_t result_count) {
+                               size_t result_count, char* error,
+                               size_t error_capacity) {
+  if (static_cast<HostState*>(data)->environment_failure.load()) {
+    constexpr char kFailure[] = "decoder deliberately unavailable";
+    if (error && error_capacity) {
+      const size_t copied = std::min(error_capacity - 1, sizeof(kFailure) - 1);
+      std::memcpy(error, kFailure, copied);
+      error[copied] = '\0';
+    }
+    return -2;
+  }
   if (count != result_count) return -1;
   for (size_t i = 0; i < count; ++i) results[i] = {8.0, 2.0, 0.4, 0.1, 1.2, 7};
   return 0;
@@ -570,6 +581,15 @@ bool RoutingLifecycle(const char* component_path) {
        std::all_of(replica_results.begin(), replica_results.end(),
                    [](bool result) { return result; }) &&
        state.actions.size() == 1;
+  // Provider diagnostics must cross the C bridge instead of being reduced to
+  // an opaque numeric host-service error.
+  state.environment_failure = true;
+  std::memset(error, 0, sizeof(error));
+  const int32_t provider_failure = ocpn_portable_runtime_calculate_route(
+      runtime, &request, &result, error, sizeof(error));
+  ok = ok && provider_failure != 0 &&
+       std::strstr(error, "decoder deliberately unavailable") != nullptr;
+  state.environment_failure = false;
   state.routing_cancelled = true;
   std::memset(error, 0, sizeof(error));
   const int32_t cancelled = ocpn_portable_runtime_calculate_route(

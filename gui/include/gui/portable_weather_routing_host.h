@@ -1,6 +1,7 @@
 #ifndef GUI_PORTABLE_WEATHER_ROUTING_HOST_H_
 #define GUI_PORTABLE_WEATHER_ROUTING_HOST_H_
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -31,6 +32,9 @@ public:
       std::function<bool(PortableNavigationPosition*)> vessel_position,
       std::function<bool(PortableNavigationPosition*)> cursor_position,
       std::function<bool(int64_t*)> displayed_environment_time,
+      std::function<bool(double, double, const std::vector<int64_t>&,
+                         std::vector<uint8_t>*, wxString*)>
+          preflight_environment,
       double start_latitude, double start_longitude);
   ~PortableWeatherRoutingHost();
   bool Show(wxString* error);

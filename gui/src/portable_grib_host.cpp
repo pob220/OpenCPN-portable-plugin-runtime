@@ -2603,7 +2603,6 @@ bool PortableGribHost::Impl::SampleBatch(
   const time_t tolerance = std::max<time_t>(1800, minimum_step / 2 + 60);
   std::vector<wxString> request_times;
   request_times.reserve(requests.size());
-  std::set<wxString> needed_times;
   for (const auto& request : requests) {
     const auto closest = std::min_element(
         parsed_times.begin(), parsed_times.end(),
@@ -2617,13 +2616,6 @@ bool PortableGribHost::Impl::SampleBatch(
       continue;
     }
     request_times.push_back(closest->key);
-    needed_times.insert(closest->key);
-  }
-  for (const auto& time : needed_times) {
-    if (routing_frames.count(time)) continue;
-    DecodedEnvironmentFrame decoded;
-    if (!DecodeRoutingFrame(source, time, &decoded, error)) return false;
-    CacheRoutingFrame(time, decoded);
   }
 
   auto nearest = [this](const DecodedEnvironmentFrame& frame,
@@ -2692,7 +2684,19 @@ bool PortableGribHost::Impl::SampleBatch(
       results->push_back(sample);
       continue;
     }
-    const auto cached = routing_frames.find(request_times[index]);
+    auto cached = routing_frames.find(request_times[index]);
+    if (cached == routing_frames.end()) {
+      // Decode and consume a frame before moving to another requested time.
+      // A batch used for completed-route statistics can span far more times
+      // than the bounded routing-frame cache. Preloading the whole batch used
+      // to evict its earliest frames before they were sampled, making a valid
+      // route fail with "routing frame cache became inconsistent".
+      DecodedEnvironmentFrame decoded;
+      if (!DecodeRoutingFrame(source, request_times[index], &decoded, error))
+        return false;
+      CacheRoutingFrame(request_times[index], decoded);
+      cached = routing_frames.find(request_times[index]);
+    }
     if (cached == routing_frames.end()) {
       if (error) *error = "iGRIB routing frame cache became inconsistent";
       return false;
@@ -2733,7 +2737,8 @@ bool PortableGribHost::Impl::DisplayedTime(int64_t* unix_time) const {
   if (!unix_time || !timeline) return false;
   std::lock_guard<std::mutex> lock(field_mutex);
   const int selection = timeline->GetSelection();
-  if (selection == wxNOT_FOUND || static_cast<size_t>(selection) >= times.size())
+  if (selection == wxNOT_FOUND ||
+      static_cast<size_t>(selection) >= times.size())
     return false;
   wxDateTime parsed;
   if (!ParseGribTime(times[selection], &parsed)) return false;

@@ -265,8 +265,11 @@ public:
        std::function<std::vector<PortableNavigationPosition>()> waypoints,
        std::function<bool(PortableNavigationPosition*)> vessel,
        std::function<bool(PortableNavigationPosition*)> cursor,
-       std::function<bool(int64_t*)> environment_time, double latitude,
-       double longitude)
+       std::function<bool(int64_t*)> environment_time,
+       std::function<bool(double, double, const std::vector<int64_t>&,
+                          std::vector<uint8_t>*, wxString*)>
+           environment_preflight,
+       double latitude, double longitude)
       : parent(parent_value),
         runtime(runtime_value),
         runtime_mutex(std::move(runtime_mutex_value)),
@@ -276,6 +279,7 @@ public:
         vessel_position(std::move(vessel)),
         cursor_position(std::move(cursor)),
         displayed_environment_time(std::move(environment_time)),
+        preflight_environment(std::move(environment_preflight)),
         initial_latitude(latitude),
         initial_longitude(longitude) {}
   ~Impl() { Shutdown(); }
@@ -320,6 +324,9 @@ private:
   std::function<bool(PortableNavigationPosition*)> vessel_position;
   std::function<bool(PortableNavigationPosition*)> cursor_position;
   std::function<bool(int64_t*)> displayed_environment_time;
+  std::function<bool(double, double, const std::vector<int64_t>&,
+                     std::vector<uint8_t>*, wxString*)>
+      preflight_environment;
   std::vector<PortableNavigationPosition> waypoints;
   double initial_latitude = 0.0;
   double initial_longitude = 0.0;
@@ -1093,6 +1100,12 @@ void PortableWeatherRoutingHost::Impl::Start() {
   const int64_t departure_step_seconds =
       static_cast<int64_t>(departure_spacing->GetValue()) * 3600;
   const unsigned parallel_worker_limit = departure_workers->GetValue();
+  std::vector<int64_t> departure_times;
+  departure_times.reserve(run_count);
+  for (unsigned run = 0; run < run_count; ++run)
+    departure_times.push_back(request.departure_unix_time +
+                              static_cast<int64_t>(run) *
+                                  departure_step_seconds);
   SaveSettings();
   cancelled.store(false);
   calculate->Enable(false);
@@ -1108,12 +1121,36 @@ void PortableWeatherRoutingHost::Impl::Start() {
   best_departure_result = std::numeric_limits<size_t>::max();
   if (departure_results) departure_results->DeleteAllItems();
   gauge->SetValue(0);
-  status->SetLabel("Starting portable route engine…");
+  status->SetLabel("Checking iGRIB coverage for requested departures…");
   departure_runs.store(run_count);
   departures_completed.store(0);
   worker = std::thread([this, request, run_count, departure_step_seconds,
+                        departure_times = std::move(departure_times),
                         parallel_worker_limit, selected_performance] {
     std::vector<DepartureResult> results(run_count);
+    for (unsigned run = 0; run < run_count; ++run)
+      results[run].requested_departure_unix_time = departure_times[run];
+    std::vector<uint8_t> environmental_availability;
+    wxString preflight_error;
+    if (!preflight_environment(request.start_latitude, request.start_longitude,
+                               departure_times, &environmental_availability,
+                               &preflight_error) ||
+        environmental_availability.size() != departure_times.size()) {
+      if (preflight_error.empty())
+        preflight_error =
+            "environmental provider returned the wrong preflight batch size";
+      for (auto& result : results)
+        result.error = "Environmental preflight failed: " + preflight_error;
+      departures_completed.store(run_count);
+    } else {
+      for (unsigned run = 0; run < run_count; ++run) {
+        if ((environmental_availability[run] & 1) != 0) continue;
+        results[run].error =
+            "iGRIB has no wind data at the start position for departure " +
+            FormatUtc(departure_times[run]);
+        departures_completed.fetch_add(1);
+      }
+    }
     std::atomic<unsigned> next_departure{0};
     const unsigned parallelism = std::min(parallel_worker_limit, run_count);
     std::vector<std::thread> workers;
@@ -1126,11 +1163,10 @@ void PortableWeatherRoutingHost::Impl::Start() {
           const unsigned run = next_departure.fetch_add(1);
           if (run >= run_count) break;
           auto& departure_result = results[run];
+          if (!departure_result.error.empty()) continue;
           auto candidate_request = request;
           candidate_request.departure_unix_time +=
               static_cast<int64_t>(run) * departure_step_seconds;
-          departure_result.requested_departure_unix_time =
-              candidate_request.departure_unix_time;
           std::vector<ocpn_portable_polar_grid> polar_views;
           polar_views.reserve(selected_performance->grids.size());
           for (const auto& grid : selected_performance->grids) {
@@ -1556,13 +1592,17 @@ PortableWeatherRoutingHost::PortableWeatherRoutingHost(
     std::function<std::vector<PortableNavigationPosition>()> list_waypoints,
     std::function<bool(PortableNavigationPosition*)> vessel_position,
     std::function<bool(PortableNavigationPosition*)> cursor_position,
-    std::function<bool(int64_t*)> displayed_environment_time, double latitude,
-    double longitude)
+    std::function<bool(int64_t*)> displayed_environment_time,
+    std::function<bool(double, double, const std::vector<int64_t>&,
+                       std::vector<uint8_t>*, wxString*)>
+        preflight_environment,
+    double latitude, double longitude)
     : m_impl(std::make_unique<Impl>(
           parent, runtime, std::move(runtime_mutex), package_root,
           std::move(summary), std::move(list_waypoints),
           std::move(vessel_position), std::move(cursor_position),
-          std::move(displayed_environment_time), latitude, longitude)) {}
+          std::move(displayed_environment_time),
+          std::move(preflight_environment), latitude, longitude)) {}
 PortableWeatherRoutingHost::~PortableWeatherRoutingHost() = default;
 bool PortableWeatherRoutingHost::Show(wxString* error) {
   return m_impl->Show(error);

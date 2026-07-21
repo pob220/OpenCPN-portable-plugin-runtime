@@ -22,7 +22,7 @@ wasmtime::component::bindgen!({
     world: "plugin-world",
 });
 
-const HOST_ABI_VERSION: u32 = 8;
+const HOST_ABI_VERSION: u32 = 9;
 const ROUTE_INSPECTION_POINT_LIMIT: usize = 200_000;
 const ROUTE_INSPECTION_LINE_LIMIT: usize = 10_000;
 const ERROR_TEXT_LIMIT: usize = 4096;
@@ -248,6 +248,8 @@ pub struct HostCallbacks {
             *const EnvironmentSampleRequest,
             usize,
             *mut EnvironmentSample,
+            usize,
+            *mut c_char,
             usize,
         ) -> i32,
     >,
@@ -660,6 +662,7 @@ impl opencpn::portable::host::Host for HostState {
             })
             .collect();
         let mut output = vec![EnvironmentSample::default(); input.len()];
+        let mut error = vec![0_u8; ERROR_TEXT_LIMIT];
         let code = unsafe {
             callback(
                 self.callbacks.user_data,
@@ -667,10 +670,21 @@ impl opencpn::portable::host::Host for HostState {
                 input.len(),
                 output.as_mut_ptr(),
                 output.len(),
+                error.as_mut_ptr().cast(),
+                error.len(),
             )
         };
         if code != 0 {
-            return Err(callback_error("environment-sample-batch", code));
+            let error_len = error
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(error.len());
+            let detail = String::from_utf8_lossy(&error[..error_len]);
+            return Err(if detail.is_empty() {
+                callback_error("environment-sample-batch", code)
+            } else {
+                format!("environment provider failed: {detail}")
+            });
         }
         Ok(output
             .into_iter()

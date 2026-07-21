@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define OCPN_PORTABLE_HOST_ABI_VERSION 8u
+#define OCPN_PORTABLE_HOST_ABI_VERSION 9u
 
 typedef struct ocpn_portable_runtime ocpn_portable_runtime;
 
@@ -179,7 +179,7 @@ typedef struct ocpn_portable_host_callbacks {
   int32_t (*environment_sample_batch)(
       void* user_data, const ocpn_portable_environment_sample_request* requests,
       size_t request_count, ocpn_portable_environment_sample* results,
-      size_t result_count);
+      size_t result_count, char* error, size_t error_capacity);
   void (*routing_progress)(void* user_data, uint8_t percent,
                            const char* message, size_t message_len);
   uint8_t (*routing_cancelled)(void* user_data);

@@ -68,6 +68,15 @@ wxString FromUtf8(const char* data, size_t length) {
   return wxString::FromUTF8(data, length);
 }
 
+void CopyUtf8(const wxString& value, char* output, size_t capacity) {
+  if (!output || capacity == 0) return;
+  const wxScopedCharBuffer encoded = value.ToUTF8();
+  const size_t available = encoded.data() ? encoded.length() : 0;
+  const size_t copied = std::min(available, capacity - 1);
+  if (copied) std::memcpy(output, encoded.data(), copied);
+  output[copied] = '\0';
+}
+
 bool IsSafeName(const wxString& value) {
   if (value.empty() || value.length() > 128) return false;
   for (const auto ch : value) {
@@ -204,6 +213,11 @@ public:
     return instance.permissions.count(permission) != 0;
   }
 
+  bool SampleEnvironment(
+      Instance& consumer,
+      const std::vector<PortableEnvironmentRequest>& requests,
+      std::vector<PortableEnvironmentSample>* results, wxString* error);
+
   void DeliverJobEvent(const wxString& plugin_id, const wxString& job_id,
                        uint32_t kind, uint8_t progress,
                        const wxString& message = wxString());
@@ -253,7 +267,7 @@ public:
   static int32_t EnvironmentSampleBatch(
       void* user_data, const ocpn_portable_environment_sample_request* requests,
       size_t request_count, ocpn_portable_environment_sample* results,
-      size_t result_count);
+      size_t result_count, char* error, size_t error_capacity);
   static void RoutingProgress(void* user_data, uint8_t percent,
                               const char* message, size_t message_len);
   static uint8_t RoutingCancelled(void* user_data);
@@ -603,6 +617,27 @@ int32_t PortablePluginManager::Impl::OpenWeatherRouting(void* user_data) {
       }
       return false;
     };
+    auto preflight = [owner = instance->owner, instance](
+                         double latitude, double longitude,
+                         const std::vector<int64_t>& departure_times,
+                         std::vector<uint8_t>* availability, wxString* error) {
+      if (!availability) {
+        if (error) *error = "invalid environmental preflight output";
+        return false;
+      }
+      std::vector<PortableEnvironmentRequest> requests;
+      requests.reserve(departure_times.size());
+      for (const auto time : departure_times)
+        requests.push_back({latitude, longitude, time});
+      std::vector<PortableEnvironmentSample> samples;
+      if (!owner->SampleEnvironment(*instance, requests, &samples, error))
+        return false;
+      availability->clear();
+      availability->reserve(samples.size());
+      for (const auto& sample : samples)
+        availability->push_back(sample.available);
+      return true;
+    };
     const double latitude = std::isfinite(gLat) ? gLat : 53.0;
     const double longitude = std::isfinite(gLon) ? gLon : -5.0;
     instance->weather_routing_host =
@@ -610,37 +645,65 @@ int32_t PortablePluginManager::Impl::OpenWeatherRouting(void* user_data) {
             instance->owner->plugin_manager->GetParentFrame(),
             instance->runtime, instance->runtime_mutex, instance->package_root,
             std::move(summary), std::move(waypoints), std::move(vessel),
-            std::move(cursor), std::move(displayed_time), latitude, longitude);
+            std::move(cursor), std::move(displayed_time), std::move(preflight),
+            latitude, longitude);
   }
   wxString error;
   return instance->weather_routing_host->Show(&error) ? 0 : -2;
 }
 
-int32_t PortablePluginManager::Impl::EnvironmentSampleBatch(
-    void* user_data, const ocpn_portable_environment_sample_request* requests,
-    size_t request_count, ocpn_portable_environment_sample* results,
-    size_t result_count) {
-  auto* instance = static_cast<Instance*>(user_data);
-  if (!instance || !instance->owner ||
-      !instance->owner->HasPermission(*instance, "environment.consume") ||
-      request_count != result_count || (!requests && request_count) ||
-      (!results && result_count) || request_count > 100000)
-    return -1;
-  std::vector<PortableEnvironmentRequest> input;
-  input.reserve(request_count);
-  for (size_t i = 0; i < request_count; ++i)
-    input.push_back(
-        {requests[i].latitude, requests[i].longitude, requests[i].unix_time});
-  for (const auto& provider : instance->owner->instances) {
+bool PortablePluginManager::Impl::SampleEnvironment(
+    Instance& consumer, const std::vector<PortableEnvironmentRequest>& requests,
+    std::vector<PortableEnvironmentSample>* results, wxString* error) {
+  if (!HasPermission(consumer, "environment.consume")) {
+    if (error) *error = "environment.consume permission was not granted";
+    return false;
+  }
+  wxString last_error =
+      "no enabled portable environmental-data provider is available";
+  for (const auto& provider : instances) {
     if (!provider->enabled || provider->failed ||
         !provider->provides.count("org.opencpn.environment.provider") ||
         !provider->environmental_host)
       continue;
     std::vector<PortableEnvironmentSample> sampled;
-    wxString error;
-    if (!provider->environmental_host->SampleBatch(input, &sampled, &error) ||
-        sampled.size() != result_count)
+    wxString provider_error;
+    if (!provider->environmental_host->SampleBatch(requests, &sampled,
+                                                   &provider_error)) {
+      if (!provider_error.empty()) last_error = provider_error;
       continue;
+    }
+    if (sampled.size() != requests.size()) {
+      last_error = "environmental-data provider returned the wrong batch size";
+      continue;
+    }
+    *results = std::move(sampled);
+    return true;
+  }
+  if (error) *error = last_error;
+  return false;
+}
+
+int32_t PortablePluginManager::Impl::EnvironmentSampleBatch(
+    void* user_data, const ocpn_portable_environment_sample_request* requests,
+    size_t request_count, ocpn_portable_environment_sample* results,
+    size_t result_count, char* error, size_t error_capacity) {
+  auto* instance = static_cast<Instance*>(user_data);
+  if (!instance || !instance->owner || request_count != result_count ||
+      (!requests && request_count) || (!results && result_count) ||
+      request_count > 100000) {
+    CopyUtf8("invalid environmental sample request", error, error_capacity);
+    return -1;
+  }
+  std::vector<PortableEnvironmentRequest> input;
+  input.reserve(request_count);
+  for (size_t i = 0; i < request_count; ++i)
+    input.push_back(
+        {requests[i].latitude, requests[i].longitude, requests[i].unix_time});
+  std::vector<PortableEnvironmentSample> sampled;
+  wxString provider_error;
+  if (instance->owner->SampleEnvironment(*instance, input, &sampled,
+                                         &provider_error)) {
     for (size_t i = 0; i < result_count; ++i) {
       results[i] = {sampled[i].wind_u_knots,       sampled[i].wind_v_knots,
                     sampled[i].current_u_knots,    sampled[i].current_v_knots,
@@ -648,6 +711,9 @@ int32_t PortablePluginManager::Impl::EnvironmentSampleBatch(
     }
     return 0;
   }
+  CopyUtf8(provider_error, error, error_capacity);
+  wxLogWarning("Portable environmental sample batch failed for %s: %s",
+               instance->id, provider_error);
   return -2;
 }
 
