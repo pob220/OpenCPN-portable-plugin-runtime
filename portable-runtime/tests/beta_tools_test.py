@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import json
 import pathlib
 import re
 import subprocess
@@ -88,6 +89,49 @@ class BetaToolsTest(unittest.TestCase):
             callback.index("environmental_host->Show"),
         )
         self.assertIn("current component action has returned", callback)
+
+    def test_igrib_surface_owns_compact_layout_icons_and_generator_presets(self):
+        package = ROOT / "portable-plugins/igrib/package"
+        surface = json.loads((package / "igrib-viewer.ui.json").read_text())
+        manifest = json.loads((package / "manifest.json").read_text())
+
+        self.assertEqual(
+            surface["layout"]["primary_field_rows"],
+            [["wind", "wave", "current"],
+             ["pressure", "air-temperature"]],
+        )
+        controls = {item["id"]: item for item in surface["controls"]}
+        for identifier in (
+            "previous", "next", "play", "now", "open", "settings",
+            "weather-table", "download", "generate", "cancel",
+        ):
+            resource = controls[identifier]["icon_resource"]
+            self.assertTrue(resource.startswith("resources/controls/"))
+            self.assertIn(resource, manifest["resources"])
+
+        generator = surface["generator"]
+        self.assertEqual(
+            [item["label"] for item in generator["area_presets"]],
+            [
+                "Custom bbox", "Current chart area",
+                "Irish Sea / North Channel", "Western English Channel",
+                "North Sea", "Bay of Biscay",
+                "Gulf Stream / Florida Straits",
+                "US East Coast / Gulf Stream", "Caribbean",
+            ],
+        )
+        self.assertEqual(
+            {item["id"] for item in generator["weather_presets"]},
+            {"minimal", "routing", "marine"},
+        )
+
+        host = (ROOT / "gui/src/portable_environment_host.cpp").read_text()
+        for provider_id in (
+            "copernicus_nws", "copernicus_global", "noaa_rtofs_global",
+        ):
+            self.assertNotIn(provider_id, host)
+        self.assertIn("SurfaceAreaPresets(surface_definition)", host)
+        self.assertIn("SurfaceWeatherPresets(surface_definition)", host)
 
     def test_shell_entry_points_have_working_help(self):
         for script in (

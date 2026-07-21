@@ -46,6 +46,16 @@
   },
   "resources": [
     "resources/igrib.svg",
+    "resources/controls/prev.svg",
+    "resources/controls/next.svg",
+    "resources/controls/play.svg",
+    "resources/controls/stop.svg",
+    "resources/controls/now.svg",
+    "resources/controls/openfile.svg",
+    "resources/controls/setting.svg",
+    "resources/controls/curdata.svg",
+    "resources/controls/request.svg",
+    "resources/controls/ncurdata.svg",
     "resources/fault-test.svg",
     "resources/http-download.svg",
     "ui/igrib-viewer.ui.json"

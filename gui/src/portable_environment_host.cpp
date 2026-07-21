@@ -34,8 +34,12 @@ extern char** environ;
 #endif
 
 #include <wx/button.h>
+#ifdef ocpnUSE_wxBitmapBundle
+#include <wx/bmpbndl.h>
+#endif
 #include <wx/checkbox.h>
 #include <wx/choice.h>
+#include <wx/collpane.h>
 #include <wx/clrpicker.h>
 #include <wx/datetime.h>
 #include <wx/dialog.h>
@@ -68,6 +72,7 @@ extern char** environ;
 #include <wx/wfstream.h>
 
 #include "model/base_platform.h"
+#include "chcanv.h"
 #include "navutil.h"
 #include "ocpn_portable_runtime.h"
 #include "ocpndc.h"
@@ -99,6 +104,8 @@ bool OptionalJsonBool(wxJSONValue object, const wxString& key) {
   return object.IsObject() && object.HasMember(key) && object[key].IsBool() &&
          object[key].AsBool();
 }
+
+bool IsSafeSurfaceResource(const wxString& value);
 
 struct Sample {
   double latitude = 0.0;
@@ -505,6 +512,14 @@ bool LoadDeclarativeSurface(const wxString& path, wxJSONValue* output,
       *error = "declarative UI contains an invalid or duplicate control";
       return false;
     }
+    for (const auto* member : {"icon_resource", "alternate_icon_resource"}) {
+      if (control.HasMember(member) &&
+          (!control[member].IsString() ||
+           !IsSafeSurfaceResource(control[member].AsString()))) {
+        *error = "declarative UI contains an unsafe control resource";
+        return false;
+      }
+    }
   }
   if (!identifiers.count("timeline") || !identifiers.count("open")) {
     *error = "environmental surface omits required timeline/open controls";
@@ -542,6 +557,59 @@ bool LoadDeclarativeSurface(const wxString& path, wxJSONValue* output,
       *error = "environmental surface has an invalid generator declaration";
       return false;
     }
+    auto area_presets = generator["area_presets"];
+    if (!area_presets.IsArray() || area_presets.Size() == 0 ||
+        area_presets.Size() > 32) {
+      *error = "environmental surface has an invalid area-preset catalogue";
+      return false;
+    }
+    std::set<wxString> area_ids;
+    for (int index = 0; index < area_presets.Size(); ++index) {
+      auto preset = area_presets[index];
+      const wxString id = preset["id"].AsString();
+      const wxString kind = preset["kind"].AsString();
+      if (!preset.IsObject() || !IsSchemaIdentifier(id) ||
+          !area_ids.insert(id).second || !preset["label"].IsString() ||
+          (kind != "custom" && kind != "current-view" && kind != "bbox")) {
+        *error = "environmental surface has an invalid area preset";
+        return false;
+      }
+      if (kind == "bbox") {
+        const auto is_number = [](const wxJSONValue& value) {
+          return value.IsDouble() || value.IsInt();
+        };
+        if (!is_number(preset["west"]) || !is_number(preset["south"]) ||
+            !is_number(preset["east"]) || !is_number(preset["north"]) ||
+            preset["west"].AsDouble() >= preset["east"].AsDouble() ||
+            preset["south"].AsDouble() >= preset["north"].AsDouble()) {
+          *error = "environmental surface has an invalid area-preset bbox";
+          return false;
+        }
+      }
+    }
+    auto weather_presets = generator["weather_presets"];
+    if (!weather_presets.IsArray() || weather_presets.Size() == 0 ||
+        weather_presets.Size() > 16) {
+      *error = "environmental surface has an invalid weather-preset catalogue";
+      return false;
+    }
+    std::set<wxString> weather_preset_ids;
+    int weather_preset_defaults = 0;
+    for (int index = 0; index < weather_presets.Size(); ++index) {
+      auto preset = weather_presets[index];
+      const wxString id = preset["id"].AsString();
+      if (!preset.IsObject() || !IsSchemaIdentifier(id) ||
+          !weather_preset_ids.insert(id).second ||
+          !preset["label"].IsString()) {
+        *error = "environmental surface has an invalid weather preset";
+        return false;
+      }
+      weather_preset_defaults += OptionalJsonBool(preset, "default") ? 1 : 0;
+    }
+    if (weather_preset_defaults > 1) {
+      *error = "environmental surface has multiple default weather presets";
+      return false;
+    }
     std::set<wxString> credential_schemes;
     auto credentials = definition["credential_catalog"];
     if (!credentials.IsObject()) {
@@ -573,6 +641,29 @@ bool LoadDeclarativeSurface(const wxString& path, wxJSONValue* output,
           !field["presentations"].IsArray() || !groups.insert(id).second) {
         *error = "environmental surface has an invalid field group";
         return false;
+      }
+    }
+    if (definition["layout"]["primary_field_rows"].IsArray()) {
+      std::set<wxString> primary_groups;
+      auto rows = definition["layout"]["primary_field_rows"];
+      if (rows.Size() == 0 || rows.Size() > 8) {
+        *error = "environmental surface has an invalid primary field layout";
+        return false;
+      }
+      for (int row = 0; row < rows.Size(); ++row) {
+        if (!rows[row].IsArray() || rows[row].Size() == 0 ||
+            rows[row].Size() > 6) {
+          *error = "environmental surface has an invalid primary field row";
+          return false;
+        }
+        for (int item = 0; item < rows[row].Size(); ++item) {
+          const wxString id = rows[row][item].AsString();
+          if (!rows[row][item].IsString() || !groups.count(id) ||
+              !primary_groups.insert(id).second) {
+            *error = "environmental surface primary field layout is invalid";
+            return false;
+          }
+        }
       }
     }
     for (const auto* category : {"weather", "waves", "current"}) {
@@ -663,6 +754,71 @@ wxString SurfaceControlLabel(const wxJSONValue& definition,
   return fallback;
 }
 
+wxJSONValue SurfaceControlDefinition(const wxJSONValue& definition,
+                                     const wxString& identifier) {
+  wxJSONValue copy = definition;
+  auto controls = copy["controls"];
+  for (int i = 0; i < controls.Size(); ++i)
+    if (controls[i]["id"].AsString() == identifier) return controls[i];
+  return {};
+}
+
+bool IsSafeSurfaceResource(const wxString& value) {
+  if (value.empty()) return false;
+  wxFileName path(value);
+  if (path.IsAbsolute()) return false;
+  for (const auto& directory : path.GetDirs())
+    if (directory == "." || directory == "..") return false;
+  return value.Find('\\') == wxNOT_FOUND;
+}
+
+bool ApplySurfaceButtonPresentation(wxButton* button,
+                                    const wxJSONValue& definition,
+                                    const wxString& identifier,
+                                    const wxString& package_root,
+                                    bool alternate = false) {
+  if (!button) return false;
+  auto control = SurfaceControlDefinition(definition, identifier);
+  const wxString member = alternate ? "alternate_icon_resource"
+                                    : "icon_resource";
+  const wxString resource = OptionalJsonString(control, member);
+  if (!IsSafeSurfaceResource(resource)) {
+    wxLogWarning("Portable surface control %s has no safe %s", identifier,
+                 member);
+    return false;
+  }
+  wxFileName icon(package_root + wxFILE_SEP_PATH + resource);
+  icon.Normalize(wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE);
+  if (!icon.FileExists()) {
+    wxLogWarning("Portable surface control %s icon is missing: %s", identifier,
+                 icon.GetFullPath());
+    return false;
+  }
+#ifdef ocpnUSE_wxBitmapBundle
+  const wxSize size(32, 32);
+  const auto bundle = wxBitmapBundle::FromSVGFile(icon.GetFullPath(), size);
+  if (!bundle.IsOk()) {
+    wxLogWarning("Portable surface control %s icon could not be decoded: %s",
+                 identifier, icon.GetFullPath());
+    return false;
+  }
+  button->SetBitmap(bundle);
+  button->SetBitmapPosition(wxLEFT);
+  if (OptionalJsonBool(control, "icon_only")) {
+    button->SetBitmapMargins(0, 0);
+    button->SetLabel(wxEmptyString);
+    button->SetMinSize(wxSize(42, 38));
+  } else {
+    button->SetBitmapMargins(4, 0);
+    button->SetWindowStyleFlag(button->GetWindowStyleFlag() | wxBU_LEFT);
+  }
+  return true;
+#else
+  wxUnusedVar(alternate);
+  return false;
+#endif
+}
+
 struct EnvironmentalProviderOption {
   wxString id;
   wxString label;
@@ -681,6 +837,57 @@ struct EnvironmentalProviderOption {
   wxString mode_request_key;
   std::vector<std::pair<wxString, wxString>> mode_options;
 };
+
+struct EnvironmentalAreaPreset {
+  wxString id;
+  wxString label;
+  wxString kind;
+  double west = 0.0;
+  double south = 0.0;
+  double east = 0.0;
+  double north = 0.0;
+  wxString current_provider;
+};
+
+std::vector<EnvironmentalAreaPreset> SurfaceAreaPresets(
+    const wxJSONValue& definition) {
+  std::vector<EnvironmentalAreaPreset> result;
+  wxJSONValue copy = definition;
+  auto presets = copy["generator"]["area_presets"];
+  for (int index = 0; index < presets.Size(); ++index) {
+    auto value = presets[index];
+    EnvironmentalAreaPreset preset;
+    preset.id = value["id"].AsString();
+    preset.label = value["label"].AsString();
+    preset.kind = value["kind"].AsString();
+    preset.west = value["west"].AsDouble();
+    preset.south = value["south"].AsDouble();
+    preset.east = value["east"].AsDouble();
+    preset.north = value["north"].AsDouble();
+    preset.current_provider = OptionalJsonString(value, "current_provider");
+    result.push_back(std::move(preset));
+  }
+  return result;
+}
+
+struct EnvironmentalWeatherPreset {
+  wxString id;
+  wxString label;
+  bool selected_by_default = false;
+};
+
+std::vector<EnvironmentalWeatherPreset> SurfaceWeatherPresets(
+    const wxJSONValue& definition) {
+  std::vector<EnvironmentalWeatherPreset> result;
+  wxJSONValue copy = definition;
+  auto presets = copy["generator"]["weather_presets"];
+  for (int index = 0; index < presets.Size(); ++index) {
+    auto value = presets[index];
+    result.push_back({value["id"].AsString(), value["label"].AsString(),
+                      OptionalJsonBool(value, "default")});
+  }
+  return result;
+}
 
 std::vector<EnvironmentalProviderOption> SurfaceProviderOptions(
     const wxJSONValue& definition, const wxString& category) {
@@ -1099,6 +1306,7 @@ private:
   wxString displayed_time;
   uint64_t dataset_revision = 0;
   wxString generated_output_path;
+  bool generated_open_after = true;
   wxString last_grib_directory;
   std::vector<wxString> times;
   std::map<wxString, std::vector<Sample>> fields;
@@ -1262,8 +1470,17 @@ void PortableEnvironmentHost::Impl::CreateFrame() {
                  controller_error);
   }
   surface_title = surface_definition["title"].AsString();
+  auto layout = surface_definition["layout"];
+  const int preferred_width =
+      layout["preferred_width"].IsInt()
+          ? std::clamp(layout["preferred_width"].AsInt(), 640, 1600)
+          : 1000;
+  const int preferred_height =
+      layout["preferred_height"].IsInt()
+          ? std::clamp(layout["preferred_height"].AsInt(), 240, 1000)
+          : 420;
   frame = new wxFrame(parent, wxID_ANY, surface_title, wxDefaultPosition,
-                      wxSize(1000, 520),
+                      wxSize(preferred_width, preferred_height),
                       wxDEFAULT_FRAME_STYLE | wxFRAME_FLOAT_ON_PARENT);
   auto* root = new wxBoxSizer(wxVERTICAL);
   file_label = new wxStaticText(
@@ -1275,15 +1492,29 @@ void PortableEnvironmentHost::Impl::CreateFrame() {
   auto* center = new wxBoxSizer(wxHORIZONTAL);
   auto* controls = new wxBoxSizer(wxVERTICAL);
   auto* timeline_row = new wxBoxSizer(wxHORIZONTAL);
-  auto* previous =
-      new wxButton(frame, wxID_ANY, "◀", wxDefaultPosition, wxSize(42, -1));
+  auto* previous = new wxButton(frame, wxID_ANY, "◀", wxDefaultPosition,
+                                wxSize(42, -1));
   timeline = new wxChoice(frame, wxID_ANY);
-  auto* next =
-      new wxButton(frame, wxID_ANY, "▶", wxDefaultPosition, wxSize(42, -1));
+  auto* next = new wxButton(frame, wxID_ANY, "▶", wxDefaultPosition,
+                            wxSize(42, -1));
   play_button = new wxButton(
       frame, wxID_ANY, SurfaceControlLabel(surface_definition, "play", "Play"));
   auto* now = new wxButton(
       frame, wxID_ANY, SurfaceControlLabel(surface_definition, "now", "Now"));
+  previous->SetToolTip(
+      SurfaceControlLabel(surface_definition, "previous", "Previous forecast"));
+  next->SetToolTip(
+      SurfaceControlLabel(surface_definition, "next", "Next forecast"));
+  play_button->SetToolTip(
+      SurfaceControlLabel(surface_definition, "play", "Play"));
+  now->SetToolTip(SurfaceControlLabel(surface_definition, "now", "Now"));
+  ApplySurfaceButtonPresentation(previous, surface_definition, "previous",
+                                 package_root);
+  ApplySurfaceButtonPresentation(next, surface_definition, "next",
+                                 package_root);
+  ApplySurfaceButtonPresentation(play_button, surface_definition, "play",
+                                 package_root);
+  ApplySurfaceButtonPresentation(now, surface_definition, "now", package_root);
   timeline_row->Add(previous, 0, wxRIGHT, 5);
   timeline_row->Add(timeline, 1, wxRIGHT, 5);
   timeline_row->Add(next, 0, wxRIGHT, 5);
@@ -1302,24 +1533,102 @@ void PortableEnvironmentHost::Impl::CreateFrame() {
   }
   if (level_choice->IsEmpty()) level_choice->Append("Surface");
   level_choice->SetSelection(0);
-  selection_row->Add(new wxStaticText(frame, wxID_ANY, "Timeline"), 0,
+  selection_row->Add(new wxStaticText(
+                         frame, wxID_ANY,
+                         SurfaceControlLabel(surface_definition, "time-slider",
+                                             "Timeline")),
+                     0,
                      wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
   selection_row->Add(time_slider, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, 12);
-  selection_row->Add(new wxStaticText(frame, wxID_ANY, "Level"), 0,
+  selection_row->Add(new wxStaticText(
+                         frame, wxID_ANY,
+                         SurfaceControlLabel(surface_definition, "level",
+                                             "Level")),
+                     0,
                      wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
   selection_row->Add(level_choice, 0, wxALIGN_CENTER_VERTICAL);
   controls->Add(selection_row, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 7);
 
   auto* data =
       new wxStaticBoxSizer(wxVERTICAL, frame, "Data at cursor position");
-  auto* values = new wxFlexGridSizer(2, 4, 12);
-  values->AddGrowableCol(1, 1);
+  std::set<wxString> primary_groups;
+  std::vector<std::vector<wxString>> primary_row_ids;
+  auto primary_rows = layout["primary_field_rows"];
+  if (primary_rows.IsArray()) {
+    for (int row = 0; row < primary_rows.Size(); ++row) {
+      std::vector<wxString> ids;
+      for (int item = 0; item < primary_rows[row].Size(); ++item) {
+        const wxString id = primary_rows[row][item].AsString();
+        if (FindFieldGroup(id) && primary_groups.insert(id).second)
+          ids.push_back(id);
+      }
+      if (!ids.empty()) primary_row_ids.push_back(std::move(ids));
+    }
+  }
+  if (primary_groups.empty()) {
+    for (const auto& fallback :
+         std::vector<std::vector<wxString>>{{"wind", "pressure", "wave"},
+                                            {"current", "air-temperature"}}) {
+      std::vector<wxString> ids;
+      for (const auto& id : fallback)
+        if (FindFieldGroup(id) && primary_groups.insert(id).second)
+          ids.push_back(id);
+      if (!ids.empty()) primary_row_ids.push_back(std::move(ids));
+    }
+  }
   for (auto& group : field_groups) {
+    if (!primary_groups.count(group.id)) continue;
     group.visible = new wxCheckBox(frame, wxID_ANY, group.label);
     group.visible->SetValue(group.default_visible);
     group.value = new wxStaticText(frame, wxID_ANY, "N/A");
-    values->Add(group.visible, 0, wxALIGN_CENTER_VERTICAL);
-    values->Add(group.value, 1, wxEXPAND | wxALIGN_CENTER_VERTICAL);
+  }
+  auto* primary_values = new wxBoxSizer(wxVERTICAL);
+  for (const auto& ids : primary_row_ids) {
+    auto* row = new wxBoxSizer(wxHORIZONTAL);
+    for (const auto& id : ids) {
+      auto* group = FindFieldGroup(id);
+      if (!group) continue;
+      auto* cell = new wxBoxSizer(wxHORIZONTAL);
+      cell->Add(group->visible, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+      cell->Add(group->value, 1, wxALIGN_CENTER_VERTICAL);
+      row->Add(cell, 1, wxEXPAND | wxRIGHT, 14);
+    }
+    primary_values->Add(row, 0, wxEXPAND | wxBOTTOM, 5);
+  }
+  data->Add(primary_values, 0, wxEXPAND | wxALL, 5);
+
+  std::vector<EnvironmentalFieldGroup*> additional_groups;
+  for (auto& group : field_groups)
+    if (!primary_groups.count(group.id)) additional_groups.push_back(&group);
+  if (!additional_groups.empty()) {
+    const wxString additional_label =
+        layout["additional_fields_label"].IsString()
+            ? layout["additional_fields_label"].AsString()
+            : "Additional fields";
+    auto* additional =
+        new wxCollapsiblePane(frame, wxID_ANY, additional_label);
+    wxWindow* pane = additional->GetPane();
+    auto* additional_values = new wxFlexGridSizer(4, 4, 12);
+    additional_values->AddGrowableCol(1, 1);
+    additional_values->AddGrowableCol(3, 1);
+    for (auto* group : additional_groups) {
+      group->visible = new wxCheckBox(pane, wxID_ANY, group->label);
+      group->visible->SetValue(group->default_visible);
+      group->value = new wxStaticText(pane, wxID_ANY, "N/A");
+      additional_values->Add(group->visible, 0, wxALIGN_CENTER_VERTICAL);
+      additional_values->Add(group->value, 1,
+                             wxEXPAND | wxALIGN_CENTER_VERTICAL);
+    }
+    pane->SetSizer(additional_values);
+    additional->Collapse(true);
+    additional->Bind(wxEVT_COLLAPSIBLEPANE_CHANGED,
+                     [this](wxCollapsiblePaneEvent&) {
+                       if (frame) {
+                         frame->Layout();
+                         frame->Fit();
+                       }
+                     });
+    data->Add(additional, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
   }
   auto assign_legacy = [&](const wxString& id, wxCheckBox** visible,
                            wxStaticText** value) {
@@ -1336,12 +1645,10 @@ void PortableEnvironmentHost::Impl::CreateFrame() {
   data_status = new wxStaticText(frame, wxID_ANY,
                                  "Open a GRIB file to inspect its fields");
   cursor_status = new wxStaticText(frame, wxID_ANY,
-                                   "Move the chart cursor to inspect data "
-                                   "(model output; not for navigation)");
-  data->Add(values, 0, wxEXPAND | wxALL, 5);
+                                   "Move the chart cursor to inspect data");
   data->Add(data_status, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
   data->Add(cursor_status, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
-  controls->Add(data, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 7);
+  controls->Add(data, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 7);
 
   progress = new wxGauge(frame, wxID_ANY, 100);
   progress->Hide();
@@ -1349,12 +1656,20 @@ void PortableEnvironmentHost::Impl::CreateFrame() {
   center->Add(controls, 1, wxEXPAND);
 
   auto* actions = new wxBoxSizer(wxVERTICAL);
-  open_button = new wxButton(frame, wxID_ANY, "Open GRIB");
-  auto* settings = new wxButton(frame, wxID_ANY, "Settings");
-  weather_table_button = new wxButton(frame, wxID_ANY, "Weather table");
-  auto* download = new wxButton(frame, wxID_ANY, "Download GRIB");
-  generate_button = new wxButton(frame, wxID_ANY, "Generate GRIB");
-  cancel_button = new wxButton(frame, wxID_ANY, "Cancel");
+  auto make_action = [&](const wxString& id, const wxString& fallback) {
+    auto* button = new wxButton(
+        frame, wxID_ANY, SurfaceControlLabel(surface_definition, id, fallback),
+        wxDefaultPosition, wxDefaultSize, wxBU_LEFT);
+    ApplySurfaceButtonPresentation(button, surface_definition, id,
+                                   package_root);
+    return button;
+  };
+  open_button = make_action("open", "Open GRIB");
+  auto* settings = make_action("settings", "Settings");
+  weather_table_button = make_action("weather-table", "Weather table");
+  auto* download = make_action("download", "Download GRIB");
+  generate_button = make_action("generate", "Generate GRIB");
+  cancel_button = make_action("cancel", "Cancel");
   cancel_button->Enable(false);
   for (auto* button : {open_button, settings, weather_table_button, download,
                        generate_button, cancel_button})
@@ -1362,6 +1677,7 @@ void PortableEnvironmentHost::Impl::CreateFrame() {
   center->Add(actions, 0, wxEXPAND | wxALL, 7);
   root->Add(center, 1, wxEXPAND);
   frame->SetSizer(root);
+  frame->SetMinSize(wxSize(700, 260));
 
   frame->Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent& event) {
     if (event.CanVeto()) {
@@ -1400,10 +1716,15 @@ void PortableEnvironmentHost::Impl::CreateFrame() {
   play_button->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
     if (playback_timer.IsRunning()) {
       playback_timer.Stop();
-      play_button->SetLabel("Play");
+      play_button->SetLabel(
+          SurfaceControlLabel(surface_definition, "play", "Play"));
+      ApplySurfaceButtonPresentation(play_button, surface_definition, "play",
+                                     package_root);
     } else if (!times.empty()) {
       playback_timer.Start(playback_interval_ms);
       play_button->SetLabel("Pause");
+      ApplySurfaceButtonPresentation(play_button, surface_definition, "play",
+                                     package_root, true);
     }
   });
   timeline->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
@@ -2647,7 +2968,12 @@ void PortableEnvironmentHost::Impl::OnPlaybackTimer(wxTimerEvent&) {
   const int selected = time_slider ? time_slider->GetValue() : 0;
   if (!loop_playback && selected >= maximum) {
     playback_timer.Stop();
-    if (play_button) play_button->SetLabel("Play");
+    if (play_button) {
+      play_button->SetLabel(
+          SurfaceControlLabel(surface_definition, "play", "Play"));
+      ApplySurfaceButtonPresentation(play_button, surface_definition, "play",
+                                     package_root);
+    }
     return;
   }
   int next = selected + 1;
@@ -2977,12 +3303,13 @@ void PortableEnvironmentHost::Impl::HandleGenerate(wxJSONValue& value) {
       wxString staged;
       wxString stage_error;
       const wxString display_name = wxFileName(output).GetFullName();
-      if (StageDataset(source, display_name, &staged, &stage_error)) {
+      if (StageDataset(source, display_name, &staged, &stage_error) &&
+          generated_open_after) {
         // Inspection is a separate ecCodes process from the generator. The
         // generated file becomes current only after that independent decoder
         // accepts the immutable snapshot.
         StartInspect(staged, display_name);
-      } else {
+      } else if (!stage_error.empty()) {
         data_status->SetLabel("Generation output could not be staged: " +
                               stage_error);
       }
@@ -3050,6 +3377,12 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
   auto* south = new wxTextCtrl(form, wxID_ANY, "50.5");
   auto* east = new wxTextCtrl(form, wxID_ANY, "-2.5");
   auto* north = new wxTextCtrl(form, wxID_ANY, "56.5");
+  const auto area_presets = SurfaceAreaPresets(surface_definition);
+  wxArrayString area_labels;
+  for (const auto& item : area_presets) area_labels.Add(item.label);
+  auto* area_preset = new wxChoice(form, wxID_ANY, wxDefaultPosition,
+                                   wxDefaultSize, area_labels);
+  area_preset->SetSelection(0);
   auto* start = new wxTextCtrl(
       form, wxID_ANY, wxDateTime::Now().ToUTC().Format("%Y-%m-%dT%H:00:00Z"));
   const int maximum_hours =
@@ -3057,8 +3390,12 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
   auto* hours = new wxSpinCtrl(form, wxID_ANY, "72", wxDefaultPosition,
                                wxDefaultSize, wxSP_ARROW_KEYS, 1, maximum_hours,
                                std::min(72, maximum_hours));
-  auto* step = new wxSpinCtrl(form, wxID_ANY, "3", wxDefaultPosition,
-                              wxDefaultSize, wxSP_ARROW_KEYS, 1, 24, 3);
+  const int default_step =
+      std::clamp(generator_definition["default_step_hours"].AsInt(), 1, 24);
+  auto* step = new wxSpinCtrl(form, wxID_ANY,
+                              wxString::Format("%d", default_step),
+                              wxDefaultPosition, wxDefaultSize,
+                              wxSP_ARROW_KEYS, 1, 24, default_step);
   const auto weather_providers =
       SurfaceProviderOptions(surface_definition, "weather");
   const auto wave_providers =
@@ -3074,12 +3411,22 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
       new wxChoice(form, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                    ProviderLabels(weather_providers));
   provider->SetSelection(DefaultProviderIndex(weather_providers));
+  auto* include_weather =
+      new wxCheckBox(form, wxID_ANY, "Generate/include weather");
+  include_weather->SetValue(true);
+  const auto weather_presets = SurfaceWeatherPresets(surface_definition);
   wxArrayString presets;
-  presets.Add("Routing");
-  presets.Add("Viewer");
+  int default_weather_preset = 0;
+  for (size_t index = 0; index < weather_presets.size(); ++index) {
+    presets.Add(weather_presets[index].label);
+    if (weather_presets[index].selected_by_default)
+      default_weather_preset = static_cast<int>(index);
+  }
   auto* preset =
       new wxChoice(form, wxID_ANY, wxDefaultPosition, wxDefaultSize, presets);
-  preset->SetSelection(0);
+  preset->SetSelection(default_weather_preset);
+  auto* include_waves = new wxCheckBox(form, wxID_ANY, "Include wave fields");
+  include_waves->SetValue(true);
   auto* wave_provider =
       new wxChoice(form, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                    ProviderLabels(wave_providers));
@@ -3122,6 +3469,9 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
       new wxChoice(form, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                    ProviderLabels(current_sources));
   current_source->SetSelection(DefaultProviderIndex(current_sources));
+  auto* include_current =
+      new wxCheckBox(form, wxID_ANY, "Generate/include currents");
+  include_current->SetValue(true);
   auto* current_note = new wxStaticText(form, wxID_ANY, wxEmptyString);
   current_note->Wrap(520);
   wxTextCtrl* local_current = nullptr;
@@ -3162,37 +3512,52 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
     default_output_directory = wxGetHomeDir();
   const wxString default_output_name = wxDateTime::Now().ToUTC().Format(
       generator_definition["output_basename"].AsString() + "_%Y%m%d_%H%M.grb");
-  auto* output_panel = new wxPanel(form);
-  auto* output_sizer = new wxBoxSizer(wxHORIZONTAL);
-  auto* output_path = new wxTextCtrl(
-      output_panel, wxID_ANY,
-      wxFileName(default_output_directory, default_output_name).GetFullPath());
-  auto* browse_output = new wxButton(output_panel, wxID_ANY, "Browse…");
-  output_sizer->Add(output_path, 1, wxEXPAND | wxRIGHT, 6);
-  output_sizer->Add(browse_output, 0, wxEXPAND);
-  output_panel->SetSizer(output_sizer);
+  auto* output_directory_panel = new wxPanel(form);
+  auto* output_directory_sizer = new wxBoxSizer(wxHORIZONTAL);
+  auto* output_directory =
+      new wxTextCtrl(output_directory_panel, wxID_ANY, default_output_directory);
+  auto* browse_output_directory =
+      new wxButton(output_directory_panel, wxID_ANY, "Browse…");
+  output_directory_sizer->Add(output_directory, 1, wxEXPAND | wxRIGHT, 6);
+  output_directory_sizer->Add(browse_output_directory, 0, wxEXPAND);
+  output_directory_panel->SetSizer(output_directory_sizer);
+  auto* output_name_panel = new wxPanel(form);
+  auto* output_name_sizer = new wxBoxSizer(wxHORIZONTAL);
+  auto* output_name =
+      new wxTextCtrl(output_name_panel, wxID_ANY, default_output_name);
+  auto* browse_output = new wxButton(output_name_panel, wxID_ANY, "Browse…");
+  output_name_sizer->Add(output_name, 1, wxEXPAND | wxRIGHT, 6);
+  output_name_sizer->Add(browse_output, 0, wxEXPAND);
+  output_name_panel->SetSizer(output_name_sizer);
+  auto* open_after = new wxCheckBox(
+      form, wxID_ANY, "Open generated GRIB after creation");
+  open_after->SetValue(true);
   AddRow(grid, form, "Generator executable", executable);
   AddRow(grid, form, "West longitude", west);
   AddRow(grid, form, "South latitude", south);
   AddRow(grid, form, "East longitude", east);
   AddRow(grid, form, "North latitude", north);
+  AddRow(grid, form, "Area preset", area_preset);
   AddRow(grid, form, "Start UTC", start);
   AddRow(
       grid, form,
       wxString::Format("Forecast duration hours (maximum %d)", maximum_hours),
       hours);
   AddRow(grid, form, "Step hours", step);
+  AddRow(grid, form, "Forecast extension", extend_forecast);
+  AddRow(grid, form, "Weather", include_weather);
   AddRow(grid, form, "Weather provider", provider);
   AddRow(grid, form, "Weather-source details", weather_note);
   AddRow(grid, form, "Weather preset", preset);
+  AddRow(grid, form, "Waves", include_waves);
   AddRow(grid, form, "Wave provider", wave_provider);
   AddRow(grid, form, "Wave-source details", wave_note);
   AddRow(grid, form, "Weather GRIB file", weather_input_panel);
+  AddRow(grid, form, "Currents", include_current);
   AddRow(grid, form, "Current source", current_source);
   AddRow(grid, form, "Current-source details", current_note);
   AddRow(grid, form, "Current source data", current_input_panel);
   AddRow(grid, form, "Provider mode", provider_mode);
-  AddRow(grid, form, "Forecast extension", extend_forecast);
   AddRow(grid, form, "Weather fallback", fallback_weather);
   AddRow(grid, form, "Wave fallback", fallback_waves);
   AddRow(grid, form, "Current fallback", fallback_current);
@@ -3205,7 +3570,9 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
          password);
   AddRow(grid, form, "Credential storage", remember);
   AddRow(grid, form, "Saved credentials", forget);
-  AddRow(grid, form, "Output GRIB", output_panel);
+  AddRow(grid, form, "Output directory", output_directory_panel);
+  AddRow(grid, form, "Output filename", output_name_panel);
+  AddRow(grid, form, "Generated file", open_after);
   form->SetSizer(grid);
   form->SetScrollRate(0, 12);
   root->Add(form, 1, wxEXPAND | wxALL, 10);
@@ -3247,12 +3614,14 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
   };
   auto credential_selected = [&]() {
     return !credential_scheme.empty() &&
-           (selected_provider(wave_provider, wave_providers).credential ==
-                credential_scheme ||
-            selected_provider(current_source, current_sources).credential ==
-                credential_scheme ||
-            selected_provider(current_source, current_sources).credential ==
-                "conditional");
+           ((include_waves->GetValue() &&
+             selected_provider(wave_provider, wave_providers).credential ==
+                 credential_scheme) ||
+            (include_current->GetValue() &&
+             (selected_provider(current_source, current_sources).credential ==
+                  credential_scheme ||
+              selected_provider(current_source, current_sources).credential ==
+                  "conditional")));
   };
   auto update_credential_controls = [&]() {
     const bool selected = credential_access && credential_selected();
@@ -3264,11 +3633,14 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
   };
   auto update_weather_controls = [&]() {
     const auto& selected = selected_provider(provider, weather_providers);
-    const bool local = !selected.input_kind.empty();
+    const bool enabled = include_weather->GetValue();
+    const bool local = enabled && !selected.input_kind.empty();
+    provider->Enable(enabled);
     local_weather->Enable(local);
     browse_weather->Enable(local);
-    preset->Enable(!local && !selected.disabled);
-    wave_provider->Enable(!local);
+    preset->Enable(enabled && !local && !selected.disabled);
+    include_waves->Enable(enabled && !local);
+    wave_provider->Enable(enabled && include_waves->GetValue() && !local);
     if (local)
       wave_provider->SetToolTip(
           "Wave records already present in the local file are preserved");
@@ -3281,6 +3653,10 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
   };
   auto update_wave_controls = [&]() {
     const auto& selected = selected_provider(wave_provider, wave_providers);
+    wave_provider->Enable(include_weather->GetValue() &&
+                          include_waves->GetValue() &&
+                          selected_provider(provider, weather_providers)
+                              .input_kind.empty());
     wave_note->SetLabel(provider_details(selected));
     wave_note->Wrap(520);
     update_credential_controls();
@@ -3288,14 +3664,16 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
   };
   auto update_current_controls = [&]() {
     const auto& selected = selected_provider(current_source, current_sources);
-    const bool needs_source = !selected.input_kind.empty();
+    const bool enabled = include_current->GetValue();
+    const bool needs_source = enabled && !selected.input_kind.empty();
+    current_source->Enable(enabled);
     local_current->Enable(needs_source);
     browse_current->Enable(needs_source);
     provider_mode->Clear();
     for (const auto& mode : selected.mode_options)
       provider_mode->Append(mode.first);
     if (!selected.mode_options.empty()) provider_mode->SetSelection(0);
-    provider_mode->Enable(!selected.mode_options.empty());
+    provider_mode->Enable(enabled && !selected.mode_options.empty());
     current_note->SetLabel(provider_details(selected));
     current_note->Wrap(520);
     update_credential_controls();
@@ -3315,14 +3693,88 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
     fallback_current_data->Enable(needs_data);
     browse_fallback_current->Enable(needs_data);
   };
+  bool applying_area_preset = false;
+  area_preset->Bind(wxEVT_CHOICE, [&](wxCommandEvent&) {
+    const int selection = area_preset->GetSelection();
+    if (selection < 0 ||
+        static_cast<size_t>(selection) >= area_presets.size())
+      return;
+    const auto& selected = area_presets[static_cast<size_t>(selection)];
+    if (selected.kind == "custom") return;
+    double preset_west = selected.west;
+    double preset_south = selected.south;
+    double preset_east = selected.east;
+    double preset_north = selected.north;
+    if (selected.kind == "current-view") {
+      auto* canvas = top_frame::Get()
+                         ? dynamic_cast<ChartCanvas*>(
+                               top_frame::Get()->GetAbstractFocusCanvas())
+                         : nullptr;
+      if (!canvas || !canvas->GetVP().GetBBox().GetValid()) {
+        wxMessageBox(
+            "The current chart area is not available yet. Pan or zoom the "
+            "chart, then try again.",
+            "Current chart area unavailable", wxOK | wxICON_INFORMATION,
+            &dialog);
+        area_preset->SetSelection(0);
+        return;
+      }
+      const auto& bbox = canvas->GetVP().GetBBox();
+      preset_west = bbox.GetMinLon();
+      preset_south = bbox.GetMinLat();
+      preset_east = bbox.GetMaxLon();
+      preset_north = bbox.GetMaxLat();
+      if (!(preset_west < preset_east && preset_south < preset_north) ||
+          preset_west <= -180.0 || preset_east >= 180.0) {
+        wxMessageBox(
+            "The current chart area crosses a longitude boundary which "
+            "cannot be represented by one west/south/east/north box.",
+            "Current chart area unavailable", wxOK | wxICON_INFORMATION,
+            &dialog);
+        area_preset->SetSelection(0);
+        return;
+      }
+    }
+    applying_area_preset = true;
+    west->SetValue(wxString::Format("%.6f", preset_west));
+    south->SetValue(wxString::Format("%.6f", preset_south));
+    east->SetValue(wxString::Format("%.6f", preset_east));
+    north->SetValue(wxString::Format("%.6f", preset_north));
+    applying_area_preset = false;
+    if (!selected.current_provider.empty()) {
+      include_current->SetValue(true);
+      current_source->SetSelection(ProviderIndex(
+          current_sources, selected.current_provider,
+          current_source->GetSelection() == wxNOT_FOUND
+              ? 0
+              : current_source->GetSelection()));
+      update_current_controls();
+    }
+    if (selected.kind == "current-view") area_preset->SetSelection(0);
+  });
+  auto custom_bbox_changed = [&](wxCommandEvent&) {
+    if (!applying_area_preset) area_preset->SetSelection(0);
+  };
+  west->Bind(wxEVT_TEXT, custom_bbox_changed);
+  south->Bind(wxEVT_TEXT, custom_bbox_changed);
+  east->Bind(wxEVT_TEXT, custom_bbox_changed);
+  north->Bind(wxEVT_TEXT, custom_bbox_changed);
   current_source->Bind(wxEVT_CHOICE, [&](wxCommandEvent&) {
     update_current_controls();
     update_extension_controls();
   });
   provider->Bind(wxEVT_CHOICE,
                  [&](wxCommandEvent&) { update_weather_controls(); });
+  include_weather->Bind(wxEVT_CHECKBOX, [&](wxCommandEvent&) {
+    update_weather_controls();
+    update_wave_controls();
+  });
   wave_provider->Bind(wxEVT_CHOICE,
                       [&](wxCommandEvent&) { update_wave_controls(); });
+  include_waves->Bind(wxEVT_CHECKBOX,
+                      [&](wxCommandEvent&) { update_wave_controls(); });
+  include_current->Bind(wxEVT_CHECKBOX,
+                        [&](wxCommandEvent&) { update_current_controls(); });
   extend_forecast->Bind(wxEVT_CHECKBOX,
                         [&](wxCommandEvent&) { update_extension_controls(); });
   fallback_current->Bind(wxEVT_CHOICE,
@@ -3398,17 +3850,26 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
     wxUnusedVar(have_stored_credentials);
 #endif
   });
+  browse_output_directory->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
+    wxString directory = output_directory->GetValue();
+    if (!wxDirExists(directory)) directory = wxGetHomeDir();
+    wxDirDialog directory_dialog(&dialog, "Choose GRIB output directory",
+                                 directory);
+    if (directory_dialog.ShowModal() == wxID_OK)
+      output_directory->SetValue(directory_dialog.GetPath());
+  });
   browse_output->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
-    wxFileName selected(output_path->GetValue());
-    wxString directory = selected.GetPath();
+    wxString directory = output_directory->GetValue();
     if (!wxDirExists(directory)) directory = wxGetHomeDir();
     wxFileDialog output_dialog(
         &dialog, "Choose where to save the generated environmental GRIB",
-        directory, selected.GetFullName(),
+        directory, output_name->GetValue(),
         "GRIB files (*.grb)|*.grb|All files (*.*)|*.*",
         wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
-    if (output_dialog.ShowModal() == wxID_OK)
-      output_path->SetValue(output_dialog.GetPath());
+    if (output_dialog.ShowModal() == wxID_OK) {
+      output_directory->SetValue(output_dialog.GetDirectory());
+      output_name->SetValue(output_dialog.GetFilename());
+    }
   });
   update_weather_controls();
   update_wave_controls();
@@ -3425,8 +3886,20 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
     return;
   }
 
-  wxString requested_output = output_path->GetValue();
-  requested_output.Trim(true).Trim(false);
+  wxString requested_output_directory = output_directory->GetValue();
+  requested_output_directory.Trim(true).Trim(false);
+  wxString requested_output_name = output_name->GetValue();
+  requested_output_name.Trim(true).Trim(false);
+  wxFileName name_only(requested_output_name);
+  if (requested_output_name.empty() || name_only.GetFullName() !=
+                                           requested_output_name) {
+    wxMessageBox("Output filename must be a filename, not a path",
+                 surface_title, wxOK | wxICON_ERROR, frame);
+    return;
+  }
+  wxString requested_output =
+      wxFileName(requested_output_directory, requested_output_name)
+          .GetFullPath();
   wxFileName output_filename(requested_output);
   if (requested_output.empty() || !output_filename.IsAbsolute()) {
     wxMessageBox("Choose an absolute output path for the generated GRIB",
@@ -3435,9 +3908,9 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
   }
   if (output_filename.GetExt().empty()) output_filename.SetExt("grb");
   output_filename.Normalize(wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE);
-  const wxString output_directory = output_filename.GetPath();
-  if (!wxDirExists(output_directory) ||
-      !wxFileName::IsDirWritable(output_directory)) {
+  const wxString normalized_output_directory = output_filename.GetPath();
+  if (!wxDirExists(normalized_output_directory) ||
+      !wxFileName::IsDirWritable(normalized_output_directory)) {
     wxMessageBox(
         "The selected output directory does not exist or is not "
         "writable",
@@ -3482,8 +3955,13 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
   const auto& selected_waves = selected_provider(wave_provider, wave_providers);
   const auto& selected_current =
       selected_provider(current_source, current_sources);
-  const bool local_weather_selected = !selected_weather.input_kind.empty();
-  const bool local_current_selected = !selected_current.input_kind.empty();
+  const bool weather_enabled = include_weather->GetValue();
+  const bool waves_enabled = weather_enabled && include_waves->GetValue();
+  const bool current_enabled = include_current->GetValue();
+  const bool local_weather_selected =
+      weather_enabled && !selected_weather.input_kind.empty();
+  const bool local_current_selected =
+      current_enabled && !selected_current.input_kind.empty();
   if ((local_weather_selected &&
        !validate_input(local_weather, "a local weather GRIB", true,
                        selected_weather.input_kind == "directory",
@@ -3560,18 +4038,27 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
   request["hours"] = hours->GetValue();
   request["stepHours"] = step->GetValue();
   const bool sandboxed_generator = UsesFilesystemSandbox();
-  request["weatherProvider"] = selected_weather.id;
+  request["weatherProvider"] =
+      weather_enabled ? selected_weather.id : wxString("none");
   if (local_weather_selected && !selected_weather.input_request_key.empty())
     request[selected_weather.input_request_key] =
         sandboxed_generator ? wxString("/inputs/weather.grb") : weather_input;
+  const int weather_preset_selection = preset->GetSelection();
   request["weatherPreset"] =
-      wxString(preset->GetSelection() == 1 ? "viewer" : "routing");
+      weather_preset_selection >= 0 &&
+              static_cast<size_t>(weather_preset_selection) <
+                  weather_presets.size()
+          ? weather_presets[static_cast<size_t>(weather_preset_selection)].id
+          : wxString("routing");
   // A user-selected weather file is copied as one validated stream, including
   // any wave records it already contains.  Do not unexpectedly contact an
   // online wave provider while performing an otherwise local merge.
-  request["includeWaves"] = !local_weather_selected && !selected_waves.disabled;
-  request["waveProvider"] = selected_waves.id;
-  request["currentSource"] = selected_current.id;
+  request["includeWaves"] = waves_enabled && !local_weather_selected &&
+                            !selected_waves.disabled;
+  request["waveProvider"] =
+      waves_enabled ? selected_waves.id : wxString("none");
+  request["currentSource"] =
+      current_enabled ? selected_current.id : wxString("none");
   if (local_current_selected && !selected_current.input_request_key.empty()) {
     request[selected_current.input_request_key] =
         sandboxed_generator ? wxString("/inputs/current-source")
@@ -3616,7 +4103,9 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
   const wxString generation_state = wxString::Format(
       "{\"weatherProvider\":\"%s\",\"waveProvider\":\"%s\","
       "\"currentProvider\":\"%s\"}",
-      selected_weather.id, selected_waves.id, selected_current.id);
+      weather_enabled ? selected_weather.id : wxString("none"),
+      waves_enabled ? selected_waves.id : wxString("none"),
+      current_enabled ? selected_current.id : wxString("none"));
   if (!NotifySurfaceEvent("generation-request", generation_state,
                           &controller_error)) {
     wxMessageBox("The portable package rejected the generation request: " +
@@ -3637,6 +4126,7 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
   writer.Write(job, job_output);
   job_output.Close();
   generated_output_path = output_filename.GetFullPath();
+  generated_open_after = open_after->GetValue();
   Launch(GeneratorCommand(job_path, result, generated_output_path,
                           weather_input, current_input, fallback_current_input),
          Operation::Generate, result,
@@ -3772,9 +4262,9 @@ void PortableEnvironmentHost::Impl::UpdateCursorStatus() {
     group.value->SetLabel(label);
   }
   cursor_status->SetLabel(wxString::Format(
-      "Cursor %.4f° %c  %.4f° %c — model output; not navigation-authoritative",
-      std::abs(cursor_latitude), cursor_latitude >= 0 ? 'N' : 'S',
-      std::abs(cursor_longitude), cursor_longitude >= 0 ? 'E' : 'W'));
+      "Cursor %.4f° %c  %.4f° %c", std::abs(cursor_latitude),
+      cursor_latitude >= 0 ? 'N' : 'S', std::abs(cursor_longitude),
+      cursor_longitude >= 0 ? 'E' : 'W'));
   if (frame) frame->Layout();
 }
 

@@ -118,6 +118,14 @@ def main():
             destination / "resources" / "fault-test.svg",
             destination / "resources" / "http-download.svg",
         ]
+        action_resources.extend(
+            destination / "resources" / "controls" / name
+            for name in (
+                "prev.svg", "next.svg", "play.svg", "stop.svg", "now.svg",
+                "openfile.svg", "setting.svg", "curdata.svg", "request.svg",
+                "ncurdata.svg",
+            )
+        )
         if not all(path.is_file() and path.stat().st_size > 0
                    for path in action_resources):
             raise RuntimeError("one or more portable toolbar icons are absent")

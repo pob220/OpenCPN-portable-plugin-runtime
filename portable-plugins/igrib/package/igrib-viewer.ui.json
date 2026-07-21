@@ -7,10 +7,15 @@
   "layout": {
     "family": "xgrib-control-bar",
     "preferred_width": 940,
-    "preferred_height": 430,
+    "preferred_height": 390,
     "supports_horizontal": true,
     "supports_vertical": true,
-    "cursor_panel": "attached-or-detached"
+    "cursor_panel": "attached-or-detached",
+    "primary_field_rows": [
+      ["wind", "wave", "current"],
+      ["pressure", "air-temperature"]
+    ],
+    "additional_fields_label": "Additional fields"
   },
   "helpers": {
     "decoder_executable": "igrib-environment-helper",
@@ -21,6 +26,23 @@
     "title": "iGRIB Environmental GRIB Generator",
     "output_basename": "environment_igrib",
     "maximum_hours": 360,
+    "default_step_hours": 1,
+    "weather_presets": [
+      {"id": "minimal", "label": "Minimal"},
+      {"id": "routing", "label": "Routing", "default": true},
+      {"id": "marine", "label": "Marine / viewer"}
+    ],
+    "area_presets": [
+      {"id": "custom", "label": "Custom bbox", "kind": "custom"},
+      {"id": "current-chart", "label": "Current chart area", "kind": "current-view"},
+      {"id": "irish-sea", "label": "Irish Sea / North Channel", "kind": "bbox", "west": -8.5, "south": 50.5, "east": -2.5, "north": 56.5, "current_provider": "copernicus_nws"},
+      {"id": "western-channel", "label": "Western English Channel", "kind": "bbox", "west": -7.0, "south": 48.0, "east": -1.0, "north": 51.5, "current_provider": "copernicus_nws"},
+      {"id": "north-sea", "label": "North Sea", "kind": "bbox", "west": -5.0, "south": 51.0, "east": 9.0, "north": 60.0, "current_provider": "copernicus_nws"},
+      {"id": "bay-of-biscay", "label": "Bay of Biscay", "kind": "bbox", "west": -10.5, "south": 43.0, "east": -1.0, "north": 48.5, "current_provider": "copernicus_global"},
+      {"id": "florida-straits", "label": "Gulf Stream / Florida Straits", "kind": "bbox", "west": -81.0, "south": 24.0, "east": -77.0, "north": 28.0, "current_provider": "noaa_rtofs_global"},
+      {"id": "us-east-coast", "label": "US East Coast / Gulf Stream", "kind": "bbox", "west": -81.0, "south": 24.0, "east": -70.0, "north": 36.0, "current_provider": "noaa_rtofs_global"},
+      {"id": "caribbean", "label": "Caribbean", "kind": "bbox", "west": -85.0, "south": 10.0, "east": -60.0, "north": 25.0, "current_provider": "noaa_rtofs_global"}
+    ],
     "safety_notice": "Generated environmental data is model output for planning and experimentation; it is not an official navigation product."
   },
   "credential_catalog": {
@@ -37,19 +59,19 @@
   },
   "controls": [
     {"id": "file", "type": "status", "label": "File"},
-    {"id": "previous", "type": "button", "label": "Previous forecast"},
+    {"id": "previous", "type": "button", "label": "Previous forecast", "icon_resource": "resources/controls/prev.svg", "icon_only": true},
     {"id": "timeline", "type": "choice", "label": "Forecast time"},
     {"id": "time-slider", "type": "slider", "label": "Forecast timeline"},
-    {"id": "next", "type": "button", "label": "Next forecast"},
-    {"id": "play", "type": "button", "label": "Play"},
-    {"id": "now", "type": "button", "label": "Now"},
+    {"id": "next", "type": "button", "label": "Next forecast", "icon_resource": "resources/controls/next.svg", "icon_only": true},
+    {"id": "play", "type": "button", "label": "Play", "icon_resource": "resources/controls/play.svg", "alternate_icon_resource": "resources/controls/stop.svg", "icon_only": true},
+    {"id": "now", "type": "button", "label": "Now", "icon_resource": "resources/controls/now.svg", "icon_only": true},
     {"id": "level", "type": "choice", "label": "Atmospheric level"},
-    {"id": "open", "type": "file-open-multiple", "label": "Open GRIB"},
-    {"id": "settings", "type": "button", "label": "Settings"},
-    {"id": "weather-table", "type": "button", "label": "Weather table"},
-    {"id": "download", "type": "button", "label": "Download GRIB"},
-    {"id": "generate", "type": "button", "label": "Generate GRIB"},
-    {"id": "cancel", "type": "cancel", "label": "Cancel"},
+    {"id": "open", "type": "file-open-multiple", "label": "Open GRIB", "icon_resource": "resources/controls/openfile.svg"},
+    {"id": "settings", "type": "button", "label": "Settings", "icon_resource": "resources/controls/setting.svg"},
+    {"id": "weather-table", "type": "button", "label": "Weather table", "icon_resource": "resources/controls/curdata.svg"},
+    {"id": "download", "type": "button", "label": "Download GRIB", "icon_resource": "resources/controls/request.svg"},
+    {"id": "generate", "type": "button", "label": "Generate GRIB", "icon_resource": "resources/controls/ncurdata.svg"},
+    {"id": "cancel", "type": "cancel", "label": "Cancel", "icon_resource": "resources/controls/stop.svg"},
     {"id": "progress", "type": "progress", "label": "Progress"}
   ],
   "levels": [

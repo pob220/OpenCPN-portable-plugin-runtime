@@ -189,6 +189,7 @@ add_custom_command(
           --manifest-path "${_igrib_source}/component/Cargo.toml"
   COMMAND ${CMAKE_COMMAND} -E make_directory
           "${_igrib_package}/component" "${_igrib_package}/resources"
+          "${_igrib_package}/resources/controls"
           "${_igrib_package}/interfaces" "${_igrib_package}/licenses"
           "${_igrib_package}/ui"
           "${_igrib_helpers}"
@@ -202,6 +203,36 @@ add_custom_command(
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           "${_igrib_source}/package/igrib.svg"
           "${_igrib_package}/resources/igrib.svg"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${CMAKE_SOURCE_DIR}/plugins/grib_pi/data/prev.svg"
+          "${_igrib_package}/resources/controls/prev.svg"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${CMAKE_SOURCE_DIR}/plugins/grib_pi/data/next.svg"
+          "${_igrib_package}/resources/controls/next.svg"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${CMAKE_SOURCE_DIR}/plugins/grib_pi/data/play.svg"
+          "${_igrib_package}/resources/controls/play.svg"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${CMAKE_SOURCE_DIR}/plugins/grib_pi/data/stop.svg"
+          "${_igrib_package}/resources/controls/stop.svg"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${CMAKE_SOURCE_DIR}/plugins/grib_pi/data/now.svg"
+          "${_igrib_package}/resources/controls/now.svg"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${CMAKE_SOURCE_DIR}/plugins/grib_pi/data/openfile.svg"
+          "${_igrib_package}/resources/controls/openfile.svg"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${CMAKE_SOURCE_DIR}/plugins/grib_pi/data/setting.svg"
+          "${_igrib_package}/resources/controls/setting.svg"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${CMAKE_SOURCE_DIR}/plugins/grib_pi/data/curdata.svg"
+          "${_igrib_package}/resources/controls/curdata.svg"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${CMAKE_SOURCE_DIR}/plugins/grib_pi/data/request.svg"
+          "${_igrib_package}/resources/controls/request.svg"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${CMAKE_SOURCE_DIR}/plugins/grib_pi/data/ncurdata.svg"
+          "${_igrib_package}/resources/controls/ncurdata.svg"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           "${CMAKE_SOURCE_DIR}/data/svg/markicons/Hazard-Warning.svg"
           "${_igrib_package}/resources/fault-test.svg"
@@ -227,6 +258,16 @@ add_custom_command(
           "${_igrib_source}/package/manifest.json"
           "${_igrib_source}/package/igrib-viewer.ui.json"
           "${_igrib_source}/package/igrib.svg"
+          "${CMAKE_SOURCE_DIR}/plugins/grib_pi/data/prev.svg"
+          "${CMAKE_SOURCE_DIR}/plugins/grib_pi/data/next.svg"
+          "${CMAKE_SOURCE_DIR}/plugins/grib_pi/data/play.svg"
+          "${CMAKE_SOURCE_DIR}/plugins/grib_pi/data/stop.svg"
+          "${CMAKE_SOURCE_DIR}/plugins/grib_pi/data/now.svg"
+          "${CMAKE_SOURCE_DIR}/plugins/grib_pi/data/openfile.svg"
+          "${CMAKE_SOURCE_DIR}/plugins/grib_pi/data/setting.svg"
+          "${CMAKE_SOURCE_DIR}/plugins/grib_pi/data/curdata.svg"
+          "${CMAKE_SOURCE_DIR}/plugins/grib_pi/data/request.svg"
+          "${CMAKE_SOURCE_DIR}/plugins/grib_pi/data/ncurdata.svg"
           "${CMAKE_SOURCE_DIR}/data/svg/markicons/Hazard-Warning.svg"
           "${CMAKE_SOURCE_DIR}/data/svg/traditional/emblem-download.svg"
           "${CMAKE_SOURCE_DIR}/COPYING.gplv2"
