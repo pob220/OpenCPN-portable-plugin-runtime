@@ -75,13 +75,29 @@ elseif (OCPN_PORTABLE_HELPER_TARGET MATCHES "^flatpak-")
 endif ()
 
 if (WIN32 OR OCPN_PORTABLE_HELPER_TARGET MATCHES "^flatpak-")
-  find_program(ECCODES_INFO_EXECUTABLE NAMES codes_info REQUIRED)
-  execute_process(COMMAND "${ECCODES_INFO_EXECUTABLE}" -d
-                  OUTPUT_VARIABLE ECCODES_DEFINITION_DIRECTORY
-                  OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
-  execute_process(COMMAND "${ECCODES_INFO_EXECUTABLE}" -s
-                  OUTPUT_VARIABLE ECCODES_SAMPLE_DIRECTORY
-                  OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+  find_program(ECCODES_INFO_EXECUTABLE NAMES codes_info)
+  if (ECCODES_INFO_EXECUTABLE)
+    execute_process(COMMAND "${ECCODES_INFO_EXECUTABLE}" -d
+                    OUTPUT_VARIABLE ECCODES_DEFINITION_DIRECTORY
+                    OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+    execute_process(COMMAND "${ECCODES_INFO_EXECUTABLE}" -s
+                    OUTPUT_VARIABLE ECCODES_SAMPLE_DIRECTORY
+                    OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+  elseif (NOT WIN32)
+    # Debian/Ubuntu split codes_info into an optional tools package while the
+    # library's required definition data is installed below its pkg-config
+    # prefix.  Do not make the packaged helper depend on that diagnostic tool.
+    pkg_get_variable(ECCODES_PREFIX eccodes prefix)
+    set(ECCODES_DEFINITION_DIRECTORY
+        "${ECCODES_PREFIX}/share/eccodes/definitions")
+    set(ECCODES_SAMPLE_DIRECTORY "${ECCODES_PREFIX}/share/eccodes/samples")
+  else ()
+    message(FATAL_ERROR "codes_info is required to stage Windows ecCodes data")
+  endif ()
+  if (NOT IS_DIRECTORY "${ECCODES_DEFINITION_DIRECTORY}" OR
+      NOT IS_DIRECTORY "${ECCODES_SAMPLE_DIRECTORY}")
+    message(FATAL_ERROR "Could not locate complete ecCodes definition data")
+  endif ()
   install(DIRECTORY "${ECCODES_DEFINITION_DIRECTORY}/"
           DESTINATION "${_payload}/share/eccodes/definitions"
           PATTERN "bufr" EXCLUDE PATTERN "grib3" EXCLUDE
