@@ -6818,19 +6818,16 @@ void MyFrame::RequestNewMasterToolbar(bool bforcenew) {
   if (g_MainToolbar) {
     CreateMasterToolbar();
 
-    // Rebuilding replaces ocpnToolBarSimple whose visible-tool count starts
-    // at zero.  Preserve the expanded/collapsed state explicitly so a late
-    // plugin toolbar registration cannot make the complete toolbar vanish.
-    // This is especially visible when portable actions are registered after
-    // the initial frame has been constructed.
-    if (btbRebuild) {
-      m_nMasterToolCountShown =
-          toolbar_was_full ? static_cast<int>(g_MainToolbar->GetToolCount())
-                           : 1;
-      g_MainToolbar->SetToolShowCount(m_nMasterToolCountShown);
-      g_bmasterToolbarFull = toolbar_was_full;
-      g_MainToolbar->Realize();
-    }
+    // ocpnToolBarSimple's visible-tool count starts at zero.  Initialise it
+    // when constructing the toolbar, and preserve the expanded/collapsed
+    // state when rebuilding after late plugin toolbar registration.
+    m_nMasterToolCountShown =
+        (!btbRebuild || toolbar_was_full)
+            ? static_cast<int>(g_MainToolbar->GetToolCount())
+            : 1;
+    g_MainToolbar->SetToolShowCount(m_nMasterToolCountShown);
+    g_bmasterToolbarFull = !btbRebuild || toolbar_was_full;
+    g_MainToolbar->Realize();
     {
       // g_MainToolbar->RestoreRelativePosition(g_maintoolbar_x,
       // g_maintoolbar_y);
