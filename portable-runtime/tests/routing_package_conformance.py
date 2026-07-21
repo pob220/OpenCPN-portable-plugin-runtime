@@ -46,6 +46,7 @@ def main():
             "charts.coverage",
             "navigation.position.read",
             "navigation.objects.read",
+            "navigation.routes.write",
         }
         if not required.issubset(set(manifest.get("permissions", []))):
             raise RuntimeError("routing package omits a required capability")
@@ -58,11 +59,45 @@ def main():
         header = bundled_polar.read_text().splitlines()[0].lower()
         if not header.startswith("twa/tws"):
             raise RuntimeError("routing package omits its valid demonstration polar")
-        surface = json.loads(
-            (destination / "ui" / "iweather-routing.ui.json").read_text()
-        )
-        if surface.get("schema") != "org.opencpn.portable-ui/0.1":
+        surface_resource = manifest.get("surfaces", {}).get("routing.workbench")
+        if not isinstance(surface_resource, str) or not surface_resource:
+            raise RuntimeError("routing package omits its workbench surface")
+        surface_path = destination / surface_resource
+        if destination not in surface_path.resolve().parents:
+            raise RuntimeError("routing surface escapes the installed package")
+        surface = json.loads(surface_path.read_text())
+        if surface.get("schema") != "org.opencpn.portable-ui/0.2" or \
+                surface.get("surface") != "routing-workbench":
             raise RuntimeError("routing UI schema is incompatible")
+        menu_ids = {
+            item.get("id")
+            for menu in surface.get("menus", [])
+            if isinstance(menu, dict)
+            for item in menu.get("items", [])
+            if isinstance(item, dict) and item.get("id")
+        }
+        required_menu_ids = {
+            "new-routing", "edit-routing", "compute-routing", "stop-routing",
+            "export-gpx", "refresh-positions", "show-configuration",
+            "send-to-opencpn",
+            "show-results", "show-isochrones", "route-to-cursor",
+            "show-stability-corridor", "show-route-wind",
+            "boat-at-grib-time", "about", "close",
+        }
+        if not required_menu_ids.issubset(menu_ids):
+            raise RuntimeError("routing UI omits familiar workbench actions")
+        manager = surface.get("manager", {})
+        manager_actions = {
+            action.get("id")
+            for action in manager.get("actions", [])
+            if isinstance(action, dict)
+        }
+        if not {"compute-routing", "edit-routing", "export-gpx"}.issubset(
+                manager_actions):
+            raise RuntimeError("routing UI omits manager actions")
+        if not manager.get("positions", {}).get("columns") or not \
+                manager.get("routings", {}).get("columns"):
+            raise RuntimeError("routing UI omits manager table columns")
         control_ids = {
             control.get("id")
             for control in surface.get("controls", [])
@@ -76,6 +111,8 @@ def main():
             "destination-source",
             "destination-waypoint",
             "refresh-positions",
+            "use-opencpn-route",
+            "opencpn-route",
             "departure-utc",
             "vessel-performance-file",
             "vessel-performance-status",
@@ -86,6 +123,8 @@ def main():
             "maximum-true-wind",
             "maximum-apparent-wind",
             "maximum-wave",
+            "maximum-opposing-wind-current",
+            "land-safety-margin",
             "use-currents",
             "require-current-data",
             "use-waves",
@@ -95,19 +134,47 @@ def main():
             "downwind-efficiency",
             "tack-penalty",
             "gybe-penalty",
+            "allow-motor-sailing",
+            "allow-motor",
+            "motor-threshold",
+            "motor-speed",
+            "motor-sailing-boost",
+            "motor-hysteresis",
+            "minimum-motor-run",
+            "mode-change-penalty",
+            "maximum-motor-hours",
+            "fuel-consumption",
+            "maximum-fuel",
             "maximum-search-angle",
             "destination-tolerance",
             "compare-departures",
             "departure-window",
             "departure-workers",
             "route-metrics",
+            "route-schedule",
+            "validation-diagnostics",
+            "adaptive-headings",
+            "refined-heading-step",
+            "spatial-cell",
+            "labels-per-cell",
+            "show-stability-corridor",
+            "show-route-wind",
             "export-gpx",
+            "send-to-opencpn",
             "calculate",
             "cancel",
             "progress",
         }
         if not required_controls.issubset(control_ids):
             raise RuntimeError("routing UI omits required declarative controls")
+        controls_by_id = {
+            control.get("id"): control
+            for control in surface.get("controls", [])
+            if isinstance(control, dict) and control.get("id")
+        }
+        if len(controls_by_id["departure-results"].get("columns", [])) != 21 or \
+                len(controls_by_id["route-schedule"].get("columns", [])) != 9:
+            raise RuntimeError("routing UI omits its package-owned table layout")
         services = manifest.get("requires", [])
         if not any(
             service.get("interface") == "org.opencpn.environment.provider"

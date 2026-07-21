@@ -30,6 +30,8 @@ struct HostState {
   std::atomic<bool> routing_cancelled{false};
   std::atomic<unsigned> routing_progress_events{0};
   std::atomic<size_t> chart_segments_queried{0};
+  std::atomic<size_t> chart_query_calls{0};
+  std::atomic<size_t> reject_chart_query_call{0};
   std::string network_request_id;
   std::string network_url;
   std::string network_private_name;
@@ -161,8 +163,13 @@ int32_t ChartsQuerySegments(void* data, const ocpn_portable_geo_segment*,
                             ocpn_portable_chart_segment_result* results,
                             size_t result_count) {
   if (segment_count != result_count) return -1;
-  static_cast<HostState*>(data)->chart_segments_queried = segment_count;
-  for (size_t i = 0; i < result_count; ++i) results[i] = {0, 3};
+  auto& state = *static_cast<HostState*>(data);
+  state.chart_segments_queried = segment_count;
+  const size_t call = ++state.chart_query_calls;
+  const bool reject = state.reject_chart_query_call.load() == call;
+  for (size_t i = 0; i < result_count; ++i)
+    results[i] = reject ? ocpn_portable_chart_segment_result{1, 3}
+                        : ocpn_portable_chart_segment_result{0, 3};
   return 0;
 }
 
@@ -418,6 +425,10 @@ bool RoutingLifecycle(const char* component_path) {
   request.polar_count = 1;
   request.time_step_seconds = 3600;
   request.heading_step_degrees = 15;
+  request.refined_heading_step_degrees = 5;
+  request.adaptive_headings = 1;
+  request.spatial_cell_nautical_miles = 3.0;
+  request.labels_per_cell = 2;
   request.max_hours = 24;
   request.max_states = 10000;
   request.avoid_unsafe_charts = 1;
@@ -426,6 +437,8 @@ bool RoutingLifecycle(const char* component_path) {
   request.max_wind_knots = 35.0;
   request.max_apparent_wind_knots = 50.0;
   request.max_wave_metres = 4.0;
+  request.max_opposing_wind_current_knots_squared = 30.0;
+  request.land_safety_margin_nautical_miles = 0.4;
   request.maximum_latitude_degrees = 89.0;
   request.upwind_efficiency = 1.0;
   request.downwind_efficiency = 1.0;
@@ -437,12 +450,13 @@ bool RoutingLifecycle(const char* component_path) {
   request.require_current_data = 1;
   request.use_waves = 1;
   request.require_wave_data = 1;
-  request.limits_available = 7;
+  request.limits_available = 15;
   std::vector<ocpn_portable_route_point> points(1000);
   std::vector<ocpn_portable_route_point> isochrone_points(20000);
   std::vector<ocpn_portable_route_line> isochrone_lines(2000);
   std::vector<ocpn_portable_route_point> trace_points(20000);
   std::vector<ocpn_portable_route_line> trace_lines(2000);
+  std::vector<ocpn_portable_route_environment_point> route_environment(1000);
   char diagnostic[4096] = {};
   ocpn_portable_route_result result{};
   result.points = points.data();
@@ -455,6 +469,8 @@ bool RoutingLifecycle(const char* component_path) {
   result.trace_point_capacity = trace_points.size();
   result.traces = trace_lines.data();
   result.trace_capacity = trace_lines.size();
+  result.route_environment = route_environment.data();
+  result.route_environment_capacity = route_environment.size();
   result.diagnostic = diagnostic;
   result.diagnostic_capacity = sizeof(diagnostic);
   ok =
@@ -462,6 +478,7 @@ bool RoutingLifecycle(const char* component_path) {
                               runtime, &request, &result, error, sizeof(error)),
                           "calculate route", error);
   ok = ok && result.point_count >= 2 && result.states_examined > 0 &&
+       result.route_environment_count == result.point_count &&
        result.duration_seconds > 0 && result.diagnostic_len > 0 &&
        state.routing_progress_events > 0 && result.average_speed_knots > 0.0 &&
        result.average_sog_knots > 0.0 && result.maximum_sog_knots > 0.0 &&
@@ -469,6 +486,29 @@ bool RoutingLifecycle(const char* component_path) {
        (result.metrics_available & 1) != 0 &&
        result.average_current_knots > 0.0 && result.comfort_level >= 1 &&
        result.comfort_level <= 3;
+  for (size_t index = 0; ok && index < result.route_environment_count;
+       ++index) {
+    ok = std::isfinite(route_environment[index].wind_u_knots) &&
+         std::isfinite(route_environment[index].wind_v_knots) &&
+         route_environment[index].unix_time == points[index].unix_time;
+  }
+
+  // Search decisions are provisional.  Re-run the deterministic request and
+  // make only the final chart-service call unsafe: the component must reject
+  // the exact delivered geometry at its independent acceptance boundary.
+  const size_t baseline_chart_calls = state.chart_query_calls.load();
+  state.chart_query_calls = 0;
+  state.reject_chart_query_call = baseline_chart_calls;
+  result.point_count = 0;
+  result.diagnostic_len = 0;
+  std::memset(error, 0, sizeof(error));
+  const int32_t independently_rejected =
+      ocpn_portable_runtime_calculate_route(runtime, &request, &result, error,
+                                             sizeof(error));
+  ok = ok && baseline_chart_calls > 0 && independently_rejected != 0 &&
+       std::strstr(error, "independent validation rejected") != nullptr;
+  state.reject_chart_query_call = 0;
+  state.chart_query_calls = 0;
 
   // A route requiring several forecast steps must expose bounded retained
   // isochrones and predecessor traces for host-side inspection rendering.
@@ -538,6 +578,42 @@ bool RoutingLifecycle(const char* component_path) {
   ok = ok && rejected != 0 &&
        std::strstr(error, "environmental limits") != nullptr;
 
+  // Propulsion is an explicit policy, disabled by default.  The same route
+  // which cannot sail inside this deliberately narrow TWA sector must become
+  // feasible when motor-only operation is granted, and must report auditable
+  // time/fuel metrics.  A real motor-time budget must then reject it.
+  auto motor_request = rejected_request;
+  motor_request.allow_motor = 1;
+  motor_request.motor_below_sailing_speed_knots = 30.0;
+  motor_request.motor_speed_knots = 5.5;
+  motor_request.motor_crossover_hysteresis_knots = 0.2;
+  motor_request.minimum_motor_run_seconds = 0;
+  motor_request.mode_change_penalty_seconds = 120;
+  motor_request.maximum_motor_seconds = 24 * 3600;
+  motor_request.fuel_consumption_litres_per_hour = 2.5;
+  motor_request.maximum_fuel_litres = 100.0;
+  motor_request.limits_available |= 16 | 32 | 64;
+  result.point_count = 0;
+  result.diagnostic_len = 0;
+  std::memset(error, 0, sizeof(error));
+  ok = ok && CallSucceeded(ocpn_portable_runtime_calculate_route(
+                               runtime, &motor_request, &result, error,
+                               sizeof(error)),
+                           "calculate motor-only route", error);
+  ok = ok && result.point_count >= 2 && result.motor_seconds > 0 &&
+       result.estimated_fuel_litres > 0.0 &&
+       result.propulsion_transitions > 0 &&
+       (result.metrics_available & 2) != 0;
+  motor_request.maximum_motor_seconds = 1;
+  result.point_count = 0;
+  result.diagnostic_len = 0;
+  std::memset(error, 0, sizeof(error));
+  const int32_t motor_budget_rejected =
+      ocpn_portable_runtime_calculate_route(runtime, &motor_request, &result,
+                                             error, sizeof(error));
+  ok = ok && motor_budget_rejected != 0 &&
+       std::strstr(error, "environmental limits") != nullptr;
+
   auto invalid_angles = request;
   invalid_angles.min_true_wind_angle_degrees = 170.0;
   invalid_angles.max_true_wind_angle_degrees = 40.0;
@@ -581,6 +657,8 @@ bool RoutingLifecycle(const char* component_path) {
       std::vector<ocpn_portable_route_line> local_isochrone_lines(2000);
       std::vector<ocpn_portable_route_point> local_trace_points(20000);
       std::vector<ocpn_portable_route_line> local_trace_lines(2000);
+      std::vector<ocpn_portable_route_environment_point>
+          local_route_environment(1000);
       char local_diagnostic[4096] = {};
       char local_error[4096] = {};
       ocpn_portable_route_result local_result{};
@@ -594,6 +672,9 @@ bool RoutingLifecycle(const char* component_path) {
       local_result.trace_point_capacity = local_trace_points.size();
       local_result.traces = local_trace_lines.data();
       local_result.trace_capacity = local_trace_lines.size();
+      local_result.route_environment = local_route_environment.data();
+      local_result.route_environment_capacity =
+          local_route_environment.size();
       local_result.diagnostic = local_diagnostic;
       local_result.diagnostic_capacity = sizeof(local_diagnostic);
       replica_results[index] = ocpn_portable_runtime_calculate_route(

@@ -73,6 +73,10 @@ typedef struct ocpn_portable_route_request {
   size_t polar_count;
   uint32_t time_step_seconds;
   uint16_t heading_step_degrees;
+  uint16_t refined_heading_step_degrees;
+  uint8_t adaptive_headings;
+  double spatial_cell_nautical_miles;
+  uint8_t labels_per_cell;
   uint32_t max_hours;
   uint32_t max_states;
   uint8_t avoid_unsafe_charts;
@@ -81,6 +85,8 @@ typedef struct ocpn_portable_route_request {
   double max_wind_knots;
   double max_apparent_wind_knots;
   double max_wave_metres;
+  double max_opposing_wind_current_knots_squared;
+  double land_safety_margin_nautical_miles;
   double maximum_latitude_degrees;
   double upwind_efficiency;
   double downwind_efficiency;
@@ -88,11 +94,24 @@ typedef struct ocpn_portable_route_request {
   double destination_tolerance_nm;
   uint32_t tack_penalty_seconds;
   uint32_t gybe_penalty_seconds;
+  uint8_t allow_motor_sailing;
+  uint8_t allow_motor;
+  double motor_below_sailing_speed_knots;
+  double motor_speed_knots;
+  double motor_sailing_boost_knots;
+  double motor_crossover_hysteresis_knots;
+  uint32_t minimum_motor_run_seconds;
+  uint32_t mode_change_penalty_seconds;
+  uint32_t maximum_motor_seconds;
+  double fuel_consumption_litres_per_hour;
+  double maximum_fuel_litres;
   uint8_t use_currents;
   uint8_t require_current_data;
   uint8_t use_waves;
   uint8_t require_wave_data;
-  uint32_t limits_available; /* bit 0 true wind, bit 1 waves, bit 2 apparent */
+  uint32_t limits_available; /* bit 0 true wind, bit 1 waves, bit 2 apparent,
+                                bit 3 opposing wind/current, bit 4 maximum
+                                motor time, bit 5 fuel rate, bit 6 fuel */
 } ocpn_portable_route_request;
 
 typedef struct ocpn_portable_route_point {
@@ -107,6 +126,18 @@ typedef struct ocpn_portable_route_line {
   size_t point_count;
   int64_t unix_time;
 } ocpn_portable_route_line;
+
+typedef struct ocpn_portable_route_environment_point {
+  double latitude;
+  double longitude;
+  int64_t unix_time;
+  double wind_u_knots;
+  double wind_v_knots;
+  double current_u_knots;
+  double current_v_knots;
+  double wave_height_metres;
+  uint8_t available; /* bit 0 current, bit 1 wave */
+} ocpn_portable_route_environment_point;
 
 typedef struct ocpn_portable_route_result {
   ocpn_portable_route_point* points;
@@ -124,6 +155,9 @@ typedef struct ocpn_portable_route_result {
   ocpn_portable_route_line* traces;
   size_t trace_capacity;
   size_t trace_count;
+  ocpn_portable_route_environment_point* route_environment;
+  size_t route_environment_capacity;
+  size_t route_environment_count;
   double distance_nautical_miles;
   uint64_t duration_seconds;
   uint32_t states_examined;
@@ -136,8 +170,11 @@ typedef struct ocpn_portable_route_result {
   double average_current_knots;
   double maximum_current_knots;
   uint32_t tacks;
+  uint64_t motor_seconds;
+  double estimated_fuel_litres;
+  uint32_t propulsion_transitions;
   uint8_t comfort_level;
-  uint8_t metrics_available; /* bit 0 current metrics */
+  uint8_t metrics_available; /* bit 0 current metrics, bit 1 fuel */
   char* diagnostic;
   size_t diagnostic_capacity;
   size_t diagnostic_len;

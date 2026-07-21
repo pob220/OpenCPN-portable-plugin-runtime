@@ -4,12 +4,12 @@ wit_bindgen::generate!({
 });
 
 use exports::opencpn::portable::plugin::{
-    PolarGrid, RouteInspectionLine, RoutePoint, RouteRequest, RouteResult,
+    PolarGrid, RouteEnvironmentPoint, RouteInspectionLine, RoutePoint, RouteRequest, RouteResult,
 };
 use opencpn::portable::host::{
     self, ChartCoverageState, EnvironmentSampleRequest, GeoPoint, GeoSegment, LogLevel,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 struct IWeatherRouting;
 const ACTION_OPEN: &str = "iweather-routing.open";
@@ -23,8 +23,16 @@ struct Node {
     parent: Option<usize>,
     sailed_nm: f64,
     tack: i8,
+    propulsion_mode: u8,
+    motor_seconds: u64,
+    propulsion_run_seconds: u64,
+    propulsion_transitions: u32,
     reached_destination: bool,
 }
+
+const PROPULSION_SAIL: u8 = 0;
+const PROPULSION_MOTOR_SAIL: u8 = 1;
+const PROPULSION_MOTOR: u8 = 2;
 
 fn radians(value: f64) -> f64 {
     value.to_radians()
@@ -190,6 +198,52 @@ fn angular_difference(first: f64, second: f64) -> f64 {
     (first - second + 540.0).rem_euclid(360.0) - 180.0
 }
 
+/// Deterministic adaptive heading set derived from the SuperCPN routing
+/// strategy.  A coarse fan preserves global exploration while a finer fan
+/// around the destination bearing and exact polar laylines avoids quantising
+/// away narrow viable passages.  Quantised integer degrees make ordering and
+/// de-duplication identical on every supported host architecture.
+fn candidate_headings(request: &RouteRequest, target: f64, wind_u: f64, wind_v: f64) -> Vec<f64> {
+    const SCALE: f64 = 1_000_000.0;
+    let mut values = BTreeSet::new();
+    let insert = |set: &mut BTreeSet<i64>, value: f64| {
+        set.insert((value.rem_euclid(360.0) * SCALE).round() as i64);
+    };
+    let coarse = i32::from(request.heading_step_degrees).max(2);
+    let search = request.maximum_search_angle_degrees.round() as i32;
+    for offset in (-search..=search).step_by(coarse as usize) {
+        insert(&mut values, target + f64::from(offset));
+    }
+    if request.adaptive_headings {
+        let fine = i32::from(request.refined_heading_step_degrees).max(1);
+        let local = (coarse * 2).min(search);
+        for offset in (-local..=local).step_by(fine as usize) {
+            insert(&mut values, target + f64::from(offset));
+        }
+    }
+
+    let wind_to = wind_u.atan2(wind_v).to_degrees().rem_euclid(360.0);
+    let wind_from = (wind_to + 180.0).rem_euclid(360.0);
+    for angle in [
+        request.min_true_wind_angle_degrees,
+        request.max_true_wind_angle_degrees,
+    ] {
+        for side in [-1.0, 1.0] {
+            let heading = wind_from + side * angle;
+            if angular_difference(heading, target).abs()
+                <= request.maximum_search_angle_degrees + 1e-9
+            {
+                insert(&mut values, heading);
+            }
+        }
+    }
+    insert(&mut values, target);
+    values
+        .into_iter()
+        .map(|value| value as f64 / SCALE)
+        .collect()
+}
+
 fn true_wind_angle(wind_u: f64, wind_v: f64, heading: f64) -> (f64, i8) {
     let wind_to = wind_u.atan2(wind_v).to_degrees().rem_euclid(360.0);
     let wind_from = (wind_to + 180.0).rem_euclid(360.0);
@@ -207,10 +261,52 @@ struct RouteStatistics {
     average_current_knots: Option<f64>,
     maximum_current_knots: Option<f64>,
     tacks: u32,
+    motor_seconds: u64,
+    estimated_fuel_litres: Option<f64>,
+    propulsion_transitions: u32,
     comfort_level: u8,
 }
 
-fn route_statistics(points: &[RoutePoint]) -> Result<RouteStatistics, String> {
+fn route_environment(points: &[RoutePoint]) -> Result<Vec<RouteEnvironmentPoint>, String> {
+    let requests: Vec<_> = points
+        .iter()
+        .map(|point| EnvironmentSampleRequest {
+            latitude: point.latitude,
+            longitude: point.longitude,
+            unix_time: point.unix_time,
+        })
+        .collect();
+    let samples = host::environment_sample_batch(&requests)?;
+    if samples.len() != points.len() {
+        return Err("environment provider returned the wrong route-profile batch length".into());
+    }
+    points
+        .iter()
+        .zip(samples)
+        .map(|(point, sample)| {
+            let (Some(wind_u_knots), Some(wind_v_knots)) =
+                (sample.wind_u_knots, sample.wind_v_knots)
+            else {
+                return Err("completed route lost wind coverage in its route profile".into());
+            };
+            Ok(RouteEnvironmentPoint {
+                latitude: point.latitude,
+                longitude: point.longitude,
+                unix_time: point.unix_time,
+                wind_u_knots,
+                wind_v_knots,
+                current_u_knots: sample.current_u_knots,
+                current_v_knots: sample.current_v_knots,
+                wave_height_metres: sample.wave_height_metres,
+            })
+        })
+        .collect()
+}
+
+fn route_statistics(
+    request: &RouteRequest,
+    points: &[RoutePoint],
+) -> Result<RouteStatistics, String> {
     if points.len() < 2 {
         return Err("completed route has too few points for metrics".into());
     }
@@ -237,6 +333,10 @@ fn route_statistics(points: &[RoutePoint]) -> Result<RouteStatistics, String> {
     let mut current_count = 0usize;
     let mut tacks = 0u32;
     let mut previous_tack = 0i8;
+    let mut previous_mode = PROPULSION_SAIL;
+    let mut motor_seconds = 0u64;
+    let mut propulsion_run_seconds = 0u64;
+    let mut propulsion_transitions = 0u32;
     let mut comfort_level = 1u8;
     for (index, pair) in points.windows(2).enumerate() {
         let elapsed_hours = (pair[1].unix_time - pair[0].unix_time) as f64 / 3600.0;
@@ -265,13 +365,40 @@ fn route_statistics(points: &[RoutePoint]) -> Result<RouteStatistics, String> {
         if previous_tack != 0 && tack != previous_tack && twa <= 90.0 {
             tacks += 1;
         }
-        previous_tack = tack;
         let (current_u, current_v, has_current) =
             match (sample.current_u_knots, sample.current_v_knots) {
                 (Some(u), Some(v)) => (u, v, true),
                 _ => (0.0, 0.0, false),
             };
         let heading_radians = radians(heading);
+        let leg_seconds = (pair[1].unix_time - pair[0].unix_time).max(1) as u32;
+        let motion = motion_for_heading(
+            request,
+            wind_u,
+            wind_v,
+            current_u,
+            current_v,
+            heading,
+            previous_tack,
+            previous_mode,
+            propulsion_run_seconds,
+            leg_seconds,
+        )
+        .ok_or_else(|| "completed route violates its propulsion policy".to_string())?;
+        previous_tack = motion.tack;
+        propulsion_run_seconds = next_propulsion_run_seconds(
+            previous_mode,
+            motion.propulsion_mode,
+            propulsion_run_seconds,
+            leg_seconds,
+        );
+        if motion.propulsion_mode != previous_mode {
+            propulsion_transitions = propulsion_transitions.saturating_add(1);
+        }
+        previous_mode = motion.propulsion_mode;
+        if motion.propulsion_mode != PROPULSION_SAIL {
+            motor_seconds = motor_seconds.saturating_add(u64::from(leg_seconds));
+        }
         let speed = (sog * heading_radians.sin() - current_u)
             .hypot(sog * heading_radians.cos() - current_v);
         speed_total += speed;
@@ -314,6 +441,11 @@ fn route_statistics(points: &[RoutePoint]) -> Result<RouteStatistics, String> {
         average_current_knots: (current_count > 0).then_some(current_total / current_count as f64),
         maximum_current_knots: (current_count > 0).then_some(current_max),
         tacks,
+        motor_seconds,
+        estimated_fuel_litres: request
+            .fuel_consumption_litres_per_hour
+            .map(|rate| rate * motor_seconds as f64 / 3600.0),
+        propulsion_transitions,
         comfort_level,
     })
 }
@@ -373,6 +505,7 @@ struct Motion {
     north_knots: f64,
     speed_through_water: f64,
     tack: i8,
+    propulsion_mode: u8,
 }
 
 fn motion_for_heading(
@@ -383,20 +516,54 @@ fn motion_for_heading(
     current_v: f64,
     heading: f64,
     previous_tack: i8,
+    previous_mode: u8,
+    propulsion_run_seconds: u64,
+    step_seconds: u32,
 ) -> Option<Motion> {
     let wind = wind_u.hypot(wind_v);
     let (twa, tack) = true_wind_angle(wind_u, wind_v, heading);
-    if twa + 1e-9 < request.min_true_wind_angle_degrees
-        || twa - 1e-9 > request.max_true_wind_angle_degrees
-    {
-        return None;
+    let sailing_allowed = twa + 1e-9 >= request.min_true_wind_angle_degrees
+        && twa - 1e-9 <= request.max_true_wind_angle_degrees;
+    let sail_speed = sailing_allowed
+        .then(|| {
+            let efficiency = if twa <= 90.0 {
+                request.upwind_efficiency
+            } else {
+                request.downwind_efficiency
+            };
+            polar_speed(request, wind, twa).map(|speed| speed * efficiency)
+        })
+        .flatten();
+    let minimum_run_active = previous_mode != PROPULSION_SAIL
+        && propulsion_run_seconds < u64::from(request.minimum_motor_run_seconds);
+    let threshold = request.motor_below_sailing_speed_knots
+        + if previous_mode == PROPULSION_SAIL {
+            0.0
+        } else {
+            request.motor_crossover_hysteresis_knots
+        };
+    let engage_motor = sail_speed.is_none_or(|speed| speed < threshold);
+    let mut choices = Vec::new();
+    if !minimum_run_active {
+        if let Some(speed) = sail_speed {
+            choices.push((speed, PROPULSION_SAIL));
+        }
     }
-    let efficiency = if twa <= 90.0 {
-        request.upwind_efficiency
-    } else {
-        request.downwind_efficiency
-    };
-    let speed = polar_speed(request, wind, twa)? * efficiency;
+    if request.allow_motor_sailing && sailing_allowed && (engage_motor || minimum_run_active) {
+        if let Some(speed) = sail_speed {
+            choices.push((
+                speed + request.motor_sailing_boost_knots,
+                PROPULSION_MOTOR_SAIL,
+            ));
+        }
+    }
+    if request.allow_motor && (engage_motor || minimum_run_active) {
+        choices.push((request.motor_speed_knots, PROPULSION_MOTOR));
+    }
+    let (speed, propulsion_mode) = choices
+        .into_iter()
+        .filter(|(speed, _)| speed.is_finite() && *speed > 0.05)
+        .max_by(|left, right| left.0.total_cmp(&right.0))?;
     let heading_rad = radians(heading);
     let boat_east = speed * heading_rad.sin();
     let boat_north = speed * heading_rad.cos();
@@ -406,28 +573,50 @@ fn motion_for_heading(
     {
         return None;
     }
-    let penalty = if previous_tack != 0 && previous_tack != tack {
-        if twa <= 90.0 {
-            request.tack_penalty_seconds
+    let manoeuvre_penalty =
+        if propulsion_mode != PROPULSION_MOTOR && previous_tack != 0 && previous_tack != tack {
+            if twa <= 90.0 {
+                request.tack_penalty_seconds
+            } else {
+                request.gybe_penalty_seconds
+            }
         } else {
-            request.gybe_penalty_seconds
-        }
+            0
+        };
+    let mode_penalty = if previous_mode != propulsion_mode {
+        request.mode_change_penalty_seconds
     } else {
         0
     };
-    if penalty >= request.time_step_seconds {
+    let penalty = manoeuvre_penalty.saturating_add(mode_penalty);
+    if penalty >= step_seconds {
         return None;
     }
     // Manoeuvre time reduces progress through the water while current still
     // acts for the complete forecast step.
-    let moving_fraction =
-        (request.time_step_seconds - penalty) as f64 / request.time_step_seconds as f64;
+    let moving_fraction = (step_seconds - penalty) as f64 / step_seconds as f64;
     Some(Motion {
         east_knots: boat_east * moving_fraction + current_u,
         north_knots: boat_north * moving_fraction + current_v,
         speed_through_water: speed,
         tack,
+        propulsion_mode,
     })
+}
+
+fn next_propulsion_run_seconds(
+    previous_mode: u8,
+    next_mode: u8,
+    previous_run_seconds: u64,
+    elapsed_seconds: u32,
+) -> u64 {
+    if next_mode == PROPULSION_SAIL {
+        0
+    } else if previous_mode == PROPULSION_SAIL {
+        u64::from(elapsed_seconds)
+    } else {
+        previous_run_seconds.saturating_add(u64::from(elapsed_seconds))
+    }
 }
 
 fn advance(lat: f64, lon: f64, east_knots: f64, north_knots: f64, seconds: u32) -> (f64, f64, f64) {
@@ -450,6 +639,57 @@ fn advance(lat: f64, lon: f64, east_knots: f64, north_knots: f64, seconds: u32) 
     )
 }
 
+fn opposing_wind_current(wind_u: f64, wind_v: f64, current_u: f64, current_v: f64) -> f64 {
+    -(wind_u * current_u + wind_v * current_v)
+}
+
+/// Return the centre segment and conservative parallel probes at the
+/// configured clearance.  The host owns land/chart data; the portable engine
+/// only sends value geometry.  Requiring every probe to be covered turns the
+/// nominal line into a bounded safety corridor without exposing chart
+/// objects across the runtime boundary.
+fn clearance_segments(segment: &GeoSegment, margin_nm: f64) -> Vec<GeoSegment> {
+    let mut result = vec![segment.clone()];
+    if margin_nm <= 1e-9 {
+        return result;
+    }
+    let course = bearing(
+        segment.start.latitude,
+        segment.start.longitude,
+        segment.end.latitude,
+        segment.end.longitude,
+    );
+    let course_radians = radians(course);
+    let perpendicular_east = course_radians.cos();
+    let perpendicular_north = -course_radians.sin();
+    let average_latitude = (segment.start.latitude + segment.end.latitude) * 0.5;
+    let longitude_scale = average_latitude.to_radians().cos().abs().max(0.05);
+    for side in [-1.0, 1.0] {
+        let latitude_offset = side * perpendicular_north * margin_nm / 60.0;
+        let longitude_offset = side * perpendicular_east * margin_nm / (60.0 * longitude_scale);
+        result.push(GeoSegment {
+            start: GeoPoint {
+                latitude: (segment.start.latitude + latitude_offset).clamp(-90.0, 90.0),
+                longitude: (segment.start.longitude + longitude_offset + 540.0).rem_euclid(360.0)
+                    - 180.0,
+            },
+            end: GeoPoint {
+                latitude: (segment.end.latitude + latitude_offset).clamp(-90.0, 90.0),
+                longitude: (segment.end.longitude + longitude_offset + 540.0).rem_euclid(360.0)
+                    - 180.0,
+            },
+        });
+    }
+    result
+}
+
+fn chart_corridor_is_covered(results: &[opencpn::portable::host::ChartSegmentResult]) -> bool {
+    !results.is_empty()
+        && results
+            .iter()
+            .all(|result| result.state == ChartCoverageState::Covered)
+}
+
 fn validate(request: &RouteRequest) -> Result<(), String> {
     for value in [request.start_latitude, request.destination_latitude] {
         if !value.is_finite() || !(-90.0..=90.0).contains(&value) {
@@ -463,6 +703,11 @@ fn validate(request: &RouteRequest) -> Result<(), String> {
     }
     if !(60..=21600).contains(&request.time_step_seconds)
         || !(2..=90).contains(&request.heading_step_degrees)
+        || !(1..=90).contains(&request.refined_heading_step_degrees)
+        || request.refined_heading_step_degrees > request.heading_step_degrees
+        || !request.spatial_cell_nautical_miles.is_finite()
+        || !(0.25..=30.0).contains(&request.spatial_cell_nautical_miles)
+        || !(1..=8).contains(&request.labels_per_cell)
         || !(1..=720).contains(&request.max_hours)
         || !(100..=1_000_000).contains(&request.max_states)
     {
@@ -528,15 +773,44 @@ fn validate(request: &RouteRequest) -> Result<(), String> {
         || !(30.0..=180.0).contains(&request.maximum_search_angle_degrees)
         || !(0.05..=20.0).contains(&request.destination_tolerance_nm)
         || !(1.0..=90.0).contains(&request.maximum_latitude_degrees)
+        || !request.land_safety_margin_nautical_miles.is_finite()
+        || !(0.0..=20.0).contains(&request.land_safety_margin_nautical_miles)
         || request.require_current_data && !request.use_currents
         || request.require_wave_data && !request.use_waves
     {
         return Err("route vessel, data-policy or search settings are invalid".into());
     }
+    if !request.motor_below_sailing_speed_knots.is_finite()
+        || !(0.0..=30.0).contains(&request.motor_below_sailing_speed_knots)
+        || !request.motor_crossover_hysteresis_knots.is_finite()
+        || !(0.0..=10.0).contains(&request.motor_crossover_hysteresis_knots)
+        || request.minimum_motor_run_seconds > 86_400
+        || request.mode_change_penalty_seconds > 21_600
+        || (request.allow_motor
+            && (!request.motor_speed_knots.is_finite()
+                || !(0.1..=50.0).contains(&request.motor_speed_knots)))
+        || (request.allow_motor_sailing
+            && (!request.motor_sailing_boost_knots.is_finite()
+                || !(0.0..=30.0).contains(&request.motor_sailing_boost_knots)))
+        || request
+            .maximum_motor_seconds
+            .is_some_and(|limit| limit == 0)
+        || request
+            .fuel_consumption_litres_per_hour
+            .is_some_and(|rate| !rate.is_finite() || rate <= 0.0 || rate > 1_000.0)
+        || request
+            .maximum_fuel_litres
+            .is_some_and(|fuel| !fuel.is_finite() || fuel <= 0.0 || fuel > 1_000_000.0)
+        || request.maximum_fuel_litres.is_some()
+            && request.fuel_consumption_litres_per_hour.is_none()
+    {
+        return Err("route propulsion policy is invalid".into());
+    }
     for limit in [
         request.max_wind_knots,
         request.max_apparent_wind_knots,
         request.max_wave_metres,
+        request.max_opposing_wind_current_knots_squared,
     ]
     .into_iter()
     .flatten()
@@ -551,6 +825,232 @@ fn validate(request: &RouteRequest) -> Result<(), String> {
         return Err("route endpoint exceeds the maximum latitude".into());
     }
     Ok(())
+}
+
+fn motor_budget_allows(request: &RouteRequest, seconds: u64) -> bool {
+    if request
+        .maximum_motor_seconds
+        .is_some_and(|limit| seconds > u64::from(limit))
+    {
+        return false;
+    }
+    if let (Some(rate), Some(limit)) = (
+        request.fuel_consumption_litres_per_hour,
+        request.maximum_fuel_litres,
+    ) {
+        if rate * seconds as f64 / 3600.0 > limit + 1e-9 {
+            return false;
+        }
+    }
+    true
+}
+
+/// Independently replay the exact delivered geometry.  This deliberately
+/// re-samples the immutable environmental dataset and chart service instead
+/// of trusting search-state decisions.  A route cannot be returned as a
+/// success unless every chronological leg passes this boundary.
+fn validate_delivered_route(request: &RouteRequest, points: &[RoutePoint]) -> Result<u64, String> {
+    if points.len() < 2 {
+        return Err("independent validation rejected an empty route".into());
+    }
+    if distance_nm(
+        points[0].latitude,
+        points[0].longitude,
+        request.start_latitude,
+        request.start_longitude,
+    ) > 0.002
+    {
+        return Err("independent validation found the wrong route start".into());
+    }
+    let end = points.last().expect("route was checked non-empty");
+    if distance_nm(
+        end.latitude,
+        end.longitude,
+        request.destination_latitude,
+        request.destination_longitude,
+    ) > request.destination_tolerance_nm + 1e-9
+    {
+        return Err("independent validation found the route outside destination tolerance".into());
+    }
+
+    let mut samples = Vec::with_capacity(points.len() - 1);
+    let mut segments = Vec::with_capacity(points.len() - 1);
+    for pair in points.windows(2) {
+        if pair[1].unix_time <= pair[0].unix_time {
+            return Err("independent validation found non-increasing timestamps".into());
+        }
+        let longitude_delta = angular_difference(pair[1].longitude, pair[0].longitude);
+        samples.push(EnvironmentSampleRequest {
+            latitude: (pair[0].latitude + pair[1].latitude) * 0.5,
+            longitude: (pair[0].longitude + longitude_delta * 0.5 + 540.0).rem_euclid(360.0)
+                - 180.0,
+            unix_time: pair[0].unix_time + (pair[1].unix_time - pair[0].unix_time) / 2,
+        });
+        let segment = GeoSegment {
+            start: GeoPoint {
+                latitude: pair[0].latitude,
+                longitude: pair[0].longitude,
+            },
+            end: GeoPoint {
+                latitude: pair[1].latitude,
+                longitude: pair[1].longitude,
+            },
+        };
+        segments.extend(clearance_segments(
+            &segment,
+            request.land_safety_margin_nautical_miles,
+        ));
+    }
+    let environments = host::environment_sample_batch(&samples)?;
+    if environments.len() != samples.len() {
+        return Err("independent validation received the wrong environmental batch length".into());
+    }
+    if request.avoid_unsafe_charts {
+        let chart_results = host::charts_query_segments(&segments)?;
+        if chart_results.len() != segments.len() {
+            return Err("independent validation received the wrong chart batch length".into());
+        }
+        let probes_per_leg = if request.land_safety_margin_nautical_miles > 1e-9 {
+            3
+        } else {
+            1
+        };
+        if chart_results
+            .chunks(probes_per_leg)
+            .any(|results| !chart_corridor_is_covered(results))
+        {
+            return Err(
+                "independent validation rejected unsafe or uncovered route geometry".into(),
+            );
+        }
+    }
+
+    let mut previous_tack = 0i8;
+    let mut previous_mode = PROPULSION_SAIL;
+    let mut motor_seconds = 0u64;
+    let mut propulsion_run_seconds = 0u64;
+    for (index, pair) in points.windows(2).enumerate() {
+        let environment = &environments[index];
+        let (Some(wind_u), Some(wind_v)) = (environment.wind_u_knots, environment.wind_v_knots)
+        else {
+            return Err(format!(
+                "independent validation lost wind coverage on leg {}",
+                index + 1
+            ));
+        };
+        let wind = wind_u.hypot(wind_v);
+        if request
+            .max_wind_knots
+            .is_some_and(|limit| wind > limit + 1e-9)
+        {
+            return Err("independent validation exceeded the true-wind limit".into());
+        }
+        if request.use_waves {
+            if request.require_wave_data && environment.wave_height_metres.is_none() {
+                return Err("independent validation lost required wave coverage".into());
+            }
+            if request.max_wave_metres.is_some_and(|limit| {
+                environment
+                    .wave_height_metres
+                    .is_some_and(|height| height > limit + 1e-9)
+            }) {
+                return Err("independent validation exceeded the wave limit".into());
+            }
+        }
+        let current_available =
+            environment.current_u_knots.is_some() && environment.current_v_knots.is_some();
+        if request.use_currents && request.require_current_data && !current_available {
+            return Err("independent validation lost required current coverage".into());
+        }
+        let current_u = if request.use_currents {
+            environment.current_u_knots.unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        let current_v = if request.use_currents {
+            environment.current_v_knots.unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        if request
+            .max_opposing_wind_current_knots_squared
+            .is_some_and(|limit| {
+                current_available
+                    && opposing_wind_current(wind_u, wind_v, current_u, current_v) > limit + 1e-9
+            })
+        {
+            return Err("independent validation exceeded the wind-against-current limit".into());
+        }
+        let heading = bearing(
+            pair[0].latitude,
+            pair[0].longitude,
+            pair[1].latitude,
+            pair[1].longitude,
+        );
+        let leg_seconds = (pair[1].unix_time - pair[0].unix_time) as u32;
+        let motion = motion_for_heading(
+            request,
+            wind_u,
+            wind_v,
+            current_u,
+            current_v,
+            heading,
+            previous_tack,
+            previous_mode,
+            propulsion_run_seconds,
+            leg_seconds,
+        )
+        .ok_or_else(|| {
+            "independent validation rejected the vessel propulsion or wind-angle policy".to_string()
+        })?;
+        previous_tack = motion.tack;
+        propulsion_run_seconds = next_propulsion_run_seconds(
+            previous_mode,
+            motion.propulsion_mode,
+            propulsion_run_seconds,
+            leg_seconds,
+        );
+        previous_mode = motion.propulsion_mode;
+        if motion.propulsion_mode != PROPULSION_SAIL {
+            motor_seconds = motor_seconds.saturating_add(u64::from(leg_seconds));
+            if !motor_budget_allows(request, motor_seconds) {
+                return Err("independent validation exceeded the motor-time or fuel limit".into());
+            }
+        }
+        let speed_through_water = motion.speed_through_water;
+        let heading_radians = radians(heading);
+        let boat_east = speed_through_water * heading_radians.sin();
+        let boat_north = speed_through_water * heading_radians.cos();
+        // Current is added exactly once.  Compare the delivered leg against
+        // independently reconstructed along-track progress with a small
+        // allowance for spherical interpolation and manoeuvre time.
+        let ground_east = boat_east + current_u;
+        let ground_north = boat_north + current_v;
+        let along_track =
+            ground_east * heading_radians.sin() + ground_north * heading_radians.cos();
+        let elapsed_hours = (pair[1].unix_time - pair[0].unix_time) as f64 / 3600.0;
+        let delivered_distance = distance_nm(
+            pair[0].latitude,
+            pair[0].longitude,
+            pair[1].latitude,
+            pair[1].longitude,
+        );
+        if !along_track.is_finite()
+            || along_track <= 0.05
+            || delivered_distance > along_track * elapsed_hours * 1.30 + 0.25
+        {
+            return Err(format!(
+                "independent dynamics replay rejected leg {}",
+                index + 1
+            ));
+        }
+    }
+    Ok((environments.len()
+        + if request.avoid_unsafe_charts {
+            segments.len()
+        } else {
+            0
+        }) as u64)
 }
 
 fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
@@ -571,6 +1071,10 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
         parent: None,
         sailed_nm: 0.0,
         tack: 0,
+        propulsion_mode: PROPULSION_SAIL,
+        motor_seconds: 0,
+        propulsion_run_seconds: 0,
+        propulsion_transitions: 0,
         reached_destination: false,
     }];
     let mut frontier = vec![0usize];
@@ -610,7 +1114,8 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
             ));
         }
         let mut candidates: Vec<Node> = Vec::new();
-        let mut segments: Vec<GeoSegment> = Vec::new();
+        let mut chart_segments: Vec<GeoSegment> = Vec::new();
+        let mut chart_ranges: Vec<std::ops::Range<usize>> = Vec::new();
         for (frontier_index, &node_index) in frontier.iter().enumerate() {
             let node = &nodes[node_index];
             let env = &samples[frontier_index];
@@ -646,6 +1151,15 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
             } else {
                 0.0
             };
+            if request
+                .max_opposing_wind_current_knots_squared
+                .is_some_and(|limit| {
+                    current_available
+                        && opposing_wind_current(wind_u, wind_v, current_u, current_v) > limit
+                })
+            {
+                continue;
+            }
             let target = bearing(
                 node.lat,
                 node.lon,
@@ -659,7 +1173,16 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
                 request.destination_longitude,
             );
             if let Some(direct_motion) = motion_for_heading(
-                &request, wind_u, wind_v, current_u, current_v, target, node.tack,
+                &request,
+                wind_u,
+                wind_v,
+                current_u,
+                current_v,
+                target,
+                node.tack,
+                node.propulsion_mode,
+                node.propulsion_run_seconds,
+                request.time_step_seconds,
             ) {
                 let target_rad = radians(target);
                 let progress = direct_motion.east_knots * target_rad.sin()
@@ -669,7 +1192,23 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
                 } else {
                     u32::MAX
                 };
-                if seconds > 0 && seconds <= request.time_step_seconds {
+                let next_motor_seconds = node.motor_seconds.saturating_add(
+                    if direct_motion.propulsion_mode == PROPULSION_SAIL {
+                        0
+                    } else {
+                        u64::from(seconds)
+                    },
+                );
+                let next_run_seconds = next_propulsion_run_seconds(
+                    node.propulsion_mode,
+                    direct_motion.propulsion_mode,
+                    node.propulsion_run_seconds,
+                    seconds,
+                );
+                if seconds > 0
+                    && seconds <= request.time_step_seconds
+                    && motor_budget_allows(&request, next_motor_seconds)
+                {
                     candidates.push(Node {
                         lat: request.destination_latitude,
                         lon: request.destination_longitude,
@@ -677,9 +1216,14 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
                         parent: Some(node_index),
                         sailed_nm: node.sailed_nm + direct_distance,
                         tack: direct_motion.tack,
+                        propulsion_mode: direct_motion.propulsion_mode,
+                        motor_seconds: next_motor_seconds,
+                        propulsion_run_seconds: next_run_seconds,
+                        propulsion_transitions: node.propulsion_transitions
+                            + u32::from(direct_motion.propulsion_mode != node.propulsion_mode),
                         reached_destination: true,
                     });
-                    segments.push(GeoSegment {
+                    let segment = GeoSegment {
                         start: GeoPoint {
                             latitude: node.lat,
                             longitude: node.lon,
@@ -688,18 +1232,46 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
                             latitude: request.destination_latitude,
                             longitude: request.destination_longitude,
                         },
-                    });
+                    };
+                    let first = chart_segments.len();
+                    chart_segments.extend(clearance_segments(
+                        &segment,
+                        request.land_safety_margin_nautical_miles,
+                    ));
+                    chart_ranges.push(first..chart_segments.len());
                 }
             }
-            let step = request.heading_step_degrees as i32;
-            let search = request.maximum_search_angle_degrees.round() as i32;
-            for offset in (-search..=search).step_by(step as usize) {
-                let heading = (target + offset as f64).rem_euclid(360.0);
+            for heading in candidate_headings(&request, target, wind_u, wind_v) {
                 let Some(motion) = motion_for_heading(
-                    &request, wind_u, wind_v, current_u, current_v, heading, node.tack,
+                    &request,
+                    wind_u,
+                    wind_v,
+                    current_u,
+                    current_v,
+                    heading,
+                    node.tack,
+                    node.propulsion_mode,
+                    node.propulsion_run_seconds,
+                    request.time_step_seconds,
                 ) else {
                     continue;
                 };
+                let next_motor_seconds = node.motor_seconds.saturating_add(
+                    if motion.propulsion_mode == PROPULSION_SAIL {
+                        0
+                    } else {
+                        u64::from(request.time_step_seconds)
+                    },
+                );
+                let next_run_seconds = next_propulsion_run_seconds(
+                    node.propulsion_mode,
+                    motion.propulsion_mode,
+                    node.propulsion_run_seconds,
+                    request.time_step_seconds,
+                );
+                if !motor_budget_allows(&request, next_motor_seconds) {
+                    continue;
+                }
                 let (lat, lon, sailed) = advance(
                     node.lat,
                     node.lon,
@@ -720,9 +1292,14 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
                     parent: Some(node_index),
                     sailed_nm: node.sailed_nm + sailed,
                     tack: motion.tack,
+                    propulsion_mode: motion.propulsion_mode,
+                    motor_seconds: next_motor_seconds,
+                    propulsion_run_seconds: next_run_seconds,
+                    propulsion_transitions: node.propulsion_transitions
+                        + u32::from(motion.propulsion_mode != node.propulsion_mode),
                     reached_destination: false,
                 });
-                segments.push(GeoSegment {
+                let segment = GeoSegment {
                     start: GeoPoint {
                         latitude: node.lat,
                         longitude: node.lon,
@@ -731,28 +1308,34 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
                         latitude: lat,
                         longitude: lon,
                     },
-                });
+                };
+                let first = chart_segments.len();
+                chart_segments.extend(clearance_segments(
+                    &segment,
+                    request.land_safety_margin_nautical_miles,
+                ));
+                chart_ranges.push(first..chart_segments.len());
             }
         }
         if candidates.is_empty() {
             return Err("no viable states remain after environmental limits".into());
         }
         let chart_results = if request.avoid_unsafe_charts {
-            host::charts_query_segments(&segments)?
+            host::charts_query_segments(&chart_segments)?
         } else {
             Vec::new()
         };
-        if request.avoid_unsafe_charts && chart_results.len() != segments.len() {
+        if request.avoid_unsafe_charts && chart_results.len() != chart_segments.len() {
             return Err("chart service returned the wrong batch length".into());
         }
-        let mut bucketed: HashMap<(i32, i32, i8), (f64, usize)> = HashMap::new();
+        let mut bucketed: HashMap<(i32, i32, i8, u8), Vec<(f64, usize)>> = HashMap::new();
         for (candidate_index, candidate) in candidates.into_iter().enumerate() {
             examined = examined.saturating_add(1);
             if examined >= request.max_states {
                 break;
             }
             if request.avoid_unsafe_charts
-                && chart_results[candidate_index].state != ChartCoverageState::Covered
+                && !chart_corridor_is_covered(&chart_results[chart_ranges[candidate_index].clone()])
             {
                 continue;
             }
@@ -768,27 +1351,35 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
                 winner = Some(index);
                 break;
             }
+            // Quantise in approximate nautical-mile space.  Keeping several
+            // labels per cell preserves materially different arrivals while
+            // bounding memory and avoiding a fixed latitude/longitude grid.
+            let cell = request.spatial_cell_nautical_miles;
+            let longitude_scale = nodes[index].lat.to_radians().cos().abs().max(0.05);
             let key = (
-                (nodes[index].lat * 20.0).round() as i32,
-                (nodes[index].lon * 20.0).round() as i32,
+                (nodes[index].lat * 60.0 / cell).round() as i32,
+                (nodes[index].lon * 60.0 * longitude_scale / cell).round() as i32,
                 nodes[index].tack,
+                nodes[index].propulsion_mode,
             );
             let score = remaining + nodes[index].sailed_nm * 0.04;
-            match bucketed.get(&key) {
-                Some((old, _)) if *old <= score => {}
-                _ => {
-                    bucketed.insert(key, (score, index));
-                }
-            }
+            let labels = bucketed.entry(key).or_default();
+            labels.push((score, index));
+            labels.sort_by(|a, b| a.0.total_cmp(&b.0));
+            labels.truncate(usize::from(request.labels_per_cell));
         }
         if winner.is_some() {
             break;
         }
-        let mut ranked: Vec<_> = bucketed.into_values().collect();
+        let mut ranked: Vec<_> = bucketed.into_values().flatten().collect();
         ranked.sort_by(|a, b| a.0.total_cmp(&b.0));
         frontier = ranked
             .into_iter()
-            .take(320)
+            .take(
+                320usize
+                    .saturating_mul(usize::from(request.labels_per_cell))
+                    .min(1280),
+            )
             .map(|(_, index)| index)
             .collect();
         if frontier.is_empty() || examined >= request.max_states {
@@ -824,16 +1415,21 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
     let winner_node = &nodes[winner];
     if winner_node.reached_destination {
         let chain = route_chain(&nodes, winner);
-        let statistics = route_statistics(&chain)?;
-        host::routing_progress(100, "Route complete and final approach validated");
+        let validation_samples = validate_delivered_route(&request, &chain)?;
+        let statistics = route_statistics(&request, &chain)?;
+        let route_environment = route_environment(&chain)?;
+        host::routing_progress(100, "Route complete and independently validated");
         return Ok(RouteResult {
             distance_nautical_miles: winner_node.sailed_nm,
             duration_seconds: (winner_node.time - request.departure_unix_time).max(0) as u64,
             states_examined: examined,
-            diagnostic: "Adaptive time-layer routing completed using typed iGRIB samples and batched host chart checks. The destination leg was generated and checked inside the search. Model and chart results are advisory, not navigation-authoritative.".into(),
+            diagnostic: format!(
+                "SuperCPN-derived adaptive time-layer routing completed using typed iGRIB samples and batched host chart checks. The exact delivered geometry passed an independent chronological replay using {validation_samples} fresh environmental/chart samples."
+            ),
             points: chain,
             isochrones,
             traces,
+            route_environment,
             average_speed_knots: statistics.average_speed_knots,
             maximum_speed_knots: statistics.maximum_speed_knots,
             average_sog_knots: statistics.average_sog_knots,
@@ -843,6 +1439,9 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
             average_current_knots: statistics.average_current_knots,
             maximum_current_knots: statistics.maximum_current_knots,
             tacks: statistics.tacks,
+            motor_seconds: statistics.motor_seconds,
+            estimated_fuel_litres: statistics.estimated_fuel_litres,
+            propulsion_transitions: statistics.propulsion_transitions,
             comfort_level: statistics.comfort_level,
         });
     }
@@ -893,6 +1492,20 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
     } else {
         0.0
     };
+    if request
+        .max_opposing_wind_current_knots_squared
+        .is_some_and(|limit| {
+            final_current_available
+                && opposing_wind_current(
+                    final_wind_u,
+                    final_wind_v,
+                    final_current_u,
+                    final_current_v,
+                ) > limit
+        })
+    {
+        return Err("final approach exceeds the wind-against-current limit".into());
+    }
     let final_heading = bearing(
         winner_node.lat,
         winner_node.lon,
@@ -907,6 +1520,9 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
         final_current_v,
         final_heading,
         winner_node.tack,
+        winner_node.propulsion_mode,
+        winner_node.propulsion_run_seconds,
+        request.time_step_seconds,
     )
     .ok_or_else(|| {
         "final approach violates true-wind-angle, apparent-wind or manoeuvre limits".to_string()
@@ -928,6 +1544,16 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
     if final_seconds > request.time_step_seconds as i64 {
         return Err("final approach cannot reach the destination in one routing step".into());
     }
+    let final_motor_seconds = winner_node.motor_seconds.saturating_add(
+        if final_motion.propulsion_mode == PROPULSION_SAIL {
+            0
+        } else {
+            final_seconds as u64
+        },
+    );
+    if !motor_budget_allows(&request, final_motor_seconds) {
+        return Err("final approach exceeds the motor-time or fuel limit".into());
+    }
     let arrival_time = chain
         .last()
         .map(|p| p.unix_time)
@@ -937,7 +1563,7 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
         longitude: request.destination_longitude,
         unix_time: arrival_time + final_seconds,
     });
-    let final_segment = [GeoSegment {
+    let final_segment = GeoSegment {
         start: GeoPoint {
             latitude: chain[chain.len() - 2].latitude,
             longitude: chain[chain.len() - 2].longitude,
@@ -946,26 +1572,34 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
             latitude: request.destination_latitude,
             longitude: request.destination_longitude,
         },
-    }];
+    };
     if request.avoid_unsafe_charts {
-        let final_chart_result = host::charts_query_segments(&final_segment)?;
-        if final_chart_result.len() != 1 {
+        let final_probes =
+            clearance_segments(&final_segment, request.land_safety_margin_nautical_miles);
+        let final_chart_result = host::charts_query_segments(&final_probes)?;
+        if final_chart_result.len() != final_probes.len() {
             return Err("chart service returned the wrong final-approach batch length".into());
         }
-        if final_chart_result[0].state != ChartCoverageState::Covered {
+        if !chart_corridor_is_covered(&final_chart_result) {
             return Err("final approach failed the independent chart-safety check".into());
         }
     }
-    let statistics = route_statistics(&chain)?;
-    host::routing_progress(100, "Route complete and final approach validated");
+    let validation_samples = validate_delivered_route(&request, &chain)?;
+    let statistics = route_statistics(&request, &chain)?;
+    let route_environment = route_environment(&chain)?;
+    host::routing_progress(100, "Route complete and independently validated");
     Ok(RouteResult {
         distance_nautical_miles: nodes[winner].sailed_nm + final_distance,
-        duration_seconds: (chain.last().unwrap().unix_time - request.departure_unix_time).max(0) as u64,
+        duration_seconds: (chain.last().unwrap().unix_time - request.departure_unix_time).max(0)
+            as u64,
         states_examined: examined,
-        diagnostic: "Adaptive time-layer routing completed using typed iGRIB samples and batched host chart checks. Model and chart results are advisory, not navigation-authoritative.".into(),
+        diagnostic: format!(
+            "SuperCPN-derived adaptive time-layer routing completed using typed iGRIB samples and batched host chart checks. The exact delivered geometry passed an independent chronological replay using {validation_samples} fresh environmental/chart samples."
+        ),
         points: chain,
         isochrones,
         traces,
+        route_environment,
         average_speed_knots: statistics.average_speed_knots,
         maximum_speed_knots: statistics.maximum_speed_knots,
         average_sog_knots: statistics.average_sog_knots,
@@ -975,6 +1609,9 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
         average_current_knots: statistics.average_current_knots,
         maximum_current_knots: statistics.maximum_current_knots,
         tacks: statistics.tacks,
+        motor_seconds: statistics.motor_seconds,
+        estimated_fuel_litres: statistics.estimated_fuel_litres,
+        propulsion_transitions: statistics.propulsion_transitions,
         comfort_level: statistics.comfort_level,
     })
 }
@@ -1015,7 +1652,7 @@ impl exports::opencpn::portable::plugin::Guest for IWeatherRouting {
         control_id: String,
         value_json: String,
     ) -> Result<String, String> {
-        if surface_id != "weather-routing.main" {
+        if surface_id != "routing-workbench" && surface_id != "weather-routing.main" {
             return Err(format!("unknown iWeatherRouting surface: {surface_id}"));
         }
         if control_id.is_empty() || value_json.len() > 64 * 1024 {

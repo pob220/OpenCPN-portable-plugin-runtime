@@ -22,13 +22,26 @@ struct PortableNavigationPosition {
   double longitude = 0.0;
 };
 
+/** Stable, value-based snapshot of an ordered OpenCPN route. */
+struct PortableNavigationRoute {
+  wxString id;
+  wxString name;
+  std::vector<PortableNavigationPosition> points;
+};
+
 class PortableWeatherRoutingHost {
 public:
   PortableWeatherRoutingHost(
       wxWindow* parent, ocpn_portable_runtime* runtime,
       std::shared_ptr<std::mutex> runtime_mutex, const wxString& package_root,
+      const wxString& plugin_id, const wxString& surface_resource,
       std::function<wxString()> dataset_summary,
       std::function<std::vector<PortableNavigationPosition>()> list_waypoints,
+      std::function<std::vector<PortableNavigationRoute>()> list_routes,
+      std::function<bool(const wxString&,
+                         const std::vector<PortableNavigationPosition>&,
+                         wxString*)>
+          create_route,
       std::function<bool(PortableNavigationPosition*)> vessel_position,
       std::function<bool(PortableNavigationPosition*)> cursor_position,
       std::function<bool(int64_t*)> displayed_environment_time,

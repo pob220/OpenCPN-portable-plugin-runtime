@@ -3,16 +3,20 @@
   "id": "org.opencpn.iweather-routing",
   "name": "iWeatherRouting",
   "version": "0.1.0",
-  "description": "Portable weather-routing proof of concept for OpenCPN",
+  "description": "Portable weather routing for OpenCPN",
   "component": "component/iweather-routing.wasm",
   "runtime": ">=0.1.0 <0.2.0",
   "portable_api": ">=0.1.0 <0.2.0",
   "requires": [
     {"interface": "org.opencpn.environment.provider", "range": ">=0.1.0 <0.2.0"}
   ],
+  "surfaces": {
+    "routing.workbench": "ui/iweather-routing.ui.json"
+  },
   "permissions": ["ui.commands", "navigation.position.read", "navigation.objects.read",
                   "weather-routing.compute", "environment.consume",
-                  "charts.coverage", "storage.user-selected"],
+                  "charts.coverage", "storage.user-selected",
+                  "navigation.routes.write"],
   "resources": ["resources/iweather-routing.svg",
                 "resources/Nicholson35_Mk1_cruising_realistic.pol",
                 "ui/iweather-routing.ui.json"],

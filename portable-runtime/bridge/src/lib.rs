@@ -23,6 +23,7 @@ wasmtime::component::bindgen!({
 });
 
 const HOST_ABI_VERSION: u32 = 9;
+const ROUTE_POINT_LIMIT: usize = 20_000;
 const ROUTE_INSPECTION_POINT_LIMIT: usize = 200_000;
 const ROUTE_INSPECTION_LINE_LIMIT: usize = 10_000;
 const ERROR_TEXT_LIMIT: usize = 4096;
@@ -110,6 +111,10 @@ pub struct RouteRequest {
     polar_count: usize,
     time_step_seconds: u32,
     heading_step_degrees: u16,
+    refined_heading_step_degrees: u16,
+    adaptive_headings: u8,
+    spatial_cell_nautical_miles: f64,
+    labels_per_cell: u8,
     max_hours: u32,
     max_states: u32,
     avoid_unsafe_charts: u8,
@@ -118,6 +123,8 @@ pub struct RouteRequest {
     max_wind_knots: f64,
     max_apparent_wind_knots: f64,
     max_wave_metres: f64,
+    max_opposing_wind_current_knots_squared: f64,
+    land_safety_margin_nautical_miles: f64,
     maximum_latitude_degrees: f64,
     upwind_efficiency: f64,
     downwind_efficiency: f64,
@@ -125,6 +132,17 @@ pub struct RouteRequest {
     destination_tolerance_nm: f64,
     tack_penalty_seconds: u32,
     gybe_penalty_seconds: u32,
+    allow_motor_sailing: u8,
+    allow_motor: u8,
+    motor_below_sailing_speed_knots: f64,
+    motor_speed_knots: f64,
+    motor_sailing_boost_knots: f64,
+    motor_crossover_hysteresis_knots: f64,
+    minimum_motor_run_seconds: u32,
+    mode_change_penalty_seconds: u32,
+    maximum_motor_seconds: u32,
+    fuel_consumption_litres_per_hour: f64,
+    maximum_fuel_litres: f64,
     use_currents: u8,
     require_current_data: u8,
     use_waves: u8,
@@ -147,6 +165,19 @@ pub struct RouteLine {
 }
 
 #[repr(C)]
+pub struct RouteEnvironmentPoint {
+    latitude: f64,
+    longitude: f64,
+    unix_time: i64,
+    wind_u_knots: f64,
+    wind_v_knots: f64,
+    current_u_knots: f64,
+    current_v_knots: f64,
+    wave_height_metres: f64,
+    available: u8,
+}
+
+#[repr(C)]
 pub struct RouteResult {
     points: *mut RoutePoint,
     point_capacity: usize,
@@ -163,6 +194,9 @@ pub struct RouteResult {
     traces: *mut RouteLine,
     trace_capacity: usize,
     trace_count: usize,
+    route_environment: *mut RouteEnvironmentPoint,
+    route_environment_capacity: usize,
+    route_environment_count: usize,
     distance_nautical_miles: f64,
     duration_seconds: u64,
     states_examined: u32,
@@ -175,6 +209,9 @@ pub struct RouteResult {
     average_current_knots: f64,
     maximum_current_knots: f64,
     tacks: u32,
+    motor_seconds: u64,
+    estimated_fuel_litres: f64,
+    propulsion_transitions: u32,
     comfort_level: u8,
     metrics_available: u8,
     diagnostic: *mut c_char,
@@ -1245,6 +1282,10 @@ pub unsafe extern "C" fn ocpn_portable_runtime_calculate_route(
             polars,
             time_step_seconds: request.time_step_seconds,
             heading_step_degrees: request.heading_step_degrees,
+            refined_heading_step_degrees: request.refined_heading_step_degrees,
+            adaptive_headings: request.adaptive_headings != 0,
+            spatial_cell_nautical_miles: request.spatial_cell_nautical_miles,
+            labels_per_cell: request.labels_per_cell,
             max_hours: request.max_hours,
             max_states: request.max_states,
             avoid_unsafe_charts: request.avoid_unsafe_charts != 0,
@@ -1254,6 +1295,9 @@ pub unsafe extern "C" fn ocpn_portable_runtime_calculate_route(
             max_apparent_wind_knots: (request.limits_available & 4 != 0)
                 .then_some(request.max_apparent_wind_knots),
             max_wave_metres: (request.limits_available & 2 != 0).then_some(request.max_wave_metres),
+            max_opposing_wind_current_knots_squared: (request.limits_available & 8 != 0)
+                .then_some(request.max_opposing_wind_current_knots_squared),
+            land_safety_margin_nautical_miles: request.land_safety_margin_nautical_miles,
             use_currents: request.use_currents != 0,
             require_current_data: request.require_current_data != 0,
             use_waves: request.use_waves != 0,
@@ -1263,6 +1307,20 @@ pub unsafe extern "C" fn ocpn_portable_runtime_calculate_route(
             downwind_efficiency: request.downwind_efficiency,
             tack_penalty_seconds: request.tack_penalty_seconds,
             gybe_penalty_seconds: request.gybe_penalty_seconds,
+            allow_motor_sailing: request.allow_motor_sailing != 0,
+            allow_motor: request.allow_motor != 0,
+            motor_below_sailing_speed_knots: request.motor_below_sailing_speed_knots,
+            motor_speed_knots: request.motor_speed_knots,
+            motor_sailing_boost_knots: request.motor_sailing_boost_knots,
+            motor_crossover_hysteresis_knots: request.motor_crossover_hysteresis_knots,
+            minimum_motor_run_seconds: request.minimum_motor_run_seconds,
+            mode_change_penalty_seconds: request.mode_change_penalty_seconds,
+            maximum_motor_seconds: (request.limits_available & 16 != 0)
+                .then_some(request.maximum_motor_seconds),
+            fuel_consumption_litres_per_hour: (request.limits_available & 32 != 0)
+                .then_some(request.fuel_consumption_litres_per_hour),
+            maximum_fuel_litres: (request.limits_available & 64 != 0)
+                .then_some(request.maximum_fuel_litres),
             maximum_search_angle_degrees: request.maximum_search_angle_degrees,
             destination_tolerance_nm: request.destination_tolerance_nm,
         };
@@ -1272,7 +1330,8 @@ pub unsafe extern "C" fn ocpn_portable_runtime_calculate_route(
             .call_calculate_route(&mut runtime.store, &request)?
             .map_err(anyhow::Error::msg)?;
         output.point_count = route.points.len();
-        if route.points.len() > output.point_capacity
+        if route.points.len() > ROUTE_POINT_LIMIT
+            || route.points.len() > output.point_capacity
             || (!route.points.is_empty() && output.points.is_null())
         {
             anyhow::bail!(
@@ -1363,6 +1422,40 @@ pub unsafe extern "C" fn ocpn_portable_runtime_calculate_route(
         )?;
         output.trace_point_count = trace_point_count;
         output.trace_count = trace_count;
+        output.route_environment_count = route.route_environment.len();
+        if route.route_environment.len() > ROUTE_POINT_LIMIT
+            || route.route_environment.len() != output.point_count
+            || route.route_environment.len() > output.route_environment_capacity
+            || (!route.route_environment.is_empty() && output.route_environment.is_null())
+        {
+            anyhow::bail!(
+                "route environment requires {} points, capacity is {}",
+                route.route_environment.len(),
+                output.route_environment_capacity
+            );
+        }
+        for (index, point) in route.route_environment.into_iter().enumerate() {
+            let mut available = 0u8;
+            if point.current_u_knots.is_some() && point.current_v_knots.is_some() {
+                available |= 1;
+            }
+            if point.wave_height_metres.is_some() {
+                available |= 2;
+            }
+            unsafe {
+                *output.route_environment.add(index) = RouteEnvironmentPoint {
+                    latitude: point.latitude,
+                    longitude: point.longitude,
+                    unix_time: point.unix_time,
+                    wind_u_knots: point.wind_u_knots,
+                    wind_v_knots: point.wind_v_knots,
+                    current_u_knots: point.current_u_knots.unwrap_or_default(),
+                    current_v_knots: point.current_v_knots.unwrap_or_default(),
+                    wave_height_metres: point.wave_height_metres.unwrap_or_default(),
+                    available,
+                };
+            }
+        }
         output.distance_nautical_miles = route.distance_nautical_miles;
         output.duration_seconds = route.duration_seconds;
         output.states_examined = route.states_examined;
@@ -1381,6 +1474,12 @@ pub unsafe extern "C" fn ocpn_portable_runtime_calculate_route(
             output.metrics_available |= 1;
         }
         output.tacks = route.tacks;
+        output.motor_seconds = route.motor_seconds;
+        output.propulsion_transitions = route.propulsion_transitions;
+        if let Some(fuel) = route.estimated_fuel_litres {
+            output.estimated_fuel_litres = fuel;
+            output.metrics_available |= 2;
+        }
         output.comfort_level = route.comfort_level;
         output.diagnostic_len = route.diagnostic.len();
         if route.diagnostic.len() >= output.diagnostic_capacity || output.diagnostic.is_null() {
