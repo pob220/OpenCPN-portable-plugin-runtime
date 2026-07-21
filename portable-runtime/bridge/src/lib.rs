@@ -22,7 +22,9 @@ wasmtime::component::bindgen!({
     world: "plugin-world",
 });
 
-const HOST_ABI_VERSION: u32 = 7;
+const HOST_ABI_VERSION: u32 = 8;
+const ROUTE_INSPECTION_POINT_LIMIT: usize = 200_000;
+const ROUTE_INSPECTION_LINE_LIMIT: usize = 10_000;
 const ERROR_TEXT_LIMIT: usize = 4096;
 const SETTINGS_VALUE_LIMIT: usize = 64 * 1024;
 const OVERLAY_POINT_LIMIT: usize = 1_000_000;
@@ -138,13 +140,43 @@ pub struct RoutePoint {
 }
 
 #[repr(C)]
+pub struct RouteLine {
+    point_offset: usize,
+    point_count: usize,
+    unix_time: i64,
+}
+
+#[repr(C)]
 pub struct RouteResult {
     points: *mut RoutePoint,
     point_capacity: usize,
     point_count: usize,
+    isochrone_points: *mut RoutePoint,
+    isochrone_point_capacity: usize,
+    isochrone_point_count: usize,
+    isochrones: *mut RouteLine,
+    isochrone_capacity: usize,
+    isochrone_count: usize,
+    trace_points: *mut RoutePoint,
+    trace_point_capacity: usize,
+    trace_point_count: usize,
+    traces: *mut RouteLine,
+    trace_capacity: usize,
+    trace_count: usize,
     distance_nautical_miles: f64,
     duration_seconds: u64,
     states_examined: u32,
+    average_speed_knots: f64,
+    maximum_speed_knots: f64,
+    average_sog_knots: f64,
+    maximum_sog_knots: f64,
+    average_wind_knots: f64,
+    maximum_wind_knots: f64,
+    average_current_knots: f64,
+    maximum_current_knots: f64,
+    tacks: u32,
+    comfort_level: u8,
+    metrics_available: u8,
     diagnostic: *mut c_char,
     diagnostic_capacity: usize,
     diagnostic_len: usize,
@@ -1192,9 +1224,98 @@ pub unsafe extern "C" fn ocpn_portable_runtime_calculate_route(
                 };
             }
         }
+        let copy_lines = |lines: Vec<exports::opencpn::portable::plugin::RouteInspectionLine>,
+                          point_output: *mut RoutePoint,
+                          point_capacity: usize,
+                          line_output: *mut RouteLine,
+                          line_capacity: usize|
+         -> anyhow::Result<(usize, usize)> {
+            if lines.len() > ROUTE_INSPECTION_LINE_LIMIT || lines.len() > line_capacity {
+                anyhow::bail!(
+                    "route inspection requires {} lines, capacity is {}",
+                    lines.len(),
+                    line_capacity
+                );
+            }
+            if !lines.is_empty() && line_output.is_null() {
+                anyhow::bail!("route inspection line output is null");
+            }
+            let line_count = lines.len();
+            let point_count = lines.iter().try_fold(0usize, |total, line| {
+                total
+                    .checked_add(line.points.len())
+                    .ok_or_else(|| anyhow::anyhow!("route inspection point count overflow"))
+            })?;
+            if point_count > ROUTE_INSPECTION_POINT_LIMIT || point_count > point_capacity {
+                anyhow::bail!(
+                    "route inspection requires {} points, capacity is {}",
+                    point_count,
+                    point_capacity
+                );
+            }
+            if point_count != 0 && point_output.is_null() {
+                anyhow::bail!("route inspection point output is null");
+            }
+            let mut offset = 0usize;
+            for (line_index, line) in lines.into_iter().enumerate() {
+                let count = line.points.len();
+                unsafe {
+                    *line_output.add(line_index) = RouteLine {
+                        point_offset: offset,
+                        point_count: count,
+                        unix_time: line.unix_time,
+                    };
+                }
+                for point in line.points {
+                    unsafe {
+                        *point_output.add(offset) = RoutePoint {
+                            latitude: point.latitude,
+                            longitude: point.longitude,
+                            unix_time: point.unix_time,
+                        };
+                    }
+                    offset += 1;
+                }
+            }
+            Ok((offset, line_count))
+        };
+        let (isochrone_point_count, isochrone_count) = copy_lines(
+            route.isochrones,
+            output.isochrone_points,
+            output.isochrone_point_capacity,
+            output.isochrones,
+            output.isochrone_capacity,
+        )?;
+        output.isochrone_point_count = isochrone_point_count;
+        output.isochrone_count = isochrone_count;
+        let (trace_point_count, trace_count) = copy_lines(
+            route.traces,
+            output.trace_points,
+            output.trace_point_capacity,
+            output.traces,
+            output.trace_capacity,
+        )?;
+        output.trace_point_count = trace_point_count;
+        output.trace_count = trace_count;
         output.distance_nautical_miles = route.distance_nautical_miles;
         output.duration_seconds = route.duration_seconds;
         output.states_examined = route.states_examined;
+        output.average_speed_knots = route.average_speed_knots;
+        output.maximum_speed_knots = route.maximum_speed_knots;
+        output.average_sog_knots = route.average_sog_knots;
+        output.maximum_sog_knots = route.maximum_sog_knots;
+        output.average_wind_knots = route.average_wind_knots;
+        output.maximum_wind_knots = route.maximum_wind_knots;
+        output.metrics_available = 0;
+        if let (Some(average), Some(maximum)) =
+            (route.average_current_knots, route.maximum_current_knots)
+        {
+            output.average_current_knots = average;
+            output.maximum_current_knots = maximum;
+            output.metrics_available |= 1;
+        }
+        output.tacks = route.tacks;
+        output.comfort_level = route.comfort_level;
         output.diagnostic_len = route.diagnostic.len();
         if route.diagnostic.len() >= output.diagnostic_capacity || output.diagnostic.is_null() {
             anyhow::bail!("route diagnostic exceeded output capacity");

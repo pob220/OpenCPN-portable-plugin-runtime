@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define OCPN_PORTABLE_HOST_ABI_VERSION 7u
+#define OCPN_PORTABLE_HOST_ABI_VERSION 8u
 
 typedef struct ocpn_portable_runtime ocpn_portable_runtime;
 
@@ -101,13 +101,43 @@ typedef struct ocpn_portable_route_point {
   int64_t unix_time;
 } ocpn_portable_route_point;
 
+/* A span into one of the route result point arrays. */
+typedef struct ocpn_portable_route_line {
+  size_t point_offset;
+  size_t point_count;
+  int64_t unix_time;
+} ocpn_portable_route_line;
+
 typedef struct ocpn_portable_route_result {
   ocpn_portable_route_point* points;
   size_t point_capacity;
   size_t point_count;
+  ocpn_portable_route_point* isochrone_points;
+  size_t isochrone_point_capacity;
+  size_t isochrone_point_count;
+  ocpn_portable_route_line* isochrones;
+  size_t isochrone_capacity;
+  size_t isochrone_count;
+  ocpn_portable_route_point* trace_points;
+  size_t trace_point_capacity;
+  size_t trace_point_count;
+  ocpn_portable_route_line* traces;
+  size_t trace_capacity;
+  size_t trace_count;
   double distance_nautical_miles;
   uint64_t duration_seconds;
   uint32_t states_examined;
+  double average_speed_knots;
+  double maximum_speed_knots;
+  double average_sog_knots;
+  double maximum_sog_knots;
+  double average_wind_knots;
+  double maximum_wind_knots;
+  double average_current_knots;
+  double maximum_current_knots;
+  uint32_t tacks;
+  uint8_t comfort_level;
+  uint8_t metrics_available; /* bit 0 current metrics */
   char* diagnostic;
   size_t diagnostic_capacity;
   size_t diagnostic_len;

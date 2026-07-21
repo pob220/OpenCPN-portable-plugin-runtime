@@ -593,6 +593,16 @@ int32_t PortablePluginManager::Impl::OpenWeatherRouting(void* user_data) {
                  owner->cursor_latitude, owner->cursor_longitude};
       return true;
     };
+    auto displayed_time = [owner = instance->owner](int64_t* output) {
+      for (const auto& candidate : owner->instances) {
+        if (candidate->enabled && !candidate->failed &&
+            candidate->provides.count("org.opencpn.environment.provider") &&
+            candidate->environmental_host &&
+            candidate->environmental_host->DisplayedTime(output))
+          return true;
+      }
+      return false;
+    };
     const double latitude = std::isfinite(gLat) ? gLat : 53.0;
     const double longitude = std::isfinite(gLon) ? gLon : -5.0;
     instance->weather_routing_host =
@@ -600,7 +610,7 @@ int32_t PortablePluginManager::Impl::OpenWeatherRouting(void* user_data) {
             instance->owner->plugin_manager->GetParentFrame(),
             instance->runtime, instance->runtime_mutex, instance->package_root,
             std::move(summary), std::move(waypoints), std::move(vessel),
-            std::move(cursor), latitude, longitude);
+            std::move(cursor), std::move(displayed_time), latitude, longitude);
   }
   wxString error;
   return instance->weather_routing_host->Show(&error) ? 0 : -2;

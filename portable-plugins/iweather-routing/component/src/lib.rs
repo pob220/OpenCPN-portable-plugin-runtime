@@ -3,7 +3,9 @@ wit_bindgen::generate!({
     world: "plugin-world",
 });
 
-use exports::opencpn::portable::plugin::{PolarGrid, RoutePoint, RouteRequest, RouteResult};
+use exports::opencpn::portable::plugin::{
+    PolarGrid, RouteInspectionLine, RoutePoint, RouteRequest, RouteResult,
+};
 use opencpn::portable::host::{
     self, ChartCoverageState, EnvironmentSampleRequest, GeoPoint, GeoSegment, LogLevel,
 };
@@ -43,6 +45,147 @@ fn bearing(a_lat: f64, a_lon: f64, b_lat: f64, b_lon: f64) -> f64 {
     y.atan2(x).to_degrees().rem_euclid(360.0)
 }
 
+fn route_chain(nodes: &[Node], endpoint: usize) -> Vec<RoutePoint> {
+    let mut chain = Vec::new();
+    let mut cursor = Some(endpoint);
+    while let Some(index) = cursor {
+        let node = &nodes[index];
+        chain.push(RoutePoint {
+            latitude: node.lat,
+            longitude: node.lon,
+            unix_time: node.time,
+        });
+        cursor = node.parent;
+    }
+    chain.reverse();
+    chain
+}
+
+/// Build bounded, inspection-only geometry from the actual retained search
+/// frontier. One outer representative is selected per angular sector. Large
+/// gaps split contours instead of implying an untested connection.
+fn inspection_geometry(
+    request: &RouteRequest,
+    nodes: &[Node],
+    frontier: &[usize],
+) -> (Vec<RouteInspectionLine>, Vec<RouteInspectionLine>) {
+    let sector_degrees = f64::from(request.heading_step_degrees).clamp(10.0, 20.0);
+    let mut sectors: HashMap<i32, (f64, usize)> = HashMap::new();
+    for &index in frontier {
+        let node = &nodes[index];
+        let angle = bearing(
+            request.start_latitude,
+            request.start_longitude,
+            node.lat,
+            node.lon,
+        );
+        let sector = (angle / sector_degrees).floor() as i32;
+        let radius = distance_nm(
+            request.start_latitude,
+            request.start_longitude,
+            node.lat,
+            node.lon,
+        );
+        match sectors.get(&sector) {
+            Some((old_radius, _)) if *old_radius >= radius => {}
+            _ => {
+                sectors.insert(sector, (radius, index));
+            }
+        }
+    }
+    let mut representatives: Vec<_> = sectors.into_values().map(|(_, index)| index).collect();
+    representatives.sort_by(|left, right| {
+        bearing(
+            request.start_latitude,
+            request.start_longitude,
+            nodes[*left].lat,
+            nodes[*left].lon,
+        )
+        .total_cmp(&bearing(
+            request.start_latitude,
+            request.start_longitude,
+            nodes[*right].lat,
+            nodes[*right].lon,
+        ))
+    });
+    representatives.truncate(36);
+
+    let mut contours = Vec::new();
+    let mut segment: Vec<RoutePoint> = Vec::new();
+    let mut previous: Option<usize> = None;
+    for &index in &representatives {
+        let node = &nodes[index];
+        let split = previous.is_some_and(|old| {
+            let angular_gap = angular_difference(
+                bearing(
+                    request.start_latitude,
+                    request.start_longitude,
+                    nodes[old].lat,
+                    nodes[old].lon,
+                ),
+                bearing(
+                    request.start_latitude,
+                    request.start_longitude,
+                    node.lat,
+                    node.lon,
+                ),
+            )
+            .abs();
+            angular_gap > sector_degrees * 2.5
+                || distance_nm(nodes[old].lat, nodes[old].lon, node.lat, node.lon) > 80.0
+        });
+        if split && segment.len() >= 2 {
+            contours.push(RouteInspectionLine {
+                unix_time: segment[0].unix_time,
+                points: std::mem::take(&mut segment),
+            });
+        } else if split {
+            segment.clear();
+        }
+        segment.push(RoutePoint {
+            latitude: node.lat,
+            longitude: node.lon,
+            unix_time: node.time,
+        });
+        previous = Some(index);
+    }
+    if segment.len() >= 2 {
+        contours.push(RouteInspectionLine {
+            unix_time: segment[0].unix_time,
+            points: segment,
+        });
+    }
+    let traces = representatives
+        .into_iter()
+        .map(|index| RouteInspectionLine {
+            unix_time: nodes[index].time,
+            points: route_chain(nodes, index),
+        })
+        .collect();
+    (contours, traces)
+}
+
+/// Keep inspection output bounded independently of the search-state limit.
+/// Newer layers are retained because route-to-cursor inspection is most useful
+/// near the destination; this also prevents a long (up to 720 hour) search
+/// from exhausting the host's transfer buffers.
+fn append_bounded_inspection(
+    retained: &mut Vec<RouteInspectionLine>,
+    mut incoming: Vec<RouteInspectionLine>,
+    maximum_lines: usize,
+    maximum_points: usize,
+) {
+    retained.append(&mut incoming);
+    let mut points: usize = retained.iter().map(|line| line.points.len()).sum();
+    while retained.len() > maximum_lines || points > maximum_points {
+        if retained.is_empty() {
+            break;
+        }
+        points = points.saturating_sub(retained[0].points.len());
+        retained.remove(0);
+    }
+}
+
 fn angular_difference(first: f64, second: f64) -> f64 {
     (first - second + 540.0).rem_euclid(360.0) - 180.0
 }
@@ -52,6 +195,127 @@ fn true_wind_angle(wind_u: f64, wind_v: f64, heading: f64) -> (f64, i8) {
     let wind_from = (wind_to + 180.0).rem_euclid(360.0);
     let signed = angular_difference(heading, wind_from);
     (signed.abs(), if signed >= 0.0 { 1 } else { -1 })
+}
+
+struct RouteStatistics {
+    average_speed_knots: f64,
+    maximum_speed_knots: f64,
+    average_sog_knots: f64,
+    maximum_sog_knots: f64,
+    average_wind_knots: f64,
+    maximum_wind_knots: f64,
+    average_current_knots: Option<f64>,
+    maximum_current_knots: Option<f64>,
+    tacks: u32,
+    comfort_level: u8,
+}
+
+fn route_statistics(points: &[RoutePoint]) -> Result<RouteStatistics, String> {
+    if points.len() < 2 {
+        return Err("completed route has too few points for metrics".into());
+    }
+    let requests: Vec<_> = points[..points.len() - 1]
+        .iter()
+        .map(|point| EnvironmentSampleRequest {
+            latitude: point.latitude,
+            longitude: point.longitude,
+            unix_time: point.unix_time,
+        })
+        .collect();
+    let samples = host::environment_sample_batch(&requests)?;
+    if samples.len() != requests.len() {
+        return Err("environment provider returned the wrong route-metric batch length".into());
+    }
+    let mut speed_total: f64 = 0.0;
+    let mut speed_max: f64 = 0.0;
+    let mut sog_total: f64 = 0.0;
+    let mut sog_max: f64 = 0.0;
+    let mut wind_total: f64 = 0.0;
+    let mut wind_max: f64 = 0.0;
+    let mut current_total: f64 = 0.0;
+    let mut current_max: f64 = 0.0;
+    let mut current_count = 0usize;
+    let mut tacks = 0u32;
+    let mut previous_tack = 0i8;
+    let mut comfort_level = 1u8;
+    for (index, pair) in points.windows(2).enumerate() {
+        let elapsed_hours = (pair[1].unix_time - pair[0].unix_time) as f64 / 3600.0;
+        if elapsed_hours <= 0.0 {
+            continue;
+        }
+        let heading = bearing(
+            pair[0].latitude,
+            pair[0].longitude,
+            pair[1].latitude,
+            pair[1].longitude,
+        );
+        let sog = distance_nm(
+            pair[0].latitude,
+            pair[0].longitude,
+            pair[1].latitude,
+            pair[1].longitude,
+        ) / elapsed_hours;
+        let sample = &samples[index];
+        let (wind_u, wind_v) = match (sample.wind_u_knots, sample.wind_v_knots) {
+            (Some(u), Some(v)) => (u, v),
+            _ => return Err("completed route lost wind coverage while calculating metrics".into()),
+        };
+        let wind = wind_u.hypot(wind_v);
+        let (twa, tack) = true_wind_angle(wind_u, wind_v, heading);
+        if previous_tack != 0 && tack != previous_tack && twa <= 90.0 {
+            tacks += 1;
+        }
+        previous_tack = tack;
+        let (current_u, current_v, has_current) =
+            match (sample.current_u_knots, sample.current_v_knots) {
+                (Some(u), Some(v)) => (u, v, true),
+                _ => (0.0, 0.0, false),
+            };
+        let heading_radians = radians(heading);
+        let speed = (sog * heading_radians.sin() - current_u)
+            .hypot(sog * heading_radians.cos() - current_v);
+        speed_total += speed;
+        speed_max = speed_max.max(speed);
+        sog_total += sog;
+        sog_max = sog_max.max(sog);
+        wind_total += wind;
+        wind_max = wind_max.max(wind);
+        if has_current {
+            let current = current_u.hypot(current_v);
+            current_total += current;
+            current_max = current_max.max(current);
+            current_count += 1;
+        }
+
+        // This follows the existing Weather Routing comfort categorisation.
+        // It is deliberately labelled subjective in the host UI.
+        let wave = sample.wave_height_metres.unwrap_or(0.0).max(0.0);
+        let wind_effect = (wind / 27.0).powi(3);
+        let angle_effect = 20.0 / (30.0 * (2.0 * std::f64::consts::PI).sqrt())
+            * (-(twa - 35.0).powi(2) / (2.0 * 30.0f64.powi(2))).exp();
+        let wave_effect = (wave / 5.0).powi(2);
+        let score = wind_effect * (1.0 + angle_effect) * (1.0 + wave_effect);
+        comfort_level = comfort_level.max(if score <= 0.5 {
+            1
+        } else if score < 1.0 {
+            2
+        } else {
+            3
+        });
+    }
+    let count = (points.len() - 1) as f64;
+    Ok(RouteStatistics {
+        average_speed_knots: speed_total / count,
+        maximum_speed_knots: speed_max,
+        average_sog_knots: sog_total / count,
+        maximum_sog_knots: sog_max,
+        average_wind_knots: wind_total / count,
+        maximum_wind_knots: wind_max,
+        average_current_knots: (current_count > 0).then_some(current_total / current_count as f64),
+        maximum_current_knots: (current_count > 0).then_some(current_max),
+        tacks,
+        comfort_level,
+    })
 }
 
 fn bounds(values: &[f64], target: f64) -> (usize, usize) {
@@ -313,6 +577,9 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
     let max_layers = request.max_hours.saturating_mul(3600) / request.time_step_seconds;
     let mut examined = 0u32;
     let mut winner = None;
+    let mut isochrones = Vec::new();
+    let mut traces = Vec::new();
+    let mut last_inspection_time = request.departure_unix_time;
 
     for layer in 0..max_layers.max(1) {
         if host::routing_cancelled() {
@@ -527,6 +794,14 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
         if frontier.is_empty() || examined >= request.max_states {
             break;
         }
+        const INSPECTION_INTERVAL_SECONDS: i64 = 2 * 3600;
+        let frontier_time = nodes[frontier[0]].time;
+        if frontier_time - last_inspection_time >= INSPECTION_INTERVAL_SECONDS {
+            let (layer_contours, layer_traces) = inspection_geometry(&request, &nodes, &frontier);
+            append_bounded_inspection(&mut isochrones, layer_contours, 8_000, 160_000);
+            append_bounded_inspection(&mut traces, layer_traces, 8_000, 160_000);
+            last_inspection_time = frontier_time;
+        }
         let percent = (((layer + 1) * 100) / max_layers.max(1)).min(99) as u8;
         host::routing_progress(
             percent,
@@ -548,18 +823,8 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
     // segment subsequently appended to the result is also feasible.
     let winner_node = &nodes[winner];
     if winner_node.reached_destination {
-        let mut chain = Vec::new();
-        let mut cursor = Some(winner);
-        while let Some(index) = cursor {
-            let node = &nodes[index];
-            chain.push(RoutePoint {
-                latitude: node.lat,
-                longitude: node.lon,
-                unix_time: node.time,
-            });
-            cursor = node.parent;
-        }
-        chain.reverse();
+        let chain = route_chain(&nodes, winner);
+        let statistics = route_statistics(&chain)?;
         host::routing_progress(100, "Route complete and final approach validated");
         return Ok(RouteResult {
             distance_nautical_miles: winner_node.sailed_nm,
@@ -567,6 +832,18 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
             states_examined: examined,
             diagnostic: "Adaptive time-layer routing completed using typed iGRIB samples and batched host chart checks. The destination leg was generated and checked inside the search. Model and chart results are advisory, not navigation-authoritative.".into(),
             points: chain,
+            isochrones,
+            traces,
+            average_speed_knots: statistics.average_speed_knots,
+            maximum_speed_knots: statistics.maximum_speed_knots,
+            average_sog_knots: statistics.average_sog_knots,
+            maximum_sog_knots: statistics.maximum_sog_knots,
+            average_wind_knots: statistics.average_wind_knots,
+            maximum_wind_knots: statistics.maximum_wind_knots,
+            average_current_knots: statistics.average_current_knots,
+            maximum_current_knots: statistics.maximum_current_knots,
+            tacks: statistics.tacks,
+            comfort_level: statistics.comfort_level,
         });
     }
     let final_samples = host::environment_sample_batch(&[EnvironmentSampleRequest {
@@ -634,18 +911,7 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
     .ok_or_else(|| {
         "final approach violates true-wind-angle, apparent-wind or manoeuvre limits".to_string()
     })?;
-    let mut chain = Vec::new();
-    let mut cursor = Some(winner);
-    while let Some(index) = cursor {
-        let node = &nodes[index];
-        chain.push(RoutePoint {
-            latitude: node.lat,
-            longitude: node.lon,
-            unix_time: node.time,
-        });
-        cursor = node.parent;
-    }
-    chain.reverse();
+    let mut chain = route_chain(&nodes, winner);
     let final_distance = distance_nm(
         chain.last().unwrap().latitude,
         chain.last().unwrap().longitude,
@@ -690,6 +956,7 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
             return Err("final approach failed the independent chart-safety check".into());
         }
     }
+    let statistics = route_statistics(&chain)?;
     host::routing_progress(100, "Route complete and final approach validated");
     Ok(RouteResult {
         distance_nautical_miles: nodes[winner].sailed_nm + final_distance,
@@ -697,6 +964,18 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
         states_examined: examined,
         diagnostic: "Adaptive time-layer routing completed using typed iGRIB samples and batched host chart checks. Model and chart results are advisory, not navigation-authoritative.".into(),
         points: chain,
+        isochrones,
+        traces,
+        average_speed_knots: statistics.average_speed_knots,
+        maximum_speed_knots: statistics.maximum_speed_knots,
+        average_sog_knots: statistics.average_sog_knots,
+        maximum_sog_knots: statistics.maximum_sog_knots,
+        average_wind_knots: statistics.average_wind_knots,
+        maximum_wind_knots: statistics.maximum_wind_knots,
+        average_current_knots: statistics.average_current_knots,
+        maximum_current_knots: statistics.maximum_current_knots,
+        tacks: statistics.tacks,
+        comfort_level: statistics.comfort_level,
     })
 }
 

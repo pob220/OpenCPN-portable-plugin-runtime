@@ -381,6 +381,7 @@ public:
                    std::vector<PortableEnvironmentSample>* results,
                    wxString* error) const;
   wxString DatasetSummary() const;
+  bool DisplayedTime(int64_t* unix_time) const;
   void SetCursorPosition(double latitude, double longitude);
   void Shutdown();
 
@@ -2728,6 +2729,18 @@ wxString PortableGribHost::Impl::DatasetSummary() const {
       wxFileName(selected_file).GetFullName(), times.size(), fields.size());
 }
 
+bool PortableGribHost::Impl::DisplayedTime(int64_t* unix_time) const {
+  if (!unix_time || !timeline) return false;
+  std::lock_guard<std::mutex> lock(field_mutex);
+  const int selection = timeline->GetSelection();
+  if (selection == wxNOT_FOUND || static_cast<size_t>(selection) >= times.size())
+    return false;
+  wxDateTime parsed;
+  if (!ParseGribTime(times[selection], &parsed)) return false;
+  *unix_time = parsed.GetTicks();
+  return true;
+}
+
 PortableGribHost::PortableGribHost(wxWindow* parent,
                                    const wxString& package_root,
                                    bool credential_access)
@@ -2753,6 +2766,10 @@ bool PortableGribHost::SampleBatch(
 
 wxString PortableGribHost::DatasetSummary() const {
   return m_impl->DatasetSummary();
+}
+
+bool PortableGribHost::DisplayedTime(int64_t* unix_time) const {
+  return m_impl->DisplayedTime(unix_time);
 }
 
 void PortableGribHost::Shutdown() { m_impl->Shutdown(); }

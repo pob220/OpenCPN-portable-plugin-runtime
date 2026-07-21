@@ -23,6 +23,10 @@ iWeatherRouting accepts real OpenCPN weather-routing `.pol` files and boat
 sends bounded value-only polar grids to the Wasm component for TWS/TWA
 interpolation. A conservative Nicholson 35 Mk1 polar is bundled as the initial
 test model; selecting another model is remembered in the isolated profile.
+The selected routing result owns its retained isochrones, cursor-inspection
+traces, forecast-time boat marker and GPX export. Variable-departure runs open
+a comparison table with passage and environmental metrics; selecting a row
+changes all of those views together.
 
 ## Build and test
 

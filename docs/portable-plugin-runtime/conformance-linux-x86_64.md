@@ -67,6 +67,11 @@ choosing service budgets.
   batches, calculated routes in four concurrently isolated Wasmtime Stores,
   selected a result, contained cancellation and shut every replica down. A
   replica does not rerun plugin lifecycle registration.
+- Multi-step route conformance also verified bounded isochrone and predecessor
+  trace transfer. The host's variable-departure table retains failed and
+  successful candidates and makes one selected candidate the sole source for
+  the emphasized route, isochrones, route-to-cursor inspection, forecast-time
+  boat marker and GPX export.
 - The host polar parser loaded the bundled 15-by-16 Nicholson 35 Mk1 `.pol`,
   resolved it through an OpenCPN boat `.xml`, rejected malformed axes and sent
   only bounded typed grids to the component. The routing smoke test verified

@@ -175,6 +175,12 @@ Measured conformance values for this machine are recorded in
   the fastest applicable table, while native crossover contours, ordered
   intermediate waypoints and OpenCPN route-object publication remain later,
   separately versioned services; exported GPX and overlays are implemented.
+  Selected-route isochrones, route-to-cursor predecessor traces and boat
+  interpolation at iGRIB's selected forecast time are implemented using
+  bounded value geometry. Variable-departure results expose a selectable
+  comparison table (including unsuccessful attempts and route/environment
+  metrics); selection consistently drives the emphasized overlay, inspection
+  layers and GPX output.
 - Production catalogue/TUF metadata, revocation, user permission-consent UI,
   cross-platform credential-store conformance, state migrations and a
   security-response ownership agreement remain absent.

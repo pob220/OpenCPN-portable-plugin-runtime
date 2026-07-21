@@ -364,12 +364,12 @@ bool RoutingLifecycle(const char* component_path) {
   const std::array<double, 4> polar_winds = {0.0, 10.0, 20.0, 40.0};
   const std::array<double, 5> polar_angles = {0.0, 40.0, 90.0, 160.0, 180.0};
   const std::array<double, 20> polar_speeds = {
-      0.0, 0.0,  0.0, 0.0,  0.0, 0.0, 3.86, 5.47, 3.92, 3.76,
+      0.0, 0.0,  0.0,  0.0,  0.0,  0.0, 3.86, 5.47, 3.92, 3.76,
       0.0, 3.98, 6.18, 5.30, 4.90, 0.0, 2.33, 3.99, 3.60, 3.33};
-  ocpn_portable_polar_grid polar{
-      polar_identity.data(), polar_identity.size(), polar_winds.data(),
-      polar_winds.size(),    polar_angles.data(),  polar_angles.size(),
-      polar_speeds.data(),   polar_speeds.size()};
+  ocpn_portable_polar_grid polar{polar_identity.data(), polar_identity.size(),
+                                 polar_winds.data(),    polar_winds.size(),
+                                 polar_angles.data(),   polar_angles.size(),
+                                 polar_speeds.data(),   polar_speeds.size()};
   request.start_latitude = 50.0;
   request.start_longitude = -4.0;
   request.destination_latitude = 50.05;
@@ -400,17 +400,76 @@ bool RoutingLifecycle(const char* component_path) {
   request.require_wave_data = 1;
   request.limits_available = 7;
   std::vector<ocpn_portable_route_point> points(1000);
+  std::vector<ocpn_portable_route_point> isochrone_points(20000);
+  std::vector<ocpn_portable_route_line> isochrone_lines(2000);
+  std::vector<ocpn_portable_route_point> trace_points(20000);
+  std::vector<ocpn_portable_route_line> trace_lines(2000);
   char diagnostic[4096] = {};
-  ocpn_portable_route_result result{
-      points.data(), points.size(),      0, 0.0, 0, 0,
-      diagnostic,    sizeof(diagnostic), 0};
+  ocpn_portable_route_result result{};
+  result.points = points.data();
+  result.point_capacity = points.size();
+  result.isochrone_points = isochrone_points.data();
+  result.isochrone_point_capacity = isochrone_points.size();
+  result.isochrones = isochrone_lines.data();
+  result.isochrone_capacity = isochrone_lines.size();
+  result.trace_points = trace_points.data();
+  result.trace_point_capacity = trace_points.size();
+  result.traces = trace_lines.data();
+  result.trace_capacity = trace_lines.size();
+  result.diagnostic = diagnostic;
+  result.diagnostic_capacity = sizeof(diagnostic);
   ok =
       ok && CallSucceeded(ocpn_portable_runtime_calculate_route(
                               runtime, &request, &result, error, sizeof(error)),
                           "calculate route", error);
   ok = ok && result.point_count >= 2 && result.states_examined > 0 &&
        result.duration_seconds > 0 && result.diagnostic_len > 0 &&
-       state.routing_progress_events > 0;
+       state.routing_progress_events > 0 && result.average_speed_knots > 0.0 &&
+       result.average_sog_knots > 0.0 && result.maximum_sog_knots > 0.0 &&
+       result.average_wind_knots > 8.0 && result.maximum_wind_knots > 8.0 &&
+       (result.metrics_available & 1) != 0 &&
+       result.average_current_knots > 0.0 && result.comfort_level >= 1 &&
+       result.comfort_level <= 3;
+
+  // A route requiring several forecast steps must expose bounded retained
+  // isochrones and predecessor traces for host-side inspection rendering.
+  auto inspection_request = request;
+  inspection_request.destination_latitude = 50.2;
+  inspection_request.destination_longitude = -3.8;
+  result.point_count = 0;
+  result.isochrone_point_count = 0;
+  result.isochrone_count = 0;
+  result.trace_point_count = 0;
+  result.trace_count = 0;
+  result.diagnostic_len = 0;
+  ok = ok && CallSucceeded(ocpn_portable_runtime_calculate_route(
+                               runtime, &inspection_request, &result, error,
+                               sizeof(error)),
+                           "calculate route with inspection geometry", error);
+  ok = ok && result.isochrone_count > 0 && result.trace_count > 0 &&
+       result.isochrone_point_count <= isochrone_points.size() &&
+       result.trace_point_count <= trace_points.size();
+  for (size_t index = 0; ok && index < result.isochrone_count; ++index) {
+    const auto& line = isochrone_lines[index];
+    ok = line.point_count >= 2 &&
+         line.point_offset + line.point_count <= result.isochrone_point_count;
+  }
+  for (size_t index = 0; ok && index < result.trace_count; ++index) {
+    const auto& line = trace_lines[index];
+    ok = line.point_count >= 2 &&
+         line.point_offset + line.point_count <= result.trace_point_count;
+  }
+
+  result.point_count = 0;
+  result.isochrone_point_count = 0;
+  result.isochrone_count = 0;
+  result.trace_point_count = 0;
+  result.trace_count = 0;
+  result.diagnostic_len = 0;
+  ok =
+      ok && CallSucceeded(ocpn_portable_runtime_calculate_route(
+                              runtime, &request, &result, error, sizeof(error)),
+                          "restore baseline route", error);
 
   // The guest must use the supplied polar rather than a synthetic reference
   // speed. A conservative factor must produce a later arrival for the same
@@ -421,10 +480,10 @@ bool RoutingLifecycle(const char* component_path) {
   polar.boat_speeds_knots = conservative_speeds.data();
   result.point_count = 0;
   result.diagnostic_len = 0;
-  ok = ok && CallSucceeded(ocpn_portable_runtime_calculate_route(
-                               runtime, &request, &result, error,
-                               sizeof(error)),
-                           "calculate route with conservative polar", error);
+  ok =
+      ok && CallSucceeded(ocpn_portable_runtime_calculate_route(
+                              runtime, &request, &result, error, sizeof(error)),
+                          "calculate route with conservative polar", error);
   ok = ok && result.duration_seconds > normal_duration;
   polar.boat_speeds_knots = polar_speeds.data();
 
@@ -479,11 +538,25 @@ bool RoutingLifecycle(const char* component_path) {
     threads[index] = std::thread([&, index] {
       if (!replicas[index]) return;
       std::vector<ocpn_portable_route_point> local_points(1000);
+      std::vector<ocpn_portable_route_point> local_isochrone_points(20000);
+      std::vector<ocpn_portable_route_line> local_isochrone_lines(2000);
+      std::vector<ocpn_portable_route_point> local_trace_points(20000);
+      std::vector<ocpn_portable_route_line> local_trace_lines(2000);
       char local_diagnostic[4096] = {};
       char local_error[4096] = {};
-      ocpn_portable_route_result local_result{
-          local_points.data(), local_points.size(),      0, 0.0, 0, 0,
-          local_diagnostic,    sizeof(local_diagnostic), 0};
+      ocpn_portable_route_result local_result{};
+      local_result.points = local_points.data();
+      local_result.point_capacity = local_points.size();
+      local_result.isochrone_points = local_isochrone_points.data();
+      local_result.isochrone_point_capacity = local_isochrone_points.size();
+      local_result.isochrones = local_isochrone_lines.data();
+      local_result.isochrone_capacity = local_isochrone_lines.size();
+      local_result.trace_points = local_trace_points.data();
+      local_result.trace_point_capacity = local_trace_points.size();
+      local_result.traces = local_trace_lines.data();
+      local_result.trace_capacity = local_trace_lines.size();
+      local_result.diagnostic = local_diagnostic;
+      local_result.diagnostic_capacity = sizeof(local_diagnostic);
       replica_results[index] = ocpn_portable_runtime_calculate_route(
                                    replicas[index], &request, &local_result,
                                    local_error, sizeof(local_error)) == 0 &&

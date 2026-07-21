@@ -30,6 +30,7 @@ public:
       std::function<std::vector<PortableNavigationPosition>()> list_waypoints,
       std::function<bool(PortableNavigationPosition*)> vessel_position,
       std::function<bool(PortableNavigationPosition*)> cursor_position,
+      std::function<bool(int64_t*)> displayed_environment_time,
       double start_latitude, double start_longitude);
   ~PortableWeatherRoutingHost();
   bool Show(wxString* error);

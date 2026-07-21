@@ -139,11 +139,28 @@ interface plugin {
     unix-time: s64,
   }
 
+  record route-inspection-line {
+    unix-time: s64,
+    points: list<route-point>,
+  }
+
   record route-result {
     points: list<route-point>,
+    isochrones: list<route-inspection-line>,
+    traces: list<route-inspection-line>,
     distance-nautical-miles: f64,
     duration-seconds: u64,
     states-examined: u32,
+    average-speed-knots: f64,
+    maximum-speed-knots: f64,
+    average-sog-knots: f64,
+    maximum-sog-knots: f64,
+    average-wind-knots: f64,
+    maximum-wind-knots: f64,
+    average-current-knots: option<f64>,
+    maximum-current-knots: option<f64>,
+    tacks: u32,
+    comfort-level: u8,
     diagnostic: string,
   }
 

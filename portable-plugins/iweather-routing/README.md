@@ -31,3 +31,19 @@ The host-rendered route form can resolve start and destination values from the
 live vessel position, OpenCPN waypoints (copied as stable GUID/name/coordinate
 records), the latest chart cursor position, or manually entered coordinates.
 No native navigation object or pointer crosses the component boundary.
+
+Completed searches return bounded retained isochrones and exact predecessor
+traces. The host can draw the selected route's isochrones, show the trace
+nearest the chart cursor and interpolate a boat marker at iGRIB's displayed
+forecast time. These are inspection aids, not evidence that unselected space
+or a chart segment is safe.
+
+When departure comparison is enabled, the Results tab opens automatically and
+lists every attempted departure, including failures. It reports the best
+(shortest elapsed) passage, offset, UTC departure/ETA, elapsed time, distance,
+average boat speed and SOG, maximum SOG, wind/current statistics, tack count,
+the existing Weather Routing-style subjective comfort category, retained
+isochrone count and state. Selecting any successful row immediately makes it
+the emphasized chart route and changes its isochrones, cursor traces, forecast
+time boat marker and GPX export; the other successful routes remain thin
+comparison overlays.

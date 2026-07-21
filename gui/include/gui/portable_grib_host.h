@@ -50,6 +50,7 @@ public:
                    std::vector<PortableEnvironmentSample>* results,
                    wxString* error) const;
   wxString DatasetSummary() const;
+  bool DisplayedTime(int64_t* unix_time) const;
   void Shutdown();
 
 private:
