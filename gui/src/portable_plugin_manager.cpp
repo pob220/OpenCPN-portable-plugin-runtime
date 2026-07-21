@@ -193,6 +193,7 @@ public:
     std::map<wxString, Scene> scenes;
     std::map<wxString, std::shared_ptr<Job>> jobs;
     std::unique_ptr<PortableEnvironmentHost> environmental_host;
+    bool environmental_viewer_pending = false;
     PortableEnvironmentHost* held_environment_host = nullptr;
     std::shared_ptr<const PortableEnvironmentDataset> held_environment_dataset;
     std::unique_ptr<PortableWeatherRoutingHost> weather_routing_host;
@@ -555,14 +556,31 @@ int32_t PortablePluginManager::Impl::OpenEnvironmentalViewer(void* user_data) {
         instance->owner->HasPermission(*instance, "credentials.provider"),
         instance->runtime, instance->runtime_mutex);
   }
-  wxString error;
-  if (!instance->environmental_host->Show(&error)) {
-    wxLogError("Portable plugin %s could not open environmental service: %s",
-               instance->id, error);
-    return -2;
-  }
-  wxLogMessage("Portable plugin %s opened host environmental service 0.1",
-               instance->id);
+
+  // Host callbacks run while HandleToolbarAction owns runtime_mutex.  Opening
+  // the viewer constructs its package-owned declarative surface and calls the
+  // component controller, so doing it synchronously here would re-enter the
+  // same runtime and deadlock the UI thread.  Queue the UI work after the
+  // current component action has returned and released the runtime lock.
+  if (instance->environmental_viewer_pending) return 0;
+  instance->environmental_viewer_pending = true;
+  auto* owner = instance->owner;
+  auto* target = instance;
+  const auto live = owner->alive;
+  wxTheApp->CallAfter([owner, target, live] {
+    if (!live->load() || owner->stopped) return;
+    target->environmental_viewer_pending = false;
+    if (!target->enabled || target->failed || !target->environmental_host)
+      return;
+    wxString error;
+    if (!target->environmental_host->Show(&error)) {
+      wxLogError("Portable plugin %s could not open environmental service: %s",
+                 target->id, error);
+      return;
+    }
+    wxLogMessage("Portable plugin %s opened host environmental service 0.1",
+                 target->id);
+  });
   return 0;
 }
 

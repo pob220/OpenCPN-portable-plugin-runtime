@@ -74,6 +74,21 @@ class BetaToolsTest(unittest.TestCase):
         self.assertNotIn('"--password"', source)
         self.assertNotIn("TPXO model directory", source)
 
+    def test_environment_viewer_open_is_deferred_outside_runtime_callback(self):
+        source = (ROOT / "gui/src/portable_plugin_manager.cpp").read_text()
+        callback = source.split(
+            "int32_t PortablePluginManager::Impl::OpenEnvironmentalViewer", 1
+        )[1].split(
+            "int32_t PortablePluginManager::Impl::OpenWeatherRouting", 1
+        )[0]
+        self.assertIn("environmental_viewer_pending", callback)
+        self.assertIn("wxTheApp->CallAfter", callback)
+        self.assertLess(
+            callback.index("wxTheApp->CallAfter"),
+            callback.index("environmental_host->Show"),
+        )
+        self.assertIn("current component action has returned", callback)
+
     def test_shell_entry_points_have_working_help(self):
         for script in (
             "build-linux.sh",
