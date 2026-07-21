@@ -73,9 +73,12 @@ choosing service budgets.
   the emphasized route, isochrones, route-to-cursor inspection, forecast-time
   boat marker and GPX export.
 - Routing now preflights every comparison departure against the selected iGRIB
-  dataset. The bounded frame cache consumes each requested time before later
-  decodes can evict it, and the bridge smoke test verifies that a provider's
-  structured diagnostic crosses host ABI 9 to the routing result.
+  dataset. Requests are grouped by forecast instant and share the same
+  byte-budgeted immutable-frame LRU as the viewer. Adjacent viewer frames are
+  prefetched; a frame larger than the retention budget remains usable rather
+  than imposing an artificial geographic-area ceiling. The bridge smoke test
+  verifies that a provider's structured diagnostic crosses host ABI 9 to the
+  routing result.
 - The host polar parser loaded the bundled 15-by-16 Nicholson 35 Mk1 `.pol`,
   resolved it through an OpenCPN boat `.xml`, rejected malformed axes and sent
   only bounded typed grids to the component. The routing smoke test verified

@@ -119,6 +119,18 @@ struct DecodedEnvironmentFrame {
   std::map<wxString, wxString> source_times;
 };
 
+size_t EstimatedFrameBytes(const DecodedEnvironmentFrame& frame) {
+  size_t bytes = sizeof(frame);
+  for (const auto& [name, samples] : frame.fields)
+    bytes += name.length() * sizeof(wxChar) +
+             samples.capacity() * sizeof(Sample);
+  for (const auto& [name, value] : frame.units)
+    bytes += (name.length() + value.length()) * sizeof(wxChar);
+  for (const auto& [name, value] : frame.source_times)
+    bytes += (name.length() + value.length()) * sizeof(wxChar);
+  return bytes;
+}
+
 bool PlausibleDecodedValue(const wxString& kind, double value) {
   if (!std::isfinite(value)) return false;
   if (kind == "current-u" || kind == "current-v")
@@ -1152,7 +1164,14 @@ void AddRow(wxFlexGridSizer* grid, wxWindow* parent, const wxString& label,
 
 class PortableEnvironmentHost::Impl : public wxEvtHandler {
 public:
-  enum class Operation { None, Inspect, DecodeFrame, WeatherTable, Generate };
+  enum class Operation {
+    None,
+    Inspect,
+    DecodeFrame,
+    PrefetchFrame,
+    WeatherTable,
+    Generate
+  };
 
   Impl(wxWindow* parent_value, wxString plugin_id_value,
        wxString package_root_value, wxString surface_resource_value,
@@ -1208,6 +1227,11 @@ private:
   void StartFrame(size_t index);
   void StartFrameTime(const wxString& time, int slider_value,
                       size_t source_index);
+  void PrefetchNextFrame(int slider_value);
+  void HandlePrefetchFrame(wxJSONValue& value);
+  void ApplyDisplayedFrame(const wxString& requested_time,
+                           const DecodedEnvironmentFrame& decoded,
+                           size_t sample_count, bool cached);
   wxString TimeForSlider(int value, size_t* source_index = nullptr) const;
   void ShowGenerator();
   void ShowSettings();
@@ -1244,6 +1268,11 @@ private:
                           wxString* error) const;
   void CacheRoutingFrame(const wxString& source, const wxString& time,
                          const DecodedEnvironmentFrame& decoded) const;
+  wxString FrameCacheKey(const wxString& source,
+                         const wxString& time) const;
+  bool FindCachedFrame(const wxString& source, const wxString& time,
+                       DecodedEnvironmentFrame* decoded) const;
+  void TrimFrameCache() const;
   bool IsMarinePoint(double latitude, double longitude) const;
   void SetBusy(bool busy, const wxString& status);
   wxString DecoderHelper() const;
@@ -1303,6 +1332,10 @@ private:
   wxString pending_file;
   wxString pending_display_name;
   wxString pending_frame_time;
+  wxString pending_prefetch_time;
+  wxString queued_frame_time;
+  int queued_frame_slider = 0;
+  size_t queued_frame_source = 0;
   wxString displayed_time;
   uint64_t dataset_revision = 0;
   wxString generated_output_path;
@@ -1316,6 +1349,8 @@ private:
   mutable std::mutex routing_decode_mutex;
   mutable std::map<wxString, DecodedEnvironmentFrame> routing_frames;
   mutable std::list<wxString> routing_frame_lru;
+  mutable std::map<wxString, size_t> routing_frame_bytes;
+  mutable size_t routing_frame_cache_bytes = 0;
   mutable std::mutex land_mask_mutex;
   mutable std::map<std::pair<int32_t, int32_t>, bool> land_mask_cache;
   double cursor_latitude = 0.0;
@@ -1341,6 +1376,7 @@ private:
       0, false, true, false, false, 44, 70, 2, 0, wxColour(220, 65, 35)};
   int overlay_opacity = 145;
   int playback_interval_ms = 1200;
+  size_t frame_cache_budget_bytes = 256U * 1024U * 1024U;
   bool stopped = false;
 };
 
@@ -1743,7 +1779,7 @@ void PortableEnvironmentHost::Impl::CreateFrame() {
     });
   time_slider->Bind(wxEVT_SLIDER, [this](wxCommandEvent&) {
     const int value = time_slider->GetValue();
-    if (value >= 0 && !process) {
+    if (value >= 0) {
       size_t source_index = 0;
       const wxString time = TimeForSlider(value, &source_index);
       if (!time.empty()) StartFrameTime(time, value, source_index);
@@ -1881,6 +1917,10 @@ void PortableEnvironmentHost::Impl::LoadSettings() {
       std::clamp<int>(pConfig->ReadLong("overlayOpacity", 145), 20, 255);
   playback_interval_ms =
       std::clamp<int>(pConfig->ReadLong("playbackIntervalMs", 1200), 200, 5000);
+  const long frame_cache_mib =
+      std::clamp<long>(pConfig->ReadLong("frameCacheMiB", 256), 32, 4096);
+  frame_cache_budget_bytes =
+      static_cast<size_t>(frame_cache_mib) * 1024U * 1024U;
   last_grib_directory = pConfig->Read("lastGribDirectory", wxEmptyString);
   if (!last_grib_directory.empty() && !wxDirExists(last_grib_directory))
     last_grib_directory.clear();
@@ -1943,6 +1983,8 @@ void PortableEnvironmentHost::Impl::SaveSettings() {
   }
   pConfig->Write("overlayOpacity", static_cast<long>(overlay_opacity));
   pConfig->Write("playbackIntervalMs", static_cast<long>(playback_interval_ms));
+  pConfig->Write("frameCacheMiB",
+                 static_cast<long>(frame_cache_budget_bytes / 1024U / 1024U));
   if (!last_grib_directory.empty())
     pConfig->Write("lastGribDirectory", last_grib_directory);
   if (show_wind) pConfig->Write("showWind", show_wind->GetValue());
@@ -2396,6 +2438,11 @@ void PortableEnvironmentHost::Impl::ShowSettings() {
   auto* high_definition = new wxCheckBox(
       playback_page, wxID_ANY, "High-definition overlays (more samples)");
   high_definition->SetValue(this->high_definition);
+  auto* frame_cache = new wxSpinCtrl(
+      playback_page, wxID_ANY,
+      wxString::Format("%zu", frame_cache_budget_bytes / 1024U / 1024U),
+      wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 32, 4096,
+      static_cast<int>(frame_cache_budget_bytes / 1024U / 1024U));
   AddRow(playback_grid, playback_page, "Overlay opacity (20–255)", opacity);
   AddRow(playback_grid, playback_page, "Playback interval (milliseconds)",
          playback);
@@ -2405,6 +2452,8 @@ void PortableEnvironmentHost::Impl::ShowSettings() {
   AddRow(playback_grid, playback_page, "Loop restart point (%)", loop_start);
   AddRow(playback_grid, playback_page, "Colour maps", gradual);
   AddRow(playback_grid, playback_page, "Resolution", high_definition);
+  AddRow(playback_grid, playback_page, "Decoded-frame cache (MiB)",
+         frame_cache);
   auto* playback_root = new wxBoxSizer(wxVERTICAL);
   playback_root->Add(playback_grid, 1, wxEXPAND | wxALL, 14);
   playback_page->SetSizer(playback_root);
@@ -2469,6 +2518,12 @@ void PortableEnvironmentHost::Impl::ShowSettings() {
   loop_start_percent = loop_start->GetValue();
   gradual_colours = gradual->GetValue();
   this->high_definition = high_definition->GetValue();
+  frame_cache_budget_bytes =
+      static_cast<size_t>(frame_cache->GetValue()) * 1024U * 1024U;
+  {
+    std::lock_guard<std::mutex> decode_lock(routing_decode_mutex);
+    TrimFrameCache();
+  }
   if (time_slider && !times.empty()) {
     const int maximum = static_cast<int>(times.size() - 1) *
                         (interpolate_timeline ? interpolation_slices : 1);
@@ -2878,7 +2933,7 @@ bool PortableEnvironmentHost::Impl::Launch(
 #endif
   operation = next_operation;
   result_path = result;
-  SetBusy(true, status);
+  if (next_operation != Operation::PrefetchFrame) SetBusy(true, status);
   return true;
 }
 
@@ -2898,7 +2953,7 @@ void PortableEnvironmentHost::Impl::StartInspect(const wxString& path,
 }
 
 void PortableEnvironmentHost::Impl::StartFrame(size_t index) {
-  if (process || index >= times.size()) return;
+  if (index >= times.size()) return;
   const int slices = interpolate_timeline ? interpolation_slices : 1;
   StartFrameTime(times[index], static_cast<int>(index) * slices, index);
 }
@@ -2928,13 +2983,53 @@ wxString PortableEnvironmentHost::Impl::TimeForSlider(
 void PortableEnvironmentHost::Impl::StartFrameTime(const wxString& time,
                                                    int slider_value,
                                                    size_t source_index) {
-  if (process || time.empty() || source_index >= times.size()) return;
+  if (time.empty() || source_index >= times.size()) return;
   timeline->SetSelection(static_cast<int>(source_index));
   if (time_slider) time_slider->SetValue(slider_value);
+  if (process) {
+    if (operation == Operation::PrefetchFrame) {
+      queued_frame_time = time;
+      queued_frame_slider = slider_value;
+      queued_frame_source = source_index;
+    }
+    return;
+  }
+  DecodedEnvironmentFrame cached;
+  bool cache_hit = false;
+  {
+    std::lock_guard<std::mutex> decode_lock(routing_decode_mutex);
+    cache_hit = FindCachedFrame(selected_file, time, &cached);
+  }
+  if (cache_hit) {
+    ApplyDisplayedFrame(time, cached, 0, true);
+    CallAfter([this, slider_value] {
+      if (!stopped) PrefetchNextFrame(slider_value);
+    });
+    return;
+  }
   pending_frame_time = time;
   const wxString result = MakeResultPath(private_directory, "frame");
   Launch(DecoderCommand("frame", selected_file, time, result),
          Operation::DecodeFrame, result, "Decoding environmental frame…");
+}
+
+void PortableEnvironmentHost::Impl::PrefetchNextFrame(int slider_value) {
+  if (process || selected_file.empty() || times.empty() || !time_slider) return;
+  const int maximum = time_slider->GetMax();
+  if (slider_value >= maximum) return;
+  const int next_slider = slider_value + 1;
+  size_t source_index = 0;
+  const wxString time = TimeForSlider(next_slider, &source_index);
+  if (time.empty()) return;
+  DecodedEnvironmentFrame cached;
+  {
+    std::lock_guard<std::mutex> decode_lock(routing_decode_mutex);
+    if (FindCachedFrame(selected_file, time, &cached)) return;
+  }
+  pending_prefetch_time = time;
+  const wxString result = MakeResultPath(private_directory, "prefetch-frame");
+  Launch(DecoderCommand("frame", selected_file, time, result),
+         Operation::PrefetchFrame, result, wxEmptyString);
 }
 
 void PortableEnvironmentHost::Impl::SetBusy(bool busy, const wxString& status) {
@@ -3031,10 +3126,26 @@ void PortableEnvironmentHost::Impl::OnProcessEnded(wxProcessEvent& event) {
       pending_file.clear();
       pending_display_name.clear();
     }
-    data_status->SetLabel("Failed: " + error);
-    wxLogError("Portable environmental helper failed (exit %d): %s",
-               event.GetExitCode(), error);
+    if (completed == Operation::PrefetchFrame) {
+      pending_prefetch_time.clear();
+      wxLogWarning("Environmental frame prefetch failed (exit %d): %s",
+                   event.GetExitCode(), error);
+    } else {
+      data_status->SetLabel("Failed: " + error);
+      wxLogError("Portable environmental helper failed (exit %d): %s",
+                 event.GetExitCode(), error);
+    }
     wxRemoveFile(completed_result);
+    if (completed == Operation::PrefetchFrame && !queued_frame_time.empty()) {
+      const wxString queued_time = queued_frame_time;
+      const int queued_slider = queued_frame_slider;
+      const size_t queued_source = queued_frame_source;
+      queued_frame_time.clear();
+      CallAfter([this, queued_time, queued_slider, queued_source] {
+        if (!stopped)
+          StartFrameTime(queued_time, queued_slider, queued_source);
+      });
+    }
     return;
   }
   wxRemoveFile(completed_result);
@@ -3043,8 +3154,24 @@ void PortableEnvironmentHost::Impl::OnProcessEnded(wxProcessEvent& event) {
       pending_file.clear();
       pending_display_name.clear();
     }
-    data_status->SetLabel(
-        wxString::Format("Helper exited with status %d", event.GetExitCode()));
+    if (completed == Operation::PrefetchFrame) {
+      pending_prefetch_time.clear();
+      wxLogWarning("Environmental frame prefetch exited with status %d",
+                   event.GetExitCode());
+    } else {
+      data_status->SetLabel(
+          wxString::Format("Helper exited with status %d", event.GetExitCode()));
+    }
+    if (completed == Operation::PrefetchFrame && !queued_frame_time.empty()) {
+      const wxString queued_time = queued_frame_time;
+      const int queued_slider = queued_frame_slider;
+      const size_t queued_source = queued_frame_source;
+      queued_frame_time.clear();
+      CallAfter([this, queued_time, queued_slider, queued_source] {
+        if (!stopped)
+          StartFrameTime(queued_time, queued_slider, queued_source);
+      });
+    }
     return;
   }
   switch (completed) {
@@ -3054,6 +3181,9 @@ void PortableEnvironmentHost::Impl::OnProcessEnded(wxProcessEvent& event) {
     case Operation::DecodeFrame:
       HandleFrame(value);
       break;
+    case Operation::PrefetchFrame:
+      HandlePrefetchFrame(value);
+      break;
     case Operation::WeatherTable:
       HandleWeatherTable(value);
       break;
@@ -3062,6 +3192,15 @@ void PortableEnvironmentHost::Impl::OnProcessEnded(wxProcessEvent& event) {
       break;
     default:
       break;
+  }
+  if (completed == Operation::PrefetchFrame && !queued_frame_time.empty()) {
+    const wxString queued_time = queued_frame_time;
+    const int queued_slider = queued_frame_slider;
+    const size_t queued_source = queued_frame_source;
+    queued_frame_time.clear();
+    CallAfter([this, queued_time, queued_slider, queued_source] {
+      if (!stopped) StartFrameTime(queued_time, queued_slider, queued_source);
+    });
   }
 }
 
@@ -3077,6 +3216,8 @@ void PortableEnvironmentHost::Impl::HandleInspect(wxJSONValue& value) {
     std::lock_guard<std::mutex> field_lock(field_mutex);
     routing_frames.clear();
     routing_frame_lru.clear();
+    routing_frame_bytes.clear();
+    routing_frame_cache_bytes = 0;
     fields.clear();
     field_units.clear();
     field_source_times.clear();
@@ -3136,12 +3277,24 @@ void PortableEnvironmentHost::Impl::HandleFrame(wxJSONValue& value) {
     return;
   }
   const wxString requested_time = value["time"].AsString();
+  ApplyDisplayedFrame(requested_time.empty() ? pending_frame_time
+                                             : requested_time,
+                      decoded, value["sampleCount"].AsInt(), false);
+  const int slider_value = time_slider ? time_slider->GetValue() : 0;
+  CallAfter([this, slider_value] {
+    if (!stopped) PrefetchNextFrame(slider_value);
+  });
+}
+
+void PortableEnvironmentHost::Impl::ApplyDisplayedFrame(
+    const wxString& requested_time, const DecodedEnvironmentFrame& decoded,
+    size_t sample_count, bool cached) {
   std::lock_guard<std::mutex> decode_lock(routing_decode_mutex);
   std::lock_guard<std::mutex> lock(field_mutex);
   fields = decoded.fields;
   field_units = decoded.units;
   field_source_times = decoded.source_times;
-  displayed_time = requested_time.empty() ? pending_frame_time : requested_time;
+  displayed_time = requested_time;
   pending_frame_time.clear();
   CacheRoutingFrame(selected_file, requested_time, decoded);
   wxString source_note;
@@ -3151,11 +3304,37 @@ void PortableEnvironmentHost::Impl::HandleFrame(wxJSONValue& value) {
     source_note = " · waves sampled at " + FormatGribTime(wave_source->second);
   data_status->SetLabel(
       wxString::Format(
-          "%s — %d samples retained by OpenCPN (not navigation-authoritative)",
-          FormatGribTime(requested_time), value["sampleCount"].AsInt()) +
+          "%s — %zu samples retained by OpenCPN%s",
+          FormatGribTime(requested_time),
+          sample_count ? sample_count :
+                         [&decoded] {
+                           size_t total = 0;
+                           for (const auto& [name, samples] : decoded.fields)
+                             total += samples.size();
+                           return total;
+                         }(),
+          cached ? " (cached)" : "") +
       source_note);
   UpdateCursorStatus();
   if (top_frame::Get()) top_frame::Get()->RefreshAllCanvas(false);
+}
+
+void PortableEnvironmentHost::Impl::HandlePrefetchFrame(wxJSONValue& value) {
+  DecodedEnvironmentFrame decoded;
+  wxString error;
+  if (!ParseDecodedFrame(value, &decoded, &error)) {
+    wxLogWarning("Environmental frame prefetch was discarded: %s", error);
+    pending_prefetch_time.clear();
+    return;
+  }
+  const wxString requested_time = value["time"].IsString()
+                                      ? value["time"].AsString()
+                                      : pending_prefetch_time;
+  {
+    std::lock_guard<std::mutex> decode_lock(routing_decode_mutex);
+    CacheRoutingFrame(selected_file, requested_time, decoded);
+  }
+  pending_prefetch_time.clear();
 }
 
 void PortableEnvironmentHost::Impl::HandleWeatherTable(wxJSONValue& value) {
@@ -3242,13 +3421,50 @@ void PortableEnvironmentHost::Impl::CacheRoutingFrame(
     const wxString& source, const wxString& time,
     const DecodedEnvironmentFrame& decoded) const {
   if (source.empty() || time.empty()) return;
-  const wxString key = source + "\n" + time;
+  const wxString key = FrameCacheKey(source, time);
+  const auto old_bytes = routing_frame_bytes.find(key);
+  if (old_bytes != routing_frame_bytes.end())
+    routing_frame_cache_bytes -= old_bytes->second;
   routing_frames[key] = decoded;
+  const size_t bytes = EstimatedFrameBytes(decoded);
+  routing_frame_bytes[key] = bytes;
+  routing_frame_cache_bytes += bytes;
   routing_frame_lru.remove(key);
   routing_frame_lru.push_front(key);
-  constexpr size_t kRoutingFrameCacheLimit = 6;
-  while (routing_frame_lru.size() > kRoutingFrameCacheLimit) {
-    routing_frames.erase(routing_frame_lru.back());
+  TrimFrameCache();
+}
+
+wxString PortableEnvironmentHost::Impl::FrameCacheKey(
+    const wxString& source, const wxString& time) const {
+  return source + "\n" + time + (high_definition ? "\nhd" : "\nnormal");
+}
+
+bool PortableEnvironmentHost::Impl::FindCachedFrame(
+    const wxString& source, const wxString& time,
+    DecodedEnvironmentFrame* decoded) const {
+  if (!decoded || source.empty() || time.empty()) return false;
+  const wxString key = FrameCacheKey(source, time);
+  const auto found = routing_frames.find(key);
+  if (found == routing_frames.end()) return false;
+  *decoded = found->second;
+  routing_frame_lru.remove(key);
+  routing_frame_lru.push_front(key);
+  return true;
+}
+
+void PortableEnvironmentHost::Impl::TrimFrameCache() const {
+  // A frame larger than the configured budget is still useful and is never
+  // rejected.  It becomes the sole cached frame; the byte budget governs
+  // retention only, not the geographic extent a plugin may open or sample.
+  while (routing_frame_lru.size() > 1 &&
+         routing_frame_cache_bytes > frame_cache_budget_bytes) {
+    const wxString key = routing_frame_lru.back();
+    const auto bytes = routing_frame_bytes.find(key);
+    if (bytes != routing_frame_bytes.end()) {
+      routing_frame_cache_bytes -= bytes->second;
+      routing_frame_bytes.erase(bytes);
+    }
+    routing_frames.erase(key);
     routing_frame_lru.pop_back();
   }
 }
@@ -5000,6 +5216,8 @@ void PortableEnvironmentHost::Impl::Shutdown() {
   field_source_times.clear();
   routing_frames.clear();
   routing_frame_lru.clear();
+  routing_frame_bytes.clear();
+  routing_frame_cache_bytes = 0;
   {
     std::lock_guard<std::mutex> land_lock(land_mask_mutex);
     land_mask_cache.clear();
@@ -5156,27 +5374,23 @@ bool PortableEnvironmentHost::Impl::SampleBatch(
     }
     return found && best_distance <= 4.0;
   };
-  results->clear();
-  results->reserve(requests.size());
-  for (size_t index = 0; index < requests.size(); ++index) {
-    const auto& request = requests[index];
-    PortableEnvironmentSample sample;
-    if (request_times[index].empty()) {
-      results->push_back(sample);
-      continue;
-    }
-    const wxString cache_key = source + "\n" + request_times[index];
+  results->assign(requests.size(), PortableEnvironmentSample{});
+  std::map<wxString, std::vector<size_t>> requests_by_time;
+  for (size_t index = 0; index < request_times.size(); ++index)
+    if (!request_times[index].empty())
+      requests_by_time[request_times[index]].push_back(index);
+
+  // Route-search frontiers often contain thousands of states at the same
+  // forecast instant. Decode each distinct instant once, then satisfy every
+  // request in that group while the immutable frame is hot in the cache.
+  for (const auto& [request_time, indices] : requests_by_time) {
+    const wxString cache_key = FrameCacheKey(source, request_time);
     auto cached = routing_frames.find(cache_key);
     if (cached == routing_frames.end()) {
-      // Decode and consume a frame before moving to another requested time.
-      // A batch used for completed-route statistics can span far more times
-      // than the bounded routing-frame cache. Preloading the whole batch used
-      // to evict its earliest frames before they were sampled, making a valid
-      // route fail with "routing frame cache became inconsistent".
       DecodedEnvironmentFrame decoded;
-      if (!DecodeRoutingFrame(source, request_times[index], &decoded, error))
+      if (!DecodeRoutingFrame(source, request_time, &decoded, error))
         return false;
-      CacheRoutingFrame(source, request_times[index], decoded);
+      CacheRoutingFrame(source, request_time, decoded);
       cached = routing_frames.find(cache_key);
     }
     if (cached == routing_frames.end()) {
@@ -5184,26 +5398,32 @@ bool PortableEnvironmentHost::Impl::SampleBatch(
         *error = "environmental routing frame cache became inconsistent";
       return false;
     }
+    routing_frame_lru.remove(cache_key);
+    routing_frame_lru.push_front(cache_key);
     const auto& frame = cached->second;
-    const bool marine = IsMarinePoint(request.latitude, request.longitude);
-    double u = 0.0, v = 0.0;
-    if (nearest_vector(frame, "wind-u", "wind-v", request.latitude,
-                       request.longitude, &u, &v, false)) {
-      sample.wind_u_knots = u * 1.94384449;
-      sample.wind_v_knots = v * 1.94384449;
-      sample.available |= 1;
+    for (const size_t index : indices) {
+      const auto& request = requests[index];
+      auto& sample = (*results)[index];
+      const bool marine = IsMarinePoint(request.latitude, request.longitude);
+      double u = 0.0, v = 0.0;
+      if (nearest_vector(frame, "wind-u", "wind-v", request.latitude,
+                         request.longitude, &u, &v, false)) {
+        sample.wind_u_knots = u * 1.94384449;
+        sample.wind_v_knots = v * 1.94384449;
+        sample.available |= 1;
+      }
+      if (marine &&
+          nearest_vector(frame, "current-u", "current-v", request.latitude,
+                         request.longitude, &u, &v, true)) {
+        sample.current_u_knots = u * 1.94384449;
+        sample.current_v_knots = v * 1.94384449;
+        sample.available |= 2;
+      }
+      if (marine &&
+          nearest(frame, "wave-height", request.latitude, request.longitude,
+                  &sample.wave_height_metres, true))
+        sample.available |= 4;
     }
-    if (marine &&
-        nearest_vector(frame, "current-u", "current-v", request.latitude,
-                       request.longitude, &u, &v, true)) {
-      sample.current_u_knots = u * 1.94384449;
-      sample.current_v_knots = v * 1.94384449;
-      sample.available |= 2;
-    }
-    if (marine && nearest(frame, "wave-height", request.latitude,
-                          request.longitude, &sample.wave_height_metres, true))
-      sample.available |= 4;
-    results->push_back(sample);
   }
   return true;
 }

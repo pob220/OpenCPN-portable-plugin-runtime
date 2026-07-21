@@ -90,6 +90,22 @@ class BetaToolsTest(unittest.TestCase):
         )
         self.assertIn("current component action has returned", callback)
 
+    def test_environment_frames_use_byte_budget_prefetch_and_grouped_routing(self):
+        source = (ROOT / "gui/src/portable_environment_host.cpp").read_text()
+
+        self.assertIn('ReadLong("frameCacheMiB", 256)', source)
+        self.assertIn("Operation::PrefetchFrame", source)
+        self.assertIn("PrefetchNextFrame", source)
+        self.assertIn("routing_frame_cache_bytes", source)
+        self.assertIn("requests_by_time", source)
+        self.assertNotIn("kRoutingFrameCacheLimit", source)
+
+        # The memory budget controls retention, not the maximum GRIB area.
+        # One decoded frame must remain usable even when it alone exceeds the
+        # configured cache budget.
+        self.assertIn("routing_frame_lru.size() > 1", source)
+        self.assertIn("never\n  // rejected", source)
+
     def test_igrib_surface_owns_compact_layout_icons_and_generator_presets(self):
         package = ROOT / "portable-plugins/igrib/package"
         surface = json.loads((package / "igrib-viewer.ui.json").read_text())

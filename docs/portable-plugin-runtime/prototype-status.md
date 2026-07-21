@@ -210,8 +210,11 @@ Measured conformance values for this machine are recorded in
   metrics); selection consistently drives the emphasized overlay, inspection
   layers and GPX output. Environmental availability for every requested
   departure is checked before compute workers start. Multi-time sampling
-  decodes and consumes frames incrementally so a route-statistics batch cannot
-  evict its own frames from the bounded cache; provider diagnostics cross host
+  groups route states by forecast instant so each immutable frame is decoded
+  once. The viewer and router share a byte-budgeted LRU (256 MiB default,
+  configurable from 32 MiB to 4 GiB) and the viewer prefetches its adjacent
+  frame. A single frame larger than the budget remains valid as the sole cache
+  entry, so the cache is not a GRIB-area limit. Provider diagnostics cross host
   ABI 9 as text instead of being reduced to an opaque numeric error.
 - Production catalogue/TUF metadata, revocation, user permission-consent UI,
   cross-platform credential-store conformance, state migrations and a
