@@ -40,6 +40,61 @@
       "repository": "https://github.com/pob220/environmental-grib-generator",
       "commit": "f7311bb340f6c942080b5ad18061c1a8b6b5f000",
       "role": "native helper and environmental services"
+    },
+    {
+      "name": "OpenCPN developer manual UI integration",
+      "kind": "official-documentation",
+      "url": "https://opencpn-manuals.github.io/main/ocpn-dev-manual/0.1/pm-plugin-api-ui-integration.html",
+      "access_date": "2026-07-22",
+      "role": "documented toolbar, menu and preferences API"
+    },
+    {
+      "name": "testplugin_pi",
+      "kind": "representative-plugin",
+      "repository": "https://github.com/jongough/testplugin_pi",
+      "branch": "master",
+      "commit": "dfde2b83c94da31b27bc32ad9743d1aad41b8a6e",
+      "role": "template, plugin messaging and public API usage"
+    },
+    {
+      "name": "shipdriver_pi",
+      "kind": "representative-plugin",
+      "repository": "https://github.com/Rasbats/shipdriver_pi",
+      "branch": "master",
+      "commit": "d6d6023d32e94fd9ffe09c243d5afe5eaa811383",
+      "role": "toolbar fallback, toggle state, thread and messaging patterns"
+    },
+    {
+      "name": "weather_routing_pi",
+      "kind": "representative-plugin",
+      "repository": "https://github.com/rgleason/weather_routing_pi",
+      "branch": "master",
+      "commit": "22dd1f099ff067f6c36a953664a54180fdf9d955",
+      "role": "routing, overlays, background work, complex UI and messaging"
+    },
+    {
+      "name": "radar_pi",
+      "kind": "representative-plugin",
+      "repository": "https://github.com/opencpn-radar-pi/radar_pi",
+      "branch": "master",
+      "commit": "80c8403ee409ddd57897c591330ac8f9e26c9477",
+      "role": "network threads, multi-canvas rendering and toolbar artwork"
+    },
+    {
+      "name": "ocpn_draw_pi",
+      "kind": "representative-plugin",
+      "repository": "https://github.com/jongough/ocpn_draw_pi",
+      "branch": "master",
+      "commit": "82b3adb50288c1c24566336df451697a3a77a073",
+      "role": "multiple toolbar tools, cleanup, rendering and messaging"
+    },
+    {
+      "name": "OpenCPN plugin catalogue",
+      "kind": "upstream-source",
+      "repository": "https://github.com/OpenCPN/plugins",
+      "branch": "master",
+      "commit": "a928fbdedf48d510fb6180a3bb7b6ba39c13998f",
+      "role": "managed plugin metadata and target inventory"
     }
   ]
 }
