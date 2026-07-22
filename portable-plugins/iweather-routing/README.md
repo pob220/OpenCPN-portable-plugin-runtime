@@ -30,6 +30,10 @@ height and latitude, polar efficiency, tack/gybe time, search angle,
 destination tolerance and bounded departure parallelism. Invalid ranges are
 rejected before a portable route job starts and settings persist per plugin.
 The selected boat/polar path persists too; it is revalidated on every startup.
+New installations use a conservative 300-second tack and gybe loss, matching
+the five-minute real-boat manoeuvre increment used by qtVlm rather than
+pretending there is one empirical average for all yachts. Both values remain
+editable down to zero and saved values always take precedence over defaults.
 
 Optional propulsion is an explicit, default-off route policy executed by the
 portable component rather than a cosmetic host setting. Users may independently
@@ -65,11 +69,26 @@ chart rejection.
 The forward stage reserves bounded state capacity for recovery. Reverse
 recovery ranks historical forward states from the destination side and tests
 reproducible bridges directly and through destination-centred approach rings.
-If no bridge survives, bounded time-dependent A* explores position, forecast
-time, heading, tack and propulsion labels in a 120 NM passage corridor. The
-progress bar explicitly identifies `Forward isochrone`, `Reverse-isocrone
+If no bridge survives, bounded time-dependent graph search explores position,
+forecast time, heading, tack and propulsion labels in a 120 NM passage corridor. Its
+remaining-time bound comes from the fastest configured polar/motor speed, not
+a fixed boat speed. When currents are enabled, the request has no global upper
+bound on favourable current, so the fallback correctly becomes bounded
+Dijkstra rather than using a potentially inadmissible A* heuristic. Label
+dominance preserves non-dominated elapsed-time/motor-use alternatives and
+minimum-run state. A stationary wait action of at most six consecutive hours
+allows the graph to wait for a forecast or tidal gate without consuming motor
+or fuel. The progress bar explicitly identifies `Forward isochrone`, `Reverse-isocrone
 recovery` and `Time-dependent graph fallback`, with retained/queued counters,
 so a difficult calculation is distinguishable from a stalled component.
+
+When the selected resolution is coarser than 30 minutes, 1.5 NM or 5 degrees,
+the independently validated initial solution becomes a safe incumbent and the
+component automatically reruns inside a 12 NM-or-wider route corridor at those
+finer limits. Progress explicitly identifies this corridor-refinement pass and
+the result reports the ETA difference as a resolution-sensitivity check. If
+the finer bounded pass fails, the validated initial route is retained. Each
+pass has its own configured state bound.
 
 Current-aware replay distinguishes course over ground from vessel heading:
 the independently sampled current vector is removed from each delivered leg
@@ -81,10 +100,12 @@ waypoint.
 Weather used to admit a forward leg is sampled at its predicted midpoint,
 matching the independent replay boundary. This removes the former failure mode
 where start-of-hour wind admitted a leg which midpoint wind then rejected after
-a forecast shift. This reference remains a portable-runtime proof of concept:
-it demonstrates a professional bounded solver cascade over typed host services,
-but it is not a safety-certified navigator and does not import native SuperCPN
-or legacy Weather Routing objects into Wasm.
+a forecast shift. Final replay additionally subdivides route geometry to at
+most 15-minute and approximately 1.5 NM probes for environmental-limit and
+chart-corridor validation. This reference remains a portable-runtime proof of
+concept: it demonstrates a professional bounded solver cascade over typed host
+services, but it is not a safety-certified navigator and does not import native
+SuperCPN or legacy Weather Routing objects into Wasm.
 
 When departure comparison is enabled, the Results tab opens automatically and
 lists every attempted departure, including failures. It reports the best

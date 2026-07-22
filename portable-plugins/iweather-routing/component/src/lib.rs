@@ -35,6 +35,7 @@ struct Node {
     motor_seconds: u64,
     propulsion_run_seconds: u64,
     propulsion_transitions: u32,
+    consecutive_wait_seconds: u32,
     reached_destination: bool,
 }
 
@@ -116,6 +117,80 @@ fn sector_balanced_frontier(
 const PROPULSION_SAIL: u8 = 0;
 const PROPULSION_MOTOR_SAIL: u8 = 1;
 const PROPULSION_MOTOR: u8 = 2;
+const MAX_GRAPH_WAIT_SECONDS: u32 = 6 * 3600;
+const VALIDATION_INTERVAL_SECONDS: i64 = 15 * 60;
+const VALIDATION_SEGMENT_NM: f64 = 1.5;
+
+#[derive(Clone, Copy)]
+struct ProgressRange {
+    start: u8,
+    end: u8,
+    prefix: &'static str,
+}
+
+impl ProgressRange {
+    fn report(self, percent: u8, message: &str) {
+        let span = u16::from(self.end.saturating_sub(self.start));
+        let scaled = u16::from(self.start) + span * u16::from(percent.min(100)) / 100;
+        let message = if self.prefix.is_empty() {
+            message.to_string()
+        } else {
+            format!("{} — {message}", self.prefix)
+        };
+        host::routing_progress(scaled.min(100) as u8, &message);
+    }
+}
+
+#[derive(Clone)]
+struct RouteCorridor {
+    points: Vec<(f64, f64)>,
+    half_width_nm: f64,
+}
+
+impl RouteCorridor {
+    fn from_route(points: &[RoutePoint], half_width_nm: f64) -> Self {
+        Self {
+            points: points
+                .iter()
+                .map(|point| (point.latitude, point.longitude))
+                .collect(),
+            half_width_nm,
+        }
+    }
+
+    fn contains(&self, latitude: f64, longitude: f64) -> bool {
+        self.points.windows(2).any(|pair| {
+            point_segment_distance_nm(latitude, longitude, pair[0], pair[1]) <= self.half_width_nm
+        }) || self.points.first().is_some_and(|point| {
+            distance_nm(latitude, longitude, point.0, point.1) <= self.half_width_nm
+        })
+    }
+}
+
+fn point_segment_distance_nm(
+    latitude: f64,
+    longitude: f64,
+    start: (f64, f64),
+    end: (f64, f64),
+) -> f64 {
+    let longitude_scale = latitude.to_radians().cos().abs().max(0.05);
+    let relative = |point: (f64, f64)| {
+        (
+            angular_difference(point.1, longitude) * 60.0 * longitude_scale,
+            (point.0 - latitude) * 60.0,
+        )
+    };
+    let (start_x, start_y) = relative(start);
+    let (end_x, end_y) = relative(end);
+    let segment_x = end_x - start_x;
+    let segment_y = end_y - start_y;
+    let length_squared = segment_x * segment_x + segment_y * segment_y;
+    if length_squared <= 1e-12 {
+        return start_x.hypot(start_y);
+    }
+    let fraction = (-(start_x * segment_x + start_y * segment_y) / length_squared).clamp(0.0, 1.0);
+    (start_x + fraction * segment_x).hypot(start_y + fraction * segment_y)
+}
 
 fn radians(value: f64) -> f64 {
     value.to_radians()
@@ -428,11 +503,22 @@ fn route_statistics(
     let mut propulsion_run_seconds = 0u64;
     let mut propulsion_transitions = 0u32;
     let mut comfort_level = 1u8;
+    let mut motion_leg_count = 0usize;
     for (index, pair) in points.windows(2).enumerate() {
         let elapsed_hours = (pair[1].unix_time - pair[0].unix_time) as f64 / 3600.0;
         if elapsed_hours <= 0.0 {
             continue;
         }
+        if distance_nm(
+            pair[0].latitude,
+            pair[0].longitude,
+            pair[1].latitude,
+            pair[1].longitude,
+        ) <= 0.001
+        {
+            continue;
+        }
+        motion_leg_count += 1;
         let sample = &samples[index];
         let (wind_u, wind_v) = match (sample.wind_u_knots, sample.wind_v_knots) {
             (Some(u), Some(v)) => (u, v),
@@ -507,7 +593,7 @@ fn route_statistics(
             3
         });
     }
-    let count = (points.len() - 1) as f64;
+    let count = motion_leg_count.max(1) as f64;
     Ok(RouteStatistics {
         average_speed_knots: speed_total / count,
         maximum_speed_knots: speed_max,
@@ -1018,6 +1104,71 @@ fn motor_budget_allows(request: &RouteRequest, seconds: u64) -> bool {
     true
 }
 
+struct ValidationSubsegment {
+    route_leg: usize,
+    start: RoutePoint,
+    end: RoutePoint,
+}
+
+fn route_point_at_fraction(start: &RoutePoint, end: &RoutePoint, fraction: f64) -> RoutePoint {
+    if fraction >= 1.0 {
+        return RoutePoint {
+            latitude: end.latitude,
+            longitude: end.longitude,
+            unix_time: end.unix_time,
+        };
+    }
+    let distance = distance_nm(start.latitude, start.longitude, end.latitude, end.longitude);
+    let course = bearing(start.latitude, start.longitude, end.latitude, end.longitude);
+    let course_radians = radians(course);
+    let (latitude, longitude, _) = advance(
+        start.latitude,
+        start.longitude,
+        distance * fraction * course_radians.sin(),
+        distance * fraction * course_radians.cos(),
+        3600,
+    );
+    RoutePoint {
+        latitude,
+        longitude,
+        unix_time: start.unix_time
+            + ((end.unix_time - start.unix_time) as f64 * fraction).round() as i64,
+    }
+}
+
+fn validation_subsegments(
+    points: &[RoutePoint],
+) -> Result<(Vec<ValidationSubsegment>, Vec<std::ops::Range<usize>>), String> {
+    let mut subsegments = Vec::new();
+    let mut leg_ranges = Vec::with_capacity(points.len().saturating_sub(1));
+    for (route_leg, pair) in points.windows(2).enumerate() {
+        let seconds = pair[1].unix_time - pair[0].unix_time;
+        if seconds <= 0 {
+            return Err("independent validation found non-increasing timestamps".into());
+        }
+        let distance = distance_nm(
+            pair[0].latitude,
+            pair[0].longitude,
+            pair[1].latitude,
+            pair[1].longitude,
+        );
+        let time_parts = ((seconds + VALIDATION_INTERVAL_SECONDS - 1) / VALIDATION_INTERVAL_SECONDS)
+            .max(1) as usize;
+        let distance_parts = (distance / VALIDATION_SEGMENT_NM).ceil().max(1.0) as usize;
+        let parts = time_parts.max(distance_parts).min(256);
+        let first = subsegments.len();
+        for part in 0..parts {
+            subsegments.push(ValidationSubsegment {
+                route_leg,
+                start: route_point_at_fraction(&pair[0], &pair[1], part as f64 / parts as f64),
+                end: route_point_at_fraction(&pair[0], &pair[1], (part + 1) as f64 / parts as f64),
+            });
+        }
+        leg_ranges.push(first..subsegments.len());
+    }
+    Ok((subsegments, leg_ranges))
+}
+
 /// Independently replay the exact delivered geometry.  This deliberately
 /// re-samples the immutable environmental dataset and chart service instead
 /// of trusting search-state decisions.  A route cannot be returned as a
@@ -1046,27 +1197,25 @@ fn validate_delivered_route(request: &RouteRequest, points: &[RoutePoint]) -> Re
         return Err("independent validation found the route outside destination tolerance".into());
     }
 
-    let mut samples = Vec::with_capacity(points.len() - 1);
-    let mut segments = Vec::with_capacity(points.len() - 1);
-    for pair in points.windows(2) {
-        if pair[1].unix_time <= pair[0].unix_time {
-            return Err("independent validation found non-increasing timestamps".into());
-        }
-        let longitude_delta = angular_difference(pair[1].longitude, pair[0].longitude);
+    let (validation_segments, leg_ranges) = validation_subsegments(points)?;
+    let mut samples = Vec::with_capacity(validation_segments.len());
+    let mut segments = Vec::with_capacity(validation_segments.len());
+    for probe in &validation_segments {
+        let longitude_delta = angular_difference(probe.end.longitude, probe.start.longitude);
         samples.push(EnvironmentSampleRequest {
-            latitude: (pair[0].latitude + pair[1].latitude) * 0.5,
-            longitude: (pair[0].longitude + longitude_delta * 0.5 + 540.0).rem_euclid(360.0)
+            latitude: (probe.start.latitude + probe.end.latitude) * 0.5,
+            longitude: (probe.start.longitude + longitude_delta * 0.5 + 540.0).rem_euclid(360.0)
                 - 180.0,
-            unix_time: pair[0].unix_time + (pair[1].unix_time - pair[0].unix_time) / 2,
+            unix_time: probe.start.unix_time + (probe.end.unix_time - probe.start.unix_time) / 2,
         });
         let segment = GeoSegment {
             start: GeoPoint {
-                latitude: pair[0].latitude,
-                longitude: pair[0].longitude,
+                latitude: probe.start.latitude,
+                longitude: probe.start.longitude,
             },
             end: GeoPoint {
-                latitude: pair[1].latitude,
-                longitude: pair[1].longitude,
+                latitude: probe.end.latitude,
+                longitude: probe.end.longitude,
             },
         };
         segments.extend(clearance_segments(
@@ -1098,12 +1247,72 @@ fn validate_delivered_route(request: &RouteRequest, points: &[RoutePoint]) -> Re
         }
     }
 
+    // Environmental limits and coverage are checked at every dense probe,
+    // not only once at the midpoint of an hour-long routing leg.
+    for (probe_index, environment) in environments.iter().enumerate() {
+        let route_leg = validation_segments[probe_index].route_leg + 1;
+        let (Some(wind_u), Some(wind_v)) = (environment.wind_u_knots, environment.wind_v_knots)
+        else {
+            return Err(format!(
+                "independent validation lost wind coverage on leg {route_leg}"
+            ));
+        };
+        if request
+            .max_wind_knots
+            .is_some_and(|limit| wind_u.hypot(wind_v) > limit + 1e-9)
+        {
+            return Err(format!(
+                "independent validation exceeded the true-wind limit on leg {route_leg}"
+            ));
+        }
+        if request.use_waves {
+            if request.require_wave_data && environment.wave_height_metres.is_none() {
+                return Err(format!(
+                    "independent validation lost required wave coverage on leg {route_leg}"
+                ));
+            }
+            if request.max_wave_metres.is_some_and(|limit| {
+                environment
+                    .wave_height_metres
+                    .is_some_and(|height| height > limit + 1e-9)
+            }) {
+                return Err(format!(
+                    "independent validation exceeded the wave limit on leg {route_leg}"
+                ));
+            }
+        }
+        let current_available =
+            environment.current_u_knots.is_some() && environment.current_v_knots.is_some();
+        if request.use_currents && request.require_current_data && !current_available {
+            return Err(format!(
+                "independent validation lost required current coverage on leg {route_leg}"
+            ));
+        }
+        if request
+            .max_opposing_wind_current_knots_squared
+            .is_some_and(|limit| {
+                current_available
+                    && opposing_wind_current(
+                        wind_u,
+                        wind_v,
+                        environment.current_u_knots.unwrap_or(0.0),
+                        environment.current_v_knots.unwrap_or(0.0),
+                    ) > limit + 1e-9
+            })
+        {
+            return Err(format!(
+                "independent validation exceeded the wind-against-current limit on leg {route_leg}"
+            ));
+        }
+    }
+
     let mut previous_tack = 0i8;
     let mut previous_mode = PROPULSION_SAIL;
     let mut motor_seconds = 0u64;
     let mut propulsion_run_seconds = 0u64;
     for (index, pair) in points.windows(2).enumerate() {
-        let environment = &environments[index];
+        let probe_range = &leg_ranges[index];
+        let environment = &environments[probe_range.start + probe_range.len() / 2];
         let (Some(wind_u), Some(wind_v)) = (environment.wind_u_knots, environment.wind_v_knots)
         else {
             return Err(format!(
@@ -1155,6 +1364,26 @@ fn validate_delivered_route(request: &RouteRequest, points: &[RoutePoint]) -> Re
             return Err("independent validation exceeded the wind-against-current limit".into());
         }
         let leg_seconds = (pair[1].unix_time - pair[0].unix_time) as u32;
+        if distance_nm(
+            pair[0].latitude,
+            pair[0].longitude,
+            pair[1].latitude,
+            pair[1].longitude,
+        ) <= 0.001
+        {
+            // The graph fallback may explicitly wait for a bounded forecast
+            // or tidal gate. Environmental and chart constraints for this
+            // stationary interval were checked by the dense probes above.
+            if request
+                .max_apparent_wind_knots
+                .is_some_and(|limit| wind > limit + 1e-9)
+            {
+                return Err(
+                    "independent validation exceeded the apparent-wind limit while waiting".into(),
+                );
+            }
+            continue;
+        }
         let kinematics =
             leg_kinematics(&pair[0], &pair[1], current_u, current_v).ok_or_else(|| {
                 format!(
@@ -1280,6 +1509,7 @@ fn expand_recovery_node(
     target_latitude: f64,
     target_longitude: f64,
     step_seconds: u32,
+    corridor: Option<&RouteCorridor>,
 ) -> Result<Vec<Node>, String> {
     let node = &nodes[node_index];
     let start_samples = host::environment_sample_batch(&[EnvironmentSampleRequest {
@@ -1388,6 +1618,9 @@ fn expand_recovery_node(
         if !lat.is_finite() || !lon.is_finite() || lat.abs() > request.maximum_latitude_degrees {
             continue;
         }
+        if corridor.is_some_and(|route| !route.contains(lat, lon)) {
+            continue;
+        }
         candidates.push(Node {
             lat,
             lon,
@@ -1406,6 +1639,7 @@ fn expand_recovery_node(
             ),
             propulsion_transitions: node.propulsion_transitions
                 + u32::from(motion.propulsion_mode != node.propulsion_mode),
+            consecutive_wait_seconds: 0,
             reached_destination: distance_nm(lat, lon, target_latitude, target_longitude)
                 <= request.destination_tolerance_nm,
         });
@@ -1448,6 +1682,7 @@ fn append_greedy_connection(
     horizon_seconds: u32,
     examined: &mut u32,
     state_limit: u32,
+    corridor: Option<&RouteCorridor>,
 ) -> Result<Option<usize>, String> {
     let step = request.time_step_seconds.min(1800).max(300);
     let mut current = start;
@@ -1474,6 +1709,7 @@ fn append_greedy_connection(
             target_latitude,
             target_longitude,
             elapsed,
+            corridor,
         )?;
         candidates.sort_by(|left, right| {
             distance_nm(left.lat, left.lon, target_latitude, target_longitude).total_cmp(
@@ -1528,6 +1764,8 @@ fn reverse_isochrone_recovery(
     request: &RouteRequest,
     nodes: &mut Vec<Node>,
     examined: &mut u32,
+    corridor: Option<&RouteCorridor>,
+    progress: ProgressRange,
 ) -> Result<Option<usize>, String> {
     let graph_reserve = (request.max_states / 5)
         .max(100)
@@ -1563,7 +1801,7 @@ fn reverse_isochrone_recovery(
     }
     let seed_count = seeds.len().max(1);
     for (seed_number, seed) in seeds.into_iter().enumerate() {
-        host::routing_progress(
+        progress.report(
             90 + ((seed_number * 4 / seed_count).min(4) as u8),
             &format!(
                 "Reverse-isocrone recovery: testing frontier bridge {}/{} ({} retained states examined)",
@@ -1582,6 +1820,7 @@ fn reverse_isochrone_recovery(
             24 * 3600,
             examined,
             reverse_state_limit,
+            corridor,
         )? {
             return Ok(Some(index));
         }
@@ -1615,6 +1854,7 @@ fn reverse_isochrone_recovery(
                 18 * 3600,
                 examined,
                 reverse_state_limit,
+                corridor,
             )?
             else {
                 nodes.truncate(checkpoint);
@@ -1629,6 +1869,7 @@ fn reverse_isochrone_recovery(
                 12 * 3600,
                 examined,
                 reverse_state_limit,
+                corridor,
             )? {
                 return Ok(Some(index));
             }
@@ -1643,6 +1884,169 @@ struct GraphQueueEntry {
     cost: i64,
     serial: u64,
     node: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GraphLabel {
+    cost: i64,
+    motor_seconds: u64,
+    node: usize,
+}
+
+fn graph_label_dominates(left: &GraphLabel, right: &GraphLabel) -> bool {
+    left.cost <= right.cost
+        && left.motor_seconds <= right.motor_seconds
+        && (left.cost < right.cost || left.motor_seconds < right.motor_seconds)
+}
+
+/// Retain an evenly distributed bounded sample of the non-dominated
+/// time/motor-resource frontier. The fastest and least-motor labels are
+/// always retained when at least two labels are allowed.
+fn insert_graph_label(labels: &mut Vec<GraphLabel>, candidate: GraphLabel, limit: usize) -> bool {
+    if labels.iter().any(|label| {
+        graph_label_dominates(label, &candidate)
+            || (label.cost == candidate.cost && label.motor_seconds == candidate.motor_seconds)
+    }) {
+        return false;
+    }
+    labels.retain(|label| !graph_label_dominates(&candidate, label));
+    labels.push(candidate);
+    labels.sort_by(|left, right| {
+        left.cost
+            .cmp(&right.cost)
+            .then_with(|| right.motor_seconds.cmp(&left.motor_seconds))
+            .then_with(|| left.node.cmp(&right.node))
+    });
+    if labels.len() <= limit.max(1) {
+        return true;
+    }
+    let source = labels.clone();
+    let keep = limit.max(1);
+    let mut retained = Vec::with_capacity(keep);
+    for index in 0..keep {
+        let source_index = if keep == 1 {
+            0
+        } else {
+            index * (source.len() - 1) / (keep - 1)
+        };
+        let selected = source[source_index];
+        if !retained.contains(&selected) {
+            retained.push(selected);
+        }
+    }
+    *labels = retained;
+    labels.contains(&candidate)
+}
+
+fn minimum_run_remaining_bin(request: &RouteRequest, node: &Node, step: u32) -> u32 {
+    if node.propulsion_mode == PROPULSION_SAIL {
+        return 0;
+    }
+    let remaining =
+        u64::from(request.minimum_motor_run_seconds).saturating_sub(node.propulsion_run_seconds);
+    let divisor = u64::from(step.max(1));
+    ((remaining + divisor - 1) / divisor) as u32
+}
+
+fn maximum_vessel_speed_knots(request: &RouteRequest) -> f64 {
+    let polar_max = request
+        .polars
+        .iter()
+        .flat_map(|polar| polar.boat_speeds_knots.iter().copied())
+        .filter(|speed| speed.is_finite())
+        .fold(0.0, f64::max)
+        * request.upwind_efficiency.max(request.downwind_efficiency);
+    let mut maximum = polar_max;
+    if request.allow_motor_sailing {
+        maximum = maximum.max(polar_max + request.motor_sailing_boost_knots);
+    }
+    if request.allow_motor {
+        maximum = maximum.max(request.motor_speed_knots);
+    }
+    maximum.max(0.0)
+}
+
+/// A* may only use a lower bound on remaining time. With currents enabled the
+/// request contains no global upper bound on favourable current, so the only
+/// admissible heuristic is zero (Dijkstra). Without currents the maximum
+/// polar/motor speed is a valid upper bound on through-water progress.
+fn remaining_time_lower_bound_seconds(request: &RouteRequest, node: &Node) -> f64 {
+    if request.use_currents {
+        return 0.0;
+    }
+    let maximum_speed = maximum_vessel_speed_knots(request);
+    if maximum_speed <= 0.05 {
+        return 0.0;
+    }
+    distance_nm(
+        node.lat,
+        node.lon,
+        request.destination_latitude,
+        request.destination_longitude,
+    ) / maximum_speed
+        * 3600.0
+}
+
+/// A bounded stationary loiter is a planning abstraction for waiting out a
+/// tide gate or forecast no-go wind. It is deliberately available only while
+/// sailing, never consumes motor/fuel, and is independently revalidated.
+fn graph_wait_candidate(
+    request: &RouteRequest,
+    nodes: &[Node],
+    node_index: usize,
+    step: u32,
+) -> Result<Option<Node>, String> {
+    let node = &nodes[node_index];
+    if node.propulsion_mode != PROPULSION_SAIL
+        || node.consecutive_wait_seconds.saturating_add(step) > MAX_GRAPH_WAIT_SECONDS
+        || node.time - request.departure_unix_time + i64::from(step)
+            > i64::from(request.max_hours) * 3600
+    {
+        return Ok(None);
+    }
+    let samples = host::environment_sample_batch(&[EnvironmentSampleRequest {
+        latitude: node.lat,
+        longitude: node.lon,
+        unix_time: node.time + i64::from(step / 2),
+    }])?;
+    let Some(sample) = samples.first() else {
+        return Err("environment provider returned an empty graph-wait sample".into());
+    };
+    if usable_environment(
+        request,
+        sample.wind_u_knots,
+        sample.wind_v_knots,
+        sample.current_u_knots,
+        sample.current_v_knots,
+        sample.wave_height_metres,
+    )
+    .is_none()
+    {
+        return Ok(None);
+    }
+    if request.max_apparent_wind_knots.is_some_and(|limit| {
+        sample
+            .wind_u_knots
+            .zip(sample.wind_v_knots)
+            .is_some_and(|(wind_u, wind_v)| wind_u.hypot(wind_v) > limit)
+    }) {
+        return Ok(None);
+    }
+    Ok(Some(Node {
+        lat: node.lat,
+        lon: node.lon,
+        time: node.time + i64::from(step),
+        parent: Some(node_index),
+        sailed_nm: node.sailed_nm,
+        incoming_heading: node.incoming_heading,
+        tack: node.tack,
+        propulsion_mode: PROPULSION_SAIL,
+        motor_seconds: node.motor_seconds,
+        propulsion_run_seconds: 0,
+        propulsion_transitions: node.propulsion_transitions,
+        consecutive_wait_seconds: node.consecutive_wait_seconds.saturating_add(step),
+        reached_destination: false,
+    }))
 }
 
 impl PartialEq for GraphQueueEntry {
@@ -1697,6 +2101,8 @@ fn time_dependent_graph_fallback(
     request: &RouteRequest,
     nodes: &mut Vec<Node>,
     examined: &mut u32,
+    corridor: Option<&RouteCorridor>,
+    progress: ProgressRange,
 ) -> Result<Option<usize>, String> {
     let step = request.time_step_seconds.min(1800).max(300);
     let mut seeds: Vec<_> = (0..nodes.len()).collect();
@@ -1705,17 +2111,11 @@ fn time_dependent_graph_fallback(
     });
     seeds.truncate(128);
     let mut open = BinaryHeap::new();
-    let mut labels: BTreeMap<(SearchCell, i64), Vec<(i64, usize)>> = BTreeMap::new();
+    let mut labels: BTreeMap<(SearchCell, i64, u32), Vec<GraphLabel>> = BTreeMap::new();
     let mut serial = 0u64;
     for seed in seeds {
         let cost = nodes[seed].time - request.departure_unix_time;
-        let heuristic = distance_nm(
-            nodes[seed].lat,
-            nodes[seed].lon,
-            request.destination_latitude,
-            request.destination_longitude,
-        ) / 8.0
-            * 3600.0;
+        let heuristic = remaining_time_lower_bound_seconds(request, &nodes[seed]);
         open.push(GraphQueueEntry {
             priority: cost as f64 + heuristic,
             cost,
@@ -1724,9 +2124,17 @@ fn time_dependent_graph_fallback(
         });
         serial += 1;
         labels
-            .entry((search_cell(request, &nodes[seed]), cost / i64::from(step)))
+            .entry((
+                search_cell(request, &nodes[seed]),
+                cost / i64::from(step),
+                minimum_run_remaining_bin(request, &nodes[seed], step),
+            ))
             .or_default()
-            .push((cost, seed));
+            .push(GraphLabel {
+                cost,
+                motor_seconds: nodes[seed].motor_seconds,
+                node: seed,
+            });
     }
     let graph_limit = request
         .max_states
@@ -1740,6 +2148,17 @@ fn time_dependent_graph_fallback(
         }
         if graph_labels >= graph_limit || *examined >= request.max_states {
             break;
+        }
+        let entry_key = (
+            search_cell(request, &nodes[entry.node]),
+            entry.cost / i64::from(step),
+            minimum_run_remaining_bin(request, &nodes[entry.node], step),
+        );
+        if !labels
+            .get(&entry_key)
+            .is_some_and(|cell| cell.iter().any(|label| label.node == entry.node))
+        {
+            continue;
         }
         let remaining = distance_nm(
             nodes[entry.node].lat,
@@ -1765,6 +2184,7 @@ fn time_dependent_graph_fallback(
                 24 * 3600,
                 examined,
                 request.max_states,
+                corridor,
             )? {
                 let chain = route_chain(nodes, index);
                 if validate_delivered_route(request, &chain).is_ok() {
@@ -1785,6 +2205,7 @@ fn time_dependent_graph_fallback(
             request.destination_latitude,
             request.destination_longitude,
             step,
+            corridor,
         )?;
         // A* needs a bounded local branching factor: retain the best tactical
         // headings by admissible remaining distance while keeping both tack
@@ -1808,21 +2229,34 @@ fn time_dependent_graph_fallback(
             candidate_score(request, left).total_cmp(&candidate_score(request, right))
         });
         graph_candidates.truncate(8);
+        if let Some(wait) = graph_wait_candidate(request, nodes, entry.node, step)? {
+            graph_candidates.push(wait);
+        }
         for candidate in graph_candidates {
             if cross_track_nm(request, &candidate).abs() > 120.0 {
                 continue;
             }
             let cost = candidate.time - request.departure_unix_time;
-            let key = (search_cell(request, &candidate), cost / i64::from(step));
+            let key = (
+                search_cell(request, &candidate),
+                cost / i64::from(step),
+                minimum_run_remaining_bin(request, &candidate, step),
+            );
             let cell = labels.entry(key).or_default();
-            if cell.iter().any(|(other, _)| *other <= cost)
-                || cell.len() >= usize::from(request.labels_per_cell)
-            {
+            let pending = GraphLabel {
+                cost,
+                motor_seconds: candidate.motor_seconds,
+                node: usize::MAX,
+            };
+            if !insert_graph_label(cell, pending, usize::from(request.labels_per_cell)) {
                 continue;
             }
             nodes.push(candidate);
             let index = nodes.len() - 1;
-            cell.push((cost, index));
+            cell.iter_mut()
+                .find(|label| label.node == usize::MAX)
+                .expect("accepted graph label should retain its pending marker")
+                .node = index;
             graph_labels = graph_labels.saturating_add(1);
             *examined = examined.saturating_add(1);
             if graph_labels % 256 == 0 {
@@ -1831,7 +2265,7 @@ fn time_dependent_graph_fallback(
                 } else {
                     (graph_labels.saturating_mul(4) / graph_limit).min(4)
                 };
-                host::routing_progress(
+                progress.report(
                     95 + stage_percent as u8,
                     &format!(
                         "Time-dependent graph fallback: {} graph labels accepted, {} retained states examined, {} queued",
@@ -1841,13 +2275,7 @@ fn time_dependent_graph_fallback(
                     ),
                 );
             }
-            let heuristic = distance_nm(
-                nodes[index].lat,
-                nodes[index].lon,
-                request.destination_latitude,
-                request.destination_longitude,
-            ) / 8.0
-                * 3600.0;
+            let heuristic = remaining_time_lower_bound_seconds(request, &nodes[index]);
             open.push(GraphQueueEntry {
                 priority: cost as f64 + heuristic,
                 cost,
@@ -1860,7 +2288,11 @@ fn time_dependent_graph_fallback(
     Ok(None)
 }
 
-fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
+fn calculate_pass(
+    request: RouteRequest,
+    corridor: Option<&RouteCorridor>,
+    progress: ProgressRange,
+) -> Result<RouteResult, String> {
     validate(&request)?;
     let direct = distance_nm(
         request.start_latitude,
@@ -1882,6 +2314,7 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
         motor_seconds: 0,
         propulsion_run_seconds: 0,
         propulsion_transitions: 0,
+        consecutive_wait_seconds: 0,
         incoming_heading: 0.0,
         reached_destination: false,
     }];
@@ -2189,6 +2622,9 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
             {
                 continue;
             }
+            if corridor.is_some_and(|route| !route.contains(lat, lon)) {
+                continue;
+            }
             let reached_destination = distance_nm(
                 lat,
                 lon,
@@ -2208,6 +2644,7 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
                 propulsion_run_seconds: next_run_seconds,
                 propulsion_transitions: node.propulsion_transitions
                     + u32::from(motion.propulsion_mode != node.propulsion_mode),
+                consecutive_wait_seconds: 0,
                 reached_destination,
             });
             let segment = GeoSegment {
@@ -2369,7 +2806,7 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
             last_inspection_time = frontier_time;
         }
         let percent = (((layer + 1) * 90) / max_layers.max(1)).min(89) as u8;
-        host::routing_progress(
+        progress.report(
             percent,
             &format!(
                 "Forward isochrone — forecast step {}: {} feasible states retained ({} raw candidates generated)",
@@ -2408,14 +2845,16 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
     }
 
     if winner.is_none() && nodes.len() > 1 && examined < request.max_states {
-        host::routing_progress(
+        progress.report(
             90,
             &format!(
                 "Reverse-isocrone recovery: forward routing was incomplete ({forward_failure}); searching destination-side approach bridges"
             ),
         );
         let checkpoint = nodes.len();
-        if let Some(index) = reverse_isochrone_recovery(&request, &mut nodes, &mut examined)? {
+        if let Some(index) =
+            reverse_isochrone_recovery(&request, &mut nodes, &mut examined, corridor, progress)?
+        {
             let chain = route_chain(&nodes, index);
             match validate_delivered_route(&request, &chain) {
                 Ok(_) => {
@@ -2435,14 +2874,21 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
     }
 
     if winner.is_none() && examined < request.max_states {
-        host::routing_progress(
+        let graph_mode = if request.use_currents {
+            "resource-aware Dijkstra (currents have no declared upper bound)"
+        } else {
+            "resource-aware A* with a polar/motor speed bound"
+        };
+        progress.report(
             95,
             &format!(
-                "Time-dependent graph fallback: reverse recovery was incomplete; exploring bounded position/time/heading/tack labels ({examined}/{} states used)",
+                "Time-dependent graph fallback: reverse recovery was incomplete; exploring bounded position/time/heading/tack labels using {graph_mode} ({examined}/{} states used)",
                 request.max_states
             ),
         );
-        if let Some(index) = time_dependent_graph_fallback(&request, &mut nodes, &mut examined)? {
+        if let Some(index) =
+            time_dependent_graph_fallback(&request, &mut nodes, &mut examined, corridor, progress)?
+        {
             winner = Some(index);
             solver_path = "time-dependent graph fallback";
         } else {
@@ -2465,7 +2911,7 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
         let validation_samples = validate_delivered_route(&request, &chain)?;
         let statistics = route_statistics(&request, &chain)?;
         let route_environment = route_environment(&chain)?;
-        host::routing_progress(100, "Route complete and independently validated");
+        progress.report(100, "Route complete and independently validated");
         return Ok(RouteResult {
             distance_nautical_miles: winner_node.sailed_nm,
             duration_seconds: (winner_node.time - request.departure_unix_time).max(0) as u64,
@@ -2493,6 +2939,108 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
         });
     }
     Err("internal routing error: selected arrival is outside destination tolerance".into())
+}
+
+fn needs_corridor_refinement(request: &RouteRequest) -> bool {
+    request.time_step_seconds > 1800
+        || request.spatial_cell_nautical_miles > 1.5
+        || request.heading_step_degrees > 5
+        || request.refined_heading_step_degrees > 5
+}
+
+fn refined_request(mut request: RouteRequest) -> RouteRequest {
+    request.time_step_seconds = request.time_step_seconds.min(1800);
+    request.spatial_cell_nautical_miles = request.spatial_cell_nautical_miles.min(1.5);
+    request.heading_step_degrees = request.heading_step_degrees.min(5);
+    request.refined_heading_step_degrees = request
+        .refined_heading_step_degrees
+        .min(request.heading_step_degrees)
+        .min(5);
+    request.adaptive_headings = true;
+    request
+}
+
+fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
+    validate(&request)?;
+    if !needs_corridor_refinement(&request) {
+        return calculate_pass(
+            request,
+            None,
+            ProgressRange {
+                start: 0,
+                end: 100,
+                prefix: "",
+            },
+        );
+    }
+
+    let coarse_request = request.clone();
+    let mut coarse = calculate_pass(
+        coarse_request,
+        None,
+        ProgressRange {
+            start: 0,
+            end: 70,
+            prefix: "Initial route",
+        },
+    )?;
+    if host::routing_cancelled() {
+        return Err("route calculation cancelled".into());
+    }
+    let half_width_nm = (request.spatial_cell_nautical_miles * 4.0).max(12.0);
+    let corridor = RouteCorridor::from_route(&coarse.points, half_width_nm);
+    let fine_request = refined_request(request);
+    host::routing_progress(
+        70,
+        &format!(
+            "Corridor refinement: rerunning within {:.0} NM at {}-minute / {:.1} NM / {}° resolution",
+            half_width_nm,
+            fine_request.time_step_seconds / 60,
+            fine_request.spatial_cell_nautical_miles,
+            fine_request.heading_step_degrees
+        ),
+    );
+    match calculate_pass(
+        fine_request,
+        Some(&corridor),
+        ProgressRange {
+            start: 70,
+            end: 100,
+            prefix: "Corridor refinement",
+        },
+    ) {
+        Ok(mut refined) => {
+            let coarse_states = coarse.states_examined;
+            let refined_states = refined.states_examined;
+            let coarse_diagnostic = coarse.diagnostic.clone();
+            let eta_delta = refined.duration_seconds as i128 - coarse.duration_seconds as i128;
+            let absolute_delta = eta_delta.unsigned_abs();
+            let stability = if absolute_delta <= 5 * 60 {
+                "stable within five minutes"
+            } else {
+                "materially resolution-sensitive"
+            };
+            refined.diagnostic.push_str(&format!(
+                " Automatic corridor refinement completed; fine-resolution ETA changed by {eta_delta:+} seconds versus the initial route ({stability}). The initial pass examined {coarse_states} retained states and the reported fine pass examined {refined_states}; each remained within the configured per-pass bound. Initial-pass diagnostic: {coarse_diagnostic}"
+            ));
+            host::routing_progress(
+                100,
+                &format!("Refined route complete — ETA change {eta_delta:+} seconds; {stability}"),
+            );
+            Ok(refined)
+        }
+        Err(error) if error == "route calculation cancelled" => Err(error),
+        Err(error) => {
+            coarse.diagnostic.push_str(&format!(
+                " Automatic corridor refinement did not produce a replacement route ({error}); the independently validated initial route was retained."
+            ));
+            host::routing_progress(
+                100,
+                "Fine corridor search was incomplete; retained the independently validated initial route",
+            );
+            Ok(coarse)
+        }
+    }
 }
 
 impl exports::opencpn::portable::plugin::Guest for IWeatherRouting {
@@ -2554,6 +3102,78 @@ export!(IWeatherRouting);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_request(use_currents: bool) -> RouteRequest {
+        RouteRequest {
+            start_latitude: 53.0,
+            start_longitude: -5.0,
+            destination_latitude: 53.5,
+            destination_longitude: -4.0,
+            departure_unix_time: 0,
+            polars: vec![PolarGrid {
+                identity: "test".into(),
+                true_wind_speeds_knots: vec![5.0, 20.0],
+                true_wind_angles_degrees: vec![40.0, 160.0],
+                boat_speeds_knots: vec![4.0, 5.0, 10.0, 12.0],
+            }],
+            time_step_seconds: 3600,
+            heading_step_degrees: 15,
+            refined_heading_step_degrees: 5,
+            adaptive_headings: true,
+            spatial_cell_nautical_miles: 3.0,
+            labels_per_cell: 2,
+            max_hours: 120,
+            max_states: 80_000,
+            avoid_unsafe_charts: true,
+            min_true_wind_angle_degrees: 40.0,
+            max_true_wind_angle_degrees: 160.0,
+            max_wind_knots: Some(50.0),
+            max_apparent_wind_knots: Some(50.0),
+            max_wave_metres: Some(8.0),
+            max_opposing_wind_current_knots_squared: None,
+            land_safety_margin_nautical_miles: 0.4,
+            use_currents,
+            require_current_data: false,
+            use_waves: true,
+            require_wave_data: true,
+            maximum_latitude_degrees: 89.0,
+            upwind_efficiency: 1.0,
+            downwind_efficiency: 1.0,
+            tack_penalty_seconds: 300,
+            gybe_penalty_seconds: 300,
+            allow_motor_sailing: false,
+            allow_motor: false,
+            motor_below_sailing_speed_knots: 3.0,
+            motor_speed_knots: 5.5,
+            motor_sailing_boost_knots: 1.5,
+            motor_crossover_hysteresis_knots: 0.2,
+            minimum_motor_run_seconds: 1800,
+            mode_change_penalty_seconds: 120,
+            maximum_motor_seconds: None,
+            fuel_consumption_litres_per_hour: None,
+            maximum_fuel_litres: None,
+            maximum_search_angle_degrees: 120.0,
+            destination_tolerance_nm: 1.0,
+        }
+    }
+
+    fn test_node() -> Node {
+        Node {
+            lat: 53.0,
+            lon: -5.0,
+            time: 0,
+            parent: None,
+            sailed_nm: 0.0,
+            incoming_heading: 0.0,
+            tack: 0,
+            propulsion_mode: PROPULSION_SAIL,
+            motor_seconds: 0,
+            propulsion_run_seconds: 0,
+            propulsion_transitions: 0,
+            consecutive_wait_seconds: 0,
+            reached_destination: false,
+        }
+    }
 
     fn test_segment() -> GeoSegment {
         GeoSegment {
@@ -2635,5 +3255,103 @@ mod tests {
         let (water_twa, _) = true_wind_angle(0.0, -10.0, kinematics.heading_through_water);
         assert!(ground_twa < 0.01);
         assert!(water_twa > 40.0);
+    }
+
+    #[test]
+    fn graph_heuristic_uses_polar_bound_above_eight_knots() {
+        let request = test_request(false);
+        let node = test_node();
+        assert_eq!(maximum_vessel_speed_knots(&request), 12.0);
+        let expected = distance_nm(
+            node.lat,
+            node.lon,
+            request.destination_latitude,
+            request.destination_longitude,
+        ) / 12.0
+            * 3600.0;
+        assert!((remaining_time_lower_bound_seconds(&request, &node) - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn graph_heuristic_becomes_dijkstra_when_currents_are_enabled() {
+        let request = test_request(true);
+        assert_eq!(
+            remaining_time_lower_bound_seconds(&request, &test_node()),
+            0.0
+        );
+    }
+
+    #[test]
+    fn validation_subdivides_long_legs_by_time_and_distance() {
+        let points = vec![
+            RoutePoint {
+                latitude: 53.0,
+                longitude: -5.0,
+                unix_time: 0,
+            },
+            RoutePoint {
+                latitude: 53.1,
+                longitude: -5.0,
+                unix_time: 3600,
+            },
+        ];
+        let (segments, ranges) =
+            validation_subsegments(&points).expect("a valid leg should subdivide");
+        assert_eq!(ranges.len(), 1);
+        assert!(segments.len() >= 4);
+        assert!(segments.iter().all(|segment| {
+            segment.end.unix_time - segment.start.unix_time <= VALIDATION_INTERVAL_SECONDS
+                && distance_nm(
+                    segment.start.latitude,
+                    segment.start.longitude,
+                    segment.end.latitude,
+                    segment.end.longitude,
+                ) <= VALIDATION_SEGMENT_NM + 0.01
+        }));
+    }
+
+    #[test]
+    fn graph_labels_preserve_fast_and_low_motor_tradeoffs() {
+        let mut labels = Vec::new();
+        assert!(insert_graph_label(
+            &mut labels,
+            GraphLabel {
+                cost: 100,
+                motor_seconds: 1000,
+                node: 1,
+            },
+            2,
+        ));
+        assert!(insert_graph_label(
+            &mut labels,
+            GraphLabel {
+                cost: 110,
+                motor_seconds: 500,
+                node: 2,
+            },
+            2,
+        ));
+        assert!(insert_graph_label(
+            &mut labels,
+            GraphLabel {
+                cost: 120,
+                motor_seconds: 0,
+                node: 3,
+            },
+            2,
+        ));
+        assert_eq!(
+            labels.iter().map(|label| label.node).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+    }
+
+    #[test]
+    fn fine_request_uses_thirty_minute_five_degree_resolution() {
+        let refined = refined_request(test_request(true));
+        assert_eq!(refined.time_step_seconds, 1800);
+        assert_eq!(refined.heading_step_degrees, 5);
+        assert_eq!(refined.refined_heading_step_degrees, 5);
+        assert_eq!(refined.spatial_cell_nautical_miles, 1.5);
     }
 }

@@ -1174,10 +1174,10 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateSafetyPanel(wxNotebook* book) {
   downwind_efficiency->SetValue(100);
   tack_penalty = new wxSpinCtrl(panel, wxID_ANY);
   tack_penalty->SetRange(0, 3600);
-  tack_penalty->SetValue(0);
+  tack_penalty->SetValue(300);
   gybe_penalty = new wxSpinCtrl(panel, wxID_ANY);
   gybe_penalty->SetRange(0, 3600);
-  gybe_penalty->SetValue(0);
+  gybe_penalty->SetValue(300);
   allow_motor_sailing =
       new wxCheckBox(panel, wxID_ANY, Label("allow-motor-sailing"));
   allow_motor = new wxCheckBox(panel, wxID_ANY, Label("allow-motor"));
@@ -1525,8 +1525,8 @@ void PortableWeatherRoutingHost::Impl::LoadSettings() {
   maximum_latitude->SetValue(pConfig->ReadLong("maximumLatitude", 89));
   upwind_efficiency->SetValue(pConfig->ReadLong("upwindEfficiency", 100));
   downwind_efficiency->SetValue(pConfig->ReadLong("downwindEfficiency", 100));
-  tack_penalty->SetValue(pConfig->ReadLong("tackPenaltySeconds", 0));
-  gybe_penalty->SetValue(pConfig->ReadLong("gybePenaltySeconds", 0));
+  tack_penalty->SetValue(pConfig->ReadLong("tackPenaltySeconds", 300));
+  gybe_penalty->SetValue(pConfig->ReadLong("gybePenaltySeconds", 300));
   allow_motor_sailing->SetValue(
       pConfig->ReadBool("allowMotorSailing", false));
   allow_motor->SetValue(pConfig->ReadBool("allowMotor", false));
@@ -1607,7 +1607,7 @@ void PortableWeatherRoutingHost::Impl::SaveSettings() {
   if (!pConfig) return;
   const wxString old_path = pConfig->GetPath();
   pConfig->SetPath("/PortablePlugins/" + plugin_id + "/Routing");
-  pConfig->Write("settingsSchema", 4L);
+  pConfig->Write("settingsSchema", 5L);
   if (vessel_performance_file)
     pConfig->Write("vesselPerformancePath", vessel_performance_file->GetPath());
   pConfig->Write("avoidUnsafeCharts", avoid_land->GetValue());

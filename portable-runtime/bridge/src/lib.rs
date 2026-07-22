@@ -38,8 +38,12 @@ const PRIVATE_READ_LIMIT: usize = 8 * 1024 * 1024;
 const EPOCH_TICK: Duration = Duration::from_millis(100);
 const CALL_EPOCH_DEADLINE: u64 = 50;
 const ROUTING_BASE_FUEL: u64 = 2_000_000_000;
-const ROUTING_FUEL_PER_RETAINED_STATE: u64 = 500_000;
-const ROUTING_MAX_FUEL: u64 = 100_000_000_000;
+// Routing may perform an independently bounded coarse pass followed by a
+// fine-corridor pass. Current-aware graph recovery also deliberately uses
+// Dijkstra because the request declares no admissible current-speed bound.
+// Budget fuel for both while retaining the state and epoch backstops.
+const ROUTING_FUEL_PER_RETAINED_STATE: u64 = 1_500_000;
+const ROUTING_MAX_FUEL: u64 = 250_000_000_000;
 const ROUTING_BASE_EPOCH_TICKS: u64 = 3_000;
 const ROUTING_EXTRA_EPOCH_TICKS: u64 = 15_000;
 

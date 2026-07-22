@@ -30,6 +30,7 @@ struct HostState {
   std::atomic<bool> use_reported_irish_sea_weather{false};
   std::atomic<bool> routing_cancelled{false};
   std::atomic<unsigned> routing_progress_events{0};
+  std::atomic<bool> saw_corridor_refinement{false};
   std::atomic<unsigned> routing_stage{0};
   std::atomic<bool> reject_reverse_charts{false};
   std::atomic<size_t> chart_segments_queried{0};
@@ -202,6 +203,8 @@ void RoutingProgress(void* data, uint8_t, const char* message, size_t length) {
   auto& state = *static_cast<HostState*>(data);
   ++state.routing_progress_events;
   const auto text = Text(message, length);
+  if (text.find("Corridor refinement") != std::string::npos)
+    state.saw_corridor_refinement = true;
   if (text.find("Reverse-isocrone recovery") != std::string::npos)
     state.routing_stage = 1;
   else if (text.find("Time-dependent graph fallback") != std::string::npos)
@@ -536,6 +539,7 @@ bool RoutingLifecycle(const char* component_path) {
        result.route_environment_count == result.point_count &&
        result.duration_seconds > 0 && result.diagnostic_len > 0 &&
        state.routing_progress_events > 0 && result.average_speed_knots > 0.0 &&
+       state.saw_corridor_refinement.load() &&
        result.average_sog_knots > 0.0 && result.maximum_sog_knots > 0.0 &&
        result.average_wind_knots > 8.0 && result.maximum_wind_knots > 8.0 &&
        (result.metrics_available & 1) != 0 &&
@@ -547,10 +551,30 @@ bool RoutingLifecycle(const char* component_path) {
          std::isfinite(route_environment[index].wind_v_knots) &&
          route_environment[index].unix_time == points[index].unix_time;
   }
+  if (!ok) {
+    std::cerr << "initial portable route assertions failed\n";
+    ocpn_portable_runtime_destroy(runtime);
+    return false;
+  }
 
   // Search decisions are provisional.  Re-run the deterministic request and
   // make only the final chart-service call unsafe: the component must reject
   // the exact delivered geometry at its independent acceptance boundary.
+  // Use the already-fine resolution here so the deliberately rejected route
+  // cannot correctly fall back to a separately validated coarse incumbent.
+  auto validation_request = request;
+  validation_request.time_step_seconds = 1800;
+  validation_request.heading_step_degrees = 5;
+  validation_request.refined_heading_step_degrees = 5;
+  validation_request.spatial_cell_nautical_miles = 1.5;
+  state.chart_query_calls = 0;
+  result.point_count = 0;
+  result.diagnostic_len = 0;
+  std::memset(error, 0, sizeof(error));
+  ok = ok && CallSucceeded(ocpn_portable_runtime_calculate_route(
+                               runtime, &validation_request, &result, error,
+                               sizeof(error)),
+                           "calculate fine route for replay rejection", error);
   const size_t baseline_chart_calls = state.chart_query_calls.load();
   state.chart_query_calls = 0;
   state.reject_chart_query_call = baseline_chart_calls;
@@ -558,10 +582,16 @@ bool RoutingLifecycle(const char* component_path) {
   result.diagnostic_len = 0;
   std::memset(error, 0, sizeof(error));
   const int32_t independently_rejected =
-      ocpn_portable_runtime_calculate_route(runtime, &request, &result, error,
-                                             sizeof(error));
+      ocpn_portable_runtime_calculate_route(runtime, &validation_request,
+                                             &result, error, sizeof(error));
   ok = ok && baseline_chart_calls > 0 && independently_rejected != 0 &&
        std::strstr(error, "independent validation rejected") != nullptr;
+  if (!ok) {
+    std::cerr << "independent replay rejection assertion failed: " << error
+              << '\n';
+    ocpn_portable_runtime_destroy(runtime);
+    return false;
+  }
   state.reject_chart_query_call = 0;
   state.chart_query_calls = 0;
 
@@ -592,6 +622,11 @@ bool RoutingLifecycle(const char* component_path) {
     const auto& line = trace_lines[index];
     ok = line.point_count >= 2 &&
          line.point_offset + line.point_count <= result.trace_point_count;
+  }
+  if (!ok) {
+    std::cerr << "inspection geometry assertions failed: " << error << '\n';
+    ocpn_portable_runtime_destroy(runtime);
+    return false;
   }
 
   result.point_count = 0;
@@ -645,6 +680,11 @@ bool RoutingLifecycle(const char* component_path) {
                       60.0 * std::cos(irish_sea_request.destination_latitude *
                                       3.14159265358979323846 / 180.0)) <=
            irish_sea_request.destination_tolerance_nm;
+  if (!ok) {
+    std::cerr << "Irish Sea regression assertions failed: " << error << '\n';
+    ocpn_portable_runtime_destroy(runtime);
+    return false;
+  }
 
   // Re-run the reported departure against the decoded hourly wind/current
   // sequence from the user's GRIB. This specifically guards the former leg-9
@@ -663,6 +703,12 @@ bool RoutingLifecycle(const char* component_path) {
        std::string(diagnostic, result.diagnostic_len)
                .find("independent chronological replay") != std::string::npos;
   state.use_reported_irish_sea_weather = false;
+  if (!ok) {
+    std::cerr << "reported-weather regression assertions failed: " << error
+              << '\n';
+    ocpn_portable_runtime_destroy(runtime);
+    return false;
+  }
 
   // Constrain the forward-stage share so the same upwind passage exercises
   // automatic destination-side reverse-isocrone recovery. The stage must be
@@ -681,6 +727,11 @@ bool RoutingLifecycle(const char* component_path) {
   ok = ok && state.routing_stage.load() >= 1 &&
        std::string(diagnostic, result.diagnostic_len)
                .find("reverse-isocrone recovery") != std::string::npos;
+  if (!ok) {
+    std::cerr << "reverse recovery assertions failed: " << error << '\n';
+    ocpn_portable_runtime_destroy(runtime);
+    return false;
+  }
 
   // Reject chart corridors only while reverse recovery is active. The
   // component must visibly escalate and complete through its bounded
@@ -699,6 +750,11 @@ bool RoutingLifecycle(const char* component_path) {
                .find("time-dependent graph fallback") != std::string::npos;
   state.reject_reverse_charts = false;
   state.routing_stage = 0;
+  if (!ok) {
+    std::cerr << "graph fallback assertions failed: " << error << '\n';
+    ocpn_portable_runtime_destroy(runtime);
+    return false;
+  }
 
   auto conservative_speeds = polar_speeds;
   for (double& speed : conservative_speeds) speed *= 0.5;
