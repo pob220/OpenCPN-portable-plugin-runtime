@@ -36,4 +36,5 @@ in `source-ledger.json` and `SOURCE-LEDGER.md`.
 - `PROTOTYPE-RESULTS.md` — reproducible experiment log;
 - `RISK-REGISTER.md` — technical/security/governance/platform risks;
 - `UPSTREAM-QUESTIONS.md` — only unresolved maintainer policy decisions;
+- `STUDY-COMPLETION-AUDIT.md` — requirement-to-evidence completion audit;
 - `SOURCE-LEDGER.md` / `source-ledger.json` — pinned evidence versions.

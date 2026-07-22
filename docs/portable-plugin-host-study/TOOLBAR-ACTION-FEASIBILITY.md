@@ -108,7 +108,11 @@ was:
 6. the same logical iGRIB action was re-registered as transient ID 1577;
 7. iWeatherRouting ID 1576 was removed on a simulated component trap;
 8. it recovered under ID 1578;
-9. plugin deinitialisation removed all three, leaving registry size zero.
+9. callback ID 1578 resolved to and toggled only the recovered iWeatherRouting
+   logical action;
+10. iGRIB ID 1577 was rejected while its host dispatch gate was closed, then
+    restored without changing identity;
+11. plugin deinitialisation removed all three, leaving registry size zero.
 
 The first run also proved an unrelated loader precondition: stock 5.14
 dereferences `GetPlugInBitmap()` without a null check at

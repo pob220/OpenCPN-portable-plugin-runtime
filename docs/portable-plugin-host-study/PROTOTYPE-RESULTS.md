@@ -38,14 +38,22 @@ cmake --build /tmp/opencpn-stock-514-build --target opencpn --parallel 6
 Runtime sequence used a self-contained portable tree below `/tmp` and
 `OCPN_RUNTIME_HOST_PROBE_AUTORUN=1`. The stock log recorded successful late
 add, duplicate rejection, independent check state, dynamic removal,
-re-registration, trap cleanup, recovery, DeInit cleanup and clean application
-exit. Numeric IDs changed from 1575 to 1577 for reloaded iGRIB and from 1576 to
-1578 for recovered iWeatherRouting while logical keys remained stable.
+re-registration, trap cleanup, recovery, mapped callback dispatch, a blocked
+callback while initialising, DeInit cleanup and clean application exit. Numeric
+IDs changed from 1575 to 1577 for reloaded iGRIB and from 1576 to 1578 for
+recovered iWeatherRouting while logical keys remained stable.
+
+Several later stock-process starts re-registered the initial manager/iGRIB
+actions successfully. Their initial integers repeated only because plugin load
+order was unchanged; source allocation and the within-process reload values
+prove that this is an observation, not a persistent-ID contract.
 
 What this proves:
 
 - one managed-plugin-shaped native module can register three child icons;
 - multiple IDs route through one owner and can be resolved safely;
+- the recovered iWeatherRouting ID routed to and toggled only its logical
+  action, while iGRIB was independently blocked by its dispatch gate;
 - late add/remove works without restart using only public API;
 - stock insertion needs an explicit rebuild trigger;
 - checked state is independently mutable;

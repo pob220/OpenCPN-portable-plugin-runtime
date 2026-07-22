@@ -284,6 +284,21 @@ void RuntimeHostToolbarProbePi::OnProbeTimer(wxTimerEvent&) {
       RegisterAction(kWeatherRouting, "iWeatherRouting",
                      "Open iWeatherRouting", Icon("weather-routing.svg"), true);
       break;
+    case 8: {
+      const auto* action = registry_.Find(kWeatherRouting);
+      if (action) OnToolbarToolCallback(action->tool_id);
+      break;
+    }
+    case 9: {
+      auto* action = registry_.Find(kIgrib);
+      if (action) {
+        action->dispatchable = false;
+        OnToolbarToolCallback(action->tool_id);
+        action->dispatchable = true;
+        LogRegistry("dispatch-restored", *action);
+      }
+      break;
+    }
     default:
       timer_.Stop();
       wxLogMessage("RUNTIME_HOST_PROBE event=autorun-complete remaining=%zu",

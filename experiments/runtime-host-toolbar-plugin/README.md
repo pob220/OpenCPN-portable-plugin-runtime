@@ -7,8 +7,9 @@ It registers the runtime manager and iGRIB during `Init()`. With
 `OCPN_RUNTIME_HOST_PROBE_AUTORUN=1`, a UI-thread timer then adds
 iWeatherRouting, rejects a duplicate logical action, changes an independent
 checked state, removes and re-registers iGRIB, removes iWeatherRouting on a
-simulated component trap, and recovers it. Every transition is logged with the
-`RUNTIME_HOST_PROBE` prefix.
+simulated component trap, recovers it, routes an iWeatherRouting callback
+through the reverse map and blocks an iGRIB callback while its dispatch gate is
+closed. Every transition is logged with the `RUNTIME_HOST_PROBE` prefix.
 
 Build and run the non-GUI registry test:
 
