@@ -4,6 +4,19 @@
 #include <wx/log.h>
 #include <wx/utils.h>
 
+#if defined(__WXMSW__)
+#include <windows.h>
+#endif
+#if defined(__WXOSX__)
+#include <OpenGL/gl.h>
+#else
+#include <GL/gl.h>
+#endif
+
+#ifdef RUNTIME_HOST_PROBE_WITH_WASMTIME
+#include "runtime_bridge_probe.h"
+#endif
+
 #ifndef DECL_EXP
 #ifdef __WXMSW__
 #define DECL_EXP __declspec(dllexport)
@@ -54,10 +67,33 @@ RuntimeHostToolbarProbePi::~RuntimeHostToolbarProbePi() {
 int RuntimeHostToolbarProbePi::Init() {
   initialized_ = true;
   wxLogMessage("RUNTIME_HOST_PROBE event=init api=1.21");
+  const wxString private_root = *GetpPrivateApplicationDataLocation();
+  const wxString installed_data =
+      GetPluginDataDir("runtime_host_toolbar_probe_pi");
+  wxLogMessage(
+      "RUNTIME_HOST_PUBLIC_API event=paths private-root=%s installed-data=%s",
+      private_root, installed_data);
+  wxLogMessage(
+      "RUNTIME_HOST_PUBLIC_API event=navigation routes=%zu waypoints=%zu "
+      "chart-directories=%zu",
+      GetRouteGUIDArray().size(), GetWaypointGUIDArray().size(),
+      GetChartDBDirArrayString().size());
 
   RegisterAction(kManager, "Portable Runtime", "Open Portable Runtime manager",
                  Icon("manager.svg"), false);
   RegisterAction(kIgrib, "iGRIB", "Open iGRIB", Icon("igrib.svg"), false);
+
+#ifdef RUNTIME_HOST_PROBE_WITH_WASMTIME
+  wxString component;
+  if (wxGetEnv("OCPN_RUNTIME_HOST_PROBE_COMPONENT", &component) &&
+      !component.IsEmpty()) {
+    runtime_probe_ = std::make_unique<RuntimeBridgeProbe>();
+    if (!runtime_probe_->Start(component.ToStdString())) {
+      wxLogMessage("RUNTIME_HOST_WASMTIME event=start-failed");
+      runtime_probe_.reset();
+    }
+  }
+#endif
 
   wxString autorun;
   if (wxGetEnv("OCPN_RUNTIME_HOST_PROBE_AUTORUN", &autorun) &&
@@ -66,12 +102,19 @@ int RuntimeHostToolbarProbePi::Init() {
     wxLogMessage("RUNTIME_HOST_PROBE event=autorun-start");
   }
 
-  return WANTS_TOOLBAR_CALLBACK | INSTALLS_TOOLBAR_TOOL;
+  return WANTS_TOOLBAR_CALLBACK | INSTALLS_TOOLBAR_TOOL |
+         WANTS_OVERLAY_CALLBACK | WANTS_OPENGL_OVERLAY_CALLBACK;
 }
 
 bool RuntimeHostToolbarProbePi::DeInit() {
   if (!initialized_) return true;
   timer_.Stop();
+#ifdef RUNTIME_HOST_PROBE_WITH_WASMTIME
+  if (runtime_probe_) {
+    runtime_probe_->Stop();
+    runtime_probe_.reset();
+  }
+#endif
   RemoveAction(kWeatherRouting, "plugin-shutdown");
   RemoveAction(kIgrib, "plugin-shutdown");
   RemoveAction(kManager, "plugin-shutdown");
@@ -143,6 +186,70 @@ void RuntimeHostToolbarProbePi::OnToolbarToolCallback(int id) {
   mutable_action->checked = !mutable_action->checked;
   SetToolbarItemState(id, mutable_action->checked);
   LogRegistry("clicked", *mutable_action);
+}
+
+std::vector<std::pair<double, double>>
+RuntimeHostToolbarProbePi::OverlayPoints() const {
+#ifdef RUNTIME_HOST_PROBE_WITH_WASMTIME
+  if (runtime_probe_ && !runtime_probe_->points.empty()) {
+    std::vector<std::pair<double, double>> result;
+    result.reserve(runtime_probe_->points.size());
+    for (const auto& point : runtime_probe_->points)
+      result.emplace_back(point.latitude, point.longitude);
+    return result;
+  }
+#endif
+  return {{49.80, -4.40}, {50.00, -4.00}, {50.20, -3.60}};
+}
+
+bool RuntimeHostToolbarProbePi::RenderOverlayMultiCanvas(
+    wxDC& dc, PlugIn_ViewPort* vp, int canvas_index, int priority) {
+  if (!vp || priority != 0) return false;
+  const auto points = OverlayPoints();
+  if (points.size() < 2) return false;
+  dc.SetPen(wxPen(wxColour(255, 80, 30), 3));
+  wxPoint previous;
+  GetCanvasPixLL(vp, &previous, points.front().first, points.front().second);
+  for (size_t i = 1; i < points.size(); ++i) {
+    wxPoint next;
+    GetCanvasPixLL(vp, &next, points[i].first, points[i].second);
+    dc.DrawLine(previous, next);
+    previous = next;
+  }
+  if (!software_render_logged_) {
+    software_render_logged_ = true;
+    wxLogMessage(
+        "RUNTIME_HOST_OVERLAY event=software-render canvas=%d points=%zu",
+        canvas_index, points.size());
+  }
+  return true;
+}
+
+bool RuntimeHostToolbarProbePi::RenderGLOverlayMultiCanvas(
+    wxGLContext*, PlugIn_ViewPort* vp, int canvas_index, int priority) {
+  if (!vp || priority != 0) return false;
+  const auto points = OverlayPoints();
+  if (points.size() < 2) return false;
+  glPushAttrib(GL_COLOR_BUFFER_BIT | GL_ENABLE_BIT | GL_LINE_BIT);
+  glDisable(GL_TEXTURE_2D);
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  glColor4ub(255, 80, 30, 220);
+  glLineWidth(3.0f);
+  glBegin(GL_LINE_STRIP);
+  for (const auto& point : points) {
+    wxPoint pixel;
+    GetCanvasPixLL(vp, &pixel, point.first, point.second);
+    glVertex2i(pixel.x, vp->pix_height - pixel.y);
+  }
+  glEnd();
+  glPopAttrib();
+  if (!gl_render_logged_) {
+    gl_render_logged_ = true;
+    wxLogMessage("RUNTIME_HOST_OVERLAY event=gl-render canvas=%d points=%zu",
+                 canvas_index, points.size());
+  }
+  return true;
 }
 
 void RuntimeHostToolbarProbePi::OnProbeTimer(wxTimerEvent&) {

@@ -4,8 +4,16 @@
 #include <wx/timer.h>
 #include <wx/wx.h>
 
+#include <utility>
+#include <vector>
+
 #include "action_registry.h"
 #include "ocpn_plugin.h"
+
+#ifdef RUNTIME_HOST_PROBE_WITH_WASMTIME
+class RuntimeBridgeProbe;
+#include <memory>
+#endif
 
 class RuntimeHostToolbarProbePi : public wxEvtHandler,
                                   public opencpn_plugin_121 {
@@ -30,6 +38,10 @@ class RuntimeHostToolbarProbePi : public wxEvtHandler,
            "using only the public OpenCPN plugin API.";
   }
   void OnToolbarToolCallback(int id) override;
+  bool RenderOverlayMultiCanvas(wxDC& dc, PlugIn_ViewPort* vp,
+                                int canvas_index, int priority) override;
+  bool RenderGLOverlayMultiCanvas(wxGLContext* context, PlugIn_ViewPort* vp,
+                                  int canvas_index, int priority) override;
 
  private:
   bool RegisterAction(const LogicalActionKey& key, const wxString& label,
@@ -38,12 +50,18 @@ class RuntimeHostToolbarProbePi : public wxEvtHandler,
   bool RemoveAction(const LogicalActionKey& key, const char* reason);
   void OnProbeTimer(wxTimerEvent& event);
   void LogRegistry(const char* event, const RegisteredAction& action) const;
+  std::vector<std::pair<double, double>> OverlayPoints() const;
 
   ActionRegistry registry_;
   wxBitmap plugin_bitmap_;
   wxTimer timer_;
   int probe_stage_ = 0;
   bool initialized_ = false;
+  bool software_render_logged_ = false;
+  bool gl_render_logged_ = false;
+#ifdef RUNTIME_HOST_PROBE_WITH_WASMTIME
+  std::unique_ptr<RuntimeBridgeProbe> runtime_probe_;
+#endif
 };
 
 #endif

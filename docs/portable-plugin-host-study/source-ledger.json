@@ -49,6 +49,35 @@
       "role": "documented toolbar, menu and preferences API"
     },
     {
+      "name": "OpenCPN managed plugin installation",
+      "kind": "official-documentation",
+      "url": "https://opencpn-manuals.github.io/main/opencpn-plugins/misc/plugin-install.html",
+      "access_date": "2026-07-22",
+      "role": "current managed-plugin model and advertised target list"
+    },
+    {
+      "name": "OpenCPN managed plugin installation paths",
+      "kind": "official-documentation",
+      "url": "https://opencpn-manuals.github.io/main/plugin-installer/Installation-paths.html",
+      "access_date": "2026-07-22",
+      "role": "installer-owned read-only plugin data and helper layouts"
+    },
+    {
+      "name": "Wasmtime C API and embedding guide",
+      "kind": "official-documentation",
+      "url": "https://docs.wasmtime.dev/c-api/",
+      "access_date": "2026-07-22",
+      "documented_version": "48.0.0",
+      "role": "private static/shared embedding and platform link requirements"
+    },
+    {
+      "name": "Wasmtime platform support",
+      "kind": "official-documentation",
+      "url": "https://docs.wasmtime.dev/stability-platform-support.html",
+      "access_date": "2026-07-22",
+      "role": "compiler, architecture, executable-memory and interpreter constraints"
+    },
+    {
       "name": "testplugin_pi",
       "kind": "representative-plugin",
       "repository": "https://github.com/jongough/testplugin_pi",
