@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "initial_access_date": "2026-07-22",
+  "sources": [
+    {
+      "name": "portable-runtime study base",
+      "kind": "local-source",
+      "repository": "https://github.com/pob220/OpenCPN-portable-plugin-runtime",
+      "branch": "runtime-host-plugin-feasibility",
+      "commit": "f85835669f97e3d913e4b26a531e47ae1f061b00",
+      "role": "modified-core reference and study base"
+    },
+    {
+      "name": "OpenCPN 5.14.0",
+      "kind": "upstream-source",
+      "repository": "https://github.com/OpenCPN/OpenCPN",
+      "ref": "Release_5.14.0",
+      "commit": "91f3b674366068a6ecd61a5e9aba204bba85f57e",
+      "role": "stock baseline"
+    },
+    {
+      "name": "OpenCPN upstream master",
+      "kind": "upstream-source",
+      "repository": "https://github.com/OpenCPN/OpenCPN",
+      "branch": "master",
+      "commit": "bc0e1ededbb10cd44feffc26b7989b6b990fa6eb",
+      "role": "current API and implementation comparison"
+    },
+    {
+      "name": "portable repository remote",
+      "kind": "upstream-source",
+      "repository": "https://github.com/pob220/OpenCPN-portable-plugin-runtime",
+      "branch": "portable-plugin-runtime",
+      "commit": "d9bd9b8b9999f12473b8a849bebd628a9e13fa73",
+      "role": "remote-state record"
+    },
+    {
+      "name": "environmental-grib-generator",
+      "kind": "submodule-source",
+      "repository": "https://github.com/pob220/environmental-grib-generator",
+      "commit": "f7311bb340f6c942080b5ad18061c1a8b6b5f000",
+      "role": "native helper and environmental services"
+    }
+  ]
+}
