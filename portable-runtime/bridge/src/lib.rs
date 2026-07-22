@@ -37,6 +37,11 @@ const POLAR_CELL_LIMIT: usize = 200_000;
 const PRIVATE_READ_LIMIT: usize = 8 * 1024 * 1024;
 const EPOCH_TICK: Duration = Duration::from_millis(100);
 const CALL_EPOCH_DEADLINE: u64 = 50;
+const ROUTING_BASE_FUEL: u64 = 2_000_000_000;
+const ROUTING_FUEL_PER_RETAINED_STATE: u64 = 500_000;
+const ROUTING_MAX_FUEL: u64 = 100_000_000_000;
+const ROUTING_BASE_EPOCH_TICKS: u64 = 3_000;
+const ROUTING_EXTRA_EPOCH_TICKS: u64 = 15_000;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -413,9 +418,23 @@ fn prepare_call(runtime: &mut Runtime) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn prepare_routing_call(runtime: &mut Runtime) -> anyhow::Result<()> {
-    runtime.store.set_fuel(2_000_000_000)?;
-    runtime.store.set_epoch_deadline(3_000); // five minutes; cancellation is cooperative
+fn prepare_routing_call(runtime: &mut Runtime, requested_states: u32) -> anyhow::Result<()> {
+    // Route calculation is a declared bounded workload, unlike a toolbar or
+    // lifecycle callback.  Scale deterministic execution fuel with the
+    // retained-state budget exposed by the route request, while clamping to
+    // the component's public limit.  Scale the independent wall-clock
+    // backstop from five minutes to at most thirty minutes as well: recovery
+    // searches remain bounded, but a large declared route should not inherit
+    // the same deadline as a short coastal route.  Cancellation remains
+    // cooperative throughout all three solver stages.
+    let bounded_states = u64::from(requested_states.clamp(100, 1_000_000));
+    let fuel = ROUTING_BASE_FUEL
+        .saturating_add(bounded_states.saturating_mul(ROUTING_FUEL_PER_RETAINED_STATE))
+        .min(ROUTING_MAX_FUEL);
+    let deadline_ticks = ROUTING_BASE_EPOCH_TICKS
+        .saturating_add(bounded_states.saturating_mul(ROUTING_EXTRA_EPOCH_TICKS) / 1_000_000);
+    runtime.store.set_fuel(fuel)?;
+    runtime.store.set_epoch_deadline(deadline_ticks);
     Ok(())
 }
 
@@ -1229,7 +1248,7 @@ pub unsafe extern "C" fn ocpn_portable_runtime_calculate_route(
         return -1;
     };
     let calculated = (|| -> anyhow::Result<()> {
-        prepare_routing_call(runtime)?;
+        prepare_routing_call(runtime, request.max_states)?;
         if request.polar_count == 0 || request.polar_count > POLAR_GRID_LIMIT {
             anyhow::bail!("route request needs 1-{POLAR_GRID_LIMIT} polar grids");
         }

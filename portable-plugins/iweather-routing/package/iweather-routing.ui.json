@@ -96,7 +96,7 @@
     {"id": "maximum-search-angle", "tab": "Advanced", "type": "number", "label": "Maximum search angle either side (degrees)"},
     {"id": "destination-tolerance", "tab": "Advanced", "type": "number", "label": "Destination tolerance (NM)"},
     {"id": "maximum-hours", "tab": "Advanced", "type": "integer", "label": "Maximum duration (hours)"},
-    {"id": "maximum-states", "tab": "Advanced", "type": "integer", "label": "Maximum route states"},
+    {"id": "maximum-states", "tab": "Advanced", "type": "integer", "label": "Maximum retained route states"},
     {"id": "compare-departures", "tab": "Advanced", "type": "toggle", "label": "Compare a forward departure-time window"},
     {"id": "departure-window", "tab": "Advanced", "type": "integer", "label": "Departure window (hours)"},
     {"id": "departure-spacing", "tab": "Advanced", "type": "integer", "label": "Departure spacing (hours)"},

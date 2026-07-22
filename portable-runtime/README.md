@@ -9,9 +9,11 @@ setting default off. The existing native loader is unchanged.
 The proof embeds Wasmtime, negotiates a typed WIT world and provides actions,
 position values, namespaced settings/private storage, host HTTP, cancellable
 jobs, batched chart coverage, retained overlays and a host-rendered
-environmental UI. iWeatherRouting runs its adaptive time-layer search in Wasm
-and consumes time-indexed iGRIB batches plus host chart checks through typed
-interfaces. Parallel departure comparisons use up to four isolated Wasmtime
+environmental UI. iWeatherRouting runs a bounded forward-isocrone,
+reverse-isocrone-recovery and time-dependent graph cascade in Wasm and consumes
+time-indexed iGRIB batches plus host chart checks through typed interfaces.
+Stage-labelled progress keeps long recovery calculations observable and
+cancellable. Parallel departure comparisons use up to four isolated Wasmtime
 Stores sharing one compiled component and capability set. Signed target
 helpers perform bounded ecCodes decode and
 environmental generation outside OpenCPN. Neither plugin depends on a native
@@ -25,7 +27,9 @@ generic environmental dataset/view/render service: it has no provider IDs or
 iGRIB-specific dialog class. `environment.provider@0.1` is negotiated using a
 real semantic-version range, and iWeatherRouting holds a private immutable
 dataset snapshot identified by size and SHA-256 for the lifetime of a route
-job.
+job. The routing form polls the generic provider summary while it is open, and
+each new calculation acquires the latest completed iGRIB dataset before fixing
+that immutable per-job snapshot.
 
 iWeatherRouting accepts real OpenCPN weather-routing `.pol` files and boat
 `.xml` manifests. OpenCPN parses and validates the user-selected file, then

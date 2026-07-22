@@ -27,8 +27,11 @@ struct HostState {
   bool environmental_viewer_opened = false;
   bool weather_routing_opened = false;
   std::atomic<bool> environment_failure{false};
+  std::atomic<bool> use_reported_irish_sea_weather{false};
   std::atomic<bool> routing_cancelled{false};
   std::atomic<unsigned> routing_progress_events{0};
+  std::atomic<unsigned> routing_stage{0};
+  std::atomic<bool> reject_reverse_charts{false};
   std::atomic<size_t> chart_segments_queried{0};
   std::atomic<size_t> chart_query_calls{0};
   std::atomic<size_t> reject_chart_query_call{0};
@@ -132,7 +135,7 @@ int32_t OpenWeatherRouting(void* data) {
 }
 
 int32_t EnvironmentSampleBatch(void* data,
-                               const ocpn_portable_environment_sample_request*,
+                               const ocpn_portable_environment_sample_request* requests,
                                size_t count,
                                ocpn_portable_environment_sample* results,
                                size_t result_count, char* error,
@@ -147,12 +150,62 @@ int32_t EnvironmentSampleBatch(void* data,
     return -2;
   }
   if (count != result_count) return -1;
+  if (static_cast<HostState*>(data)->use_reported_irish_sea_weather.load()) {
+    // Hourly samples decoded from the reported immutable Irish Sea GRIB at
+    // 53.32 N, 5.36 W, beginning 2026-07-23 08:00 UTC. Values are SI in the
+    // file and converted here to the host ABI's knots. Linear interpolation
+    // reproduces the wind shifts and reversing tide which exposed the former
+    // start-of-leg versus midpoint-validation mismatch.
+    static constexpr int64_t kEpoch = 1784793600;
+    static constexpr double kKnotsPerMetreSecond = 1.9438444924406;
+    static constexpr std::array<double, 23> kWindU = {
+        0.783520,  0.763138,  1.431503,  1.950100,  0.898796,  0.471714,
+        0.517817,  -0.692440, -1.552264, -1.476562, -1.724635, -2.077554,
+        -1.289976, -0.817876, -1.119772, -1.519404, -1.683104, -1.081521,
+        0.292825,  0.686308,  0.912189,  1.394554,  1.026602};
+    static constexpr std::array<double, 23> kWindV = {
+        -3.657707, -3.210291, -3.593356, -3.235740, -3.477012, -3.071839,
+        -2.911352, -2.885527, -3.489727, -2.168231, -1.542068, -1.984826,
+        -2.531719, -2.915737, -3.394135, -2.845692, -3.171215, -2.421723,
+        -1.401065, -1.034437, -1.207748, -0.116391, 0.631812};
+    static constexpr std::array<double, 23> kCurrentU = {
+        0.072664,  0.118496,  0.045761,  -0.081518, -0.145313, -0.143101,
+        -0.118057, -0.092275, -0.086963, -0.113185, -0.110138, -0.049844,
+        0.044250,  0.126479,  0.132169,  0.033009,  -0.086397, -0.145368,
+        -0.151331, -0.131736, -0.107508, -0.116650, -0.139099};
+    static constexpr std::array<double, 23> kCurrentV = {
+        -0.560477, -0.687923, -0.677485, -0.469053, -0.123266, 0.250970,
+        0.555608,  0.712770,  0.653159,  0.449666,  0.213734,  -0.026554,
+        -0.259014, -0.443620, -0.552010, -0.520051, -0.298285, 0.033814,
+        0.363170,  0.595197,  0.635996,  0.488669,  0.274862};
+    for (size_t i = 0; i < count; ++i) {
+      const double hour = std::clamp(
+          static_cast<double>(requests[i].unix_time - kEpoch) / 3600.0, 0.0,
+          static_cast<double>(kWindU.size() - 1));
+      const size_t lower = static_cast<size_t>(std::floor(hour));
+      const size_t upper = std::min(lower + 1, kWindU.size() - 1);
+      const double fraction = hour - static_cast<double>(lower);
+      const auto interpolate = [&](const auto& values) {
+        return (values[lower] + fraction * (values[upper] - values[lower])) *
+               kKnotsPerMetreSecond;
+      };
+      results[i] = {interpolate(kWindU), interpolate(kWindV),
+                    interpolate(kCurrentU), interpolate(kCurrentV), 0.6, 7};
+    }
+    return 0;
+  }
   for (size_t i = 0; i < count; ++i) results[i] = {8.0, 2.0, 0.4, 0.1, 1.2, 7};
   return 0;
 }
 
-void RoutingProgress(void* data, uint8_t, const char*, size_t) {
-  ++static_cast<HostState*>(data)->routing_progress_events;
+void RoutingProgress(void* data, uint8_t, const char* message, size_t length) {
+  auto& state = *static_cast<HostState*>(data);
+  ++state.routing_progress_events;
+  const auto text = Text(message, length);
+  if (text.find("Reverse-isocrone recovery") != std::string::npos)
+    state.routing_stage = 1;
+  else if (text.find("Time-dependent graph fallback") != std::string::npos)
+    state.routing_stage = 2;
 }
 uint8_t RoutingCancelled(void* data) {
   return static_cast<HostState*>(data)->routing_cancelled.load() ? 1 : 0;
@@ -166,7 +219,9 @@ int32_t ChartsQuerySegments(void* data, const ocpn_portable_geo_segment*,
   auto& state = *static_cast<HostState*>(data);
   state.chart_segments_queried = segment_count;
   const size_t call = ++state.chart_query_calls;
-  const bool reject = state.reject_chart_query_call.load() == call;
+  const bool reject = state.reject_chart_query_call.load() == call ||
+                      (state.reject_reverse_charts.load() &&
+                       state.routing_stage.load() == 1);
   for (size_t i = 0; i < result_count; ++i)
     results[i] = reject ? ocpn_portable_chart_segment_result{1, 3}
                         : ocpn_portable_chart_segment_result{0, 3};
@@ -554,6 +609,97 @@ bool RoutingLifecycle(const char* component_path) {
   // speed. A conservative factor must produce a later arrival for the same
   // route and environmental samples.
   const uint64_t normal_duration = result.duration_seconds;
+
+  // Regression for the real Holyhead offshore -> Dun Laoghaire offshore
+  // failure reported by the beta profile.  This upwind Irish Sea passage is
+  // long enough to require several retained isochrones.  Raw heading
+  // candidates must not consume the complete 80,000-state budget before the
+  // boat has had time to reach the destination.
+  auto irish_sea_request = request;
+  irish_sea_request.start_latitude = 53.336985;
+  irish_sea_request.start_longitude = -4.607470;
+  irish_sea_request.destination_latitude = 53.308408;
+  irish_sea_request.destination_longitude = -6.119702;
+  irish_sea_request.max_hours = 120;
+  irish_sea_request.max_states = 80000;
+  result.point_count = 0;
+  result.isochrone_point_count = 0;
+  result.isochrone_count = 0;
+  result.trace_point_count = 0;
+  result.trace_count = 0;
+  result.route_environment_count = 0;
+  result.diagnostic_len = 0;
+  std::memset(error, 0, sizeof(error));
+  ok = ok && CallSucceeded(ocpn_portable_runtime_calculate_route(
+                               runtime, &irish_sea_request, &result, error,
+                               sizeof(error)),
+                           "calculate Holyhead to Dun Laoghaire route", error);
+  ok = ok && result.point_count >= 3 && result.duration_seconds < 72 * 3600 &&
+       result.tacks > 0 &&
+       result.states_examined < irish_sea_request.max_states &&
+       std::hypot((points[result.point_count - 1].latitude -
+                   irish_sea_request.destination_latitude) *
+                      60.0,
+                  (points[result.point_count - 1].longitude -
+                   irish_sea_request.destination_longitude) *
+                      60.0 * std::cos(irish_sea_request.destination_latitude *
+                                      3.14159265358979323846 / 180.0)) <=
+           irish_sea_request.destination_tolerance_nm;
+
+  // Re-run the reported departure against the decoded hourly wind/current
+  // sequence from the user's GRIB. This specifically guards the former leg-9
+  // TWA 165.5-degree validator rejection.
+  auto reported_weather_request = irish_sea_request;
+  reported_weather_request.departure_unix_time = 1784793600;
+  state.use_reported_irish_sea_weather = true;
+  result.point_count = 0;
+  result.diagnostic_len = 0;
+  std::memset(error, 0, sizeof(error));
+  ok = ok && CallSucceeded(ocpn_portable_runtime_calculate_route(
+                               runtime, &reported_weather_request, &result,
+                               error, sizeof(error)),
+                           "calculate reported Irish Sea GRIB route", error);
+  ok = ok && result.point_count >= 3 &&
+       std::string(diagnostic, result.diagnostic_len)
+               .find("independent chronological replay") != std::string::npos;
+  state.use_reported_irish_sea_weather = false;
+
+  // Constrain the forward-stage share so the same upwind passage exercises
+  // automatic destination-side reverse-isocrone recovery. The stage must be
+  // visible through progress and recorded in the result diagnostic.
+  auto reverse_request = irish_sea_request;
+  reverse_request.max_states = 8000;
+  state.routing_stage = 0;
+  result.point_count = 0;
+  result.diagnostic_len = 0;
+  std::memset(error, 0, sizeof(error));
+  ok = ok && CallSucceeded(ocpn_portable_runtime_calculate_route(
+                               runtime, &reverse_request, &result, error,
+                               sizeof(error)),
+                           "calculate route using reverse-isocrone recovery",
+                           error);
+  ok = ok && state.routing_stage.load() >= 1 &&
+       std::string(diagnostic, result.diagnostic_len)
+               .find("reverse-isocrone recovery") != std::string::npos;
+
+  // Reject chart corridors only while reverse recovery is active. The
+  // component must visibly escalate and complete through its bounded
+  // time-dependent graph labels rather than reporting a frozen/failed job.
+  state.routing_stage = 0;
+  state.reject_reverse_charts = true;
+  result.point_count = 0;
+  result.diagnostic_len = 0;
+  std::memset(error, 0, sizeof(error));
+  ok = ok && CallSucceeded(ocpn_portable_runtime_calculate_route(
+                               runtime, &reverse_request, &result, error,
+                               sizeof(error)),
+                           "calculate route using graph fallback", error);
+  ok = ok && state.routing_stage.load() == 2 &&
+       std::string(diagnostic, result.diagnostic_len)
+               .find("time-dependent graph fallback") != std::string::npos;
+  state.reject_reverse_charts = false;
+  state.routing_stage = 0;
+
   auto conservative_speeds = polar_speeds;
   for (double& speed : conservative_speeds) speed *= 0.5;
   polar.boat_speeds_knots = conservative_speeds.data();

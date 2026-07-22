@@ -36,6 +36,7 @@
 #include <wx/statline.h>
 #include <wx/stattext.h>
 #include <wx/textctrl.h>
+#include <wx/timer.h>
 #include <wx/wfstream.h>
 #include <wx/txtstrm.h>
 
@@ -684,6 +685,7 @@ private:
   wxPanel* CreateSafetyPanel(wxNotebook* book);
   wxPanel* CreateAdvancedPanel(wxNotebook* book);
   wxPanel* CreateResultsPanel(wxNotebook* book);
+  void RefreshEnvironmentSummary();
   void RefreshNavigationPositions(bool initial = false);
   bool ApplyPositionSource(bool start, bool report_error = true);
   void UpdatePositionControls(bool start);
@@ -708,6 +710,7 @@ private:
   wxString plugin_id;
   wxString surface_resource;
   wxString surface_title;
+  wxString current_dataset_summary;
   wxArrayString surface_tabs;
   wxString configured_route_id;
   std::map<wxString, wxString> surface_labels;
@@ -780,6 +783,7 @@ private:
   wxListCtrl *departure_results = nullptr, *route_schedule = nullptr;
   wxTextCtrl* validation_diagnostics = nullptr;
   wxGauge* gauge = nullptr;
+  wxTimer environment_refresh_timer;
   wxButton *calculate = nullptr, *cancel = nullptr, *export_gpx = nullptr,
            *send_to_opencpn = nullptr;
   std::atomic<bool> cancelled{false};
@@ -855,7 +859,9 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateRoutePanel(wxNotebook* book) {
          vessel_performance_file);
   vessel_performance_status =
       new wxStaticText(panel, wxID_ANY, Label("vessel-performance-status"));
-  provider = new wxStaticText(panel, wxID_ANY, dataset_summary());
+  current_dataset_summary = dataset_summary();
+  provider = new wxStaticText(panel, wxID_ANY,
+                              "Environment: " + current_dataset_summary);
   root->Add(grid, 0, wxEXPAND | wxALL, 12);
   root->Add(use_opencpn_route, 0, wxLEFT | wxRIGHT | wxBOTTOM, 12);
   root->Add(refresh_positions, 0, wxLEFT | wxRIGHT | wxBOTTOM, 12);
@@ -1737,11 +1743,21 @@ void PortableWeatherRoutingHost::Impl::ShowEditor(size_t tab) {
   RefreshNavigationPositions(false);
   if (notebook && tab < static_cast<size_t>(notebook->GetPageCount()))
     notebook->SetSelection(static_cast<int>(tab));
-  provider->SetLabel("Environment: " + dataset_summary());
+  RefreshEnvironmentSummary();
   RelayoutRoutePanel();
   editor->Layout();
   editor->Show();
   editor->Raise();
+}
+
+void PortableWeatherRoutingHost::Impl::RefreshEnvironmentSummary() {
+  if (!provider || !dataset_summary) return;
+  const wxString latest = dataset_summary();
+  if (latest == current_dataset_summary) return;
+  current_dataset_summary = latest;
+  provider->SetLabel("Environment: " + current_dataset_summary);
+  RelayoutRoutePanel();
+  if (editor) editor->Layout();
 }
 
 void PortableWeatherRoutingHost::Impl::PopulateManagerPositions() {
@@ -1833,7 +1849,9 @@ void PortableWeatherRoutingHost::Impl::DispatchSurfaceAction(
         surface_title +
             " is a portable WebAssembly weather-routing component. It "
             "consumes an immutable environmental dataset through typed host "
-            "services and independently revalidates every delivered route.",
+            "services, escalates from forward isochrones through reverse "
+            "recovery and a time-dependent graph fallback, and independently "
+            "revalidates every delivered route.",
         "About " + surface_title, wxOK | wxICON_INFORMATION, frame);
   } else if (action == "show-isochrones" ||
              action == "show-stability-corridor" ||
@@ -1957,6 +1975,12 @@ void PortableWeatherRoutingHost::Impl::CreateFrame() {
   frame->SetSizer(root);
 
   CreateEditor();
+  environment_refresh_timer.SetOwner(frame);
+  frame->Bind(
+      wxEVT_TIMER,
+      [this](wxTimerEvent&) { RefreshEnvironmentSummary(); },
+      environment_refresh_timer.GetId());
+  environment_refresh_timer.Start(1000);
   LoadSettings();
   RefreshNavigationPositions(true);
   PopulateManagerPositions();
@@ -1998,7 +2022,7 @@ bool PortableWeatherRoutingHost::Impl::Show(wxString* error) {
     CreateFrame();
   else
     RefreshNavigationPositions(false);
-  provider->SetLabel("Environment: " + dataset_summary());
+  RefreshEnvironmentSummary();
   RelayoutRoutePanel();
   frame->Layout();
   frame->Show();
@@ -2881,6 +2905,7 @@ void PortableWeatherRoutingHost::Impl::Shutdown() {
   if (stopped.exchange(true)) return;
   alive->store(false);
   cancelled.store(true);
+  environment_refresh_timer.Stop();
   if (worker.joinable()) worker.join();
   if (frame) {
     SaveSettings();

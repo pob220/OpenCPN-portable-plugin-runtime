@@ -1,7 +1,11 @@
 # iWeatherRouting
 
-iWeatherRouting is the second portable-plugin reference workload. Its adaptive
-time-layer route search executes inside the WebAssembly component. OpenCPN
+iWeatherRouting is the second portable-plugin reference workload. Its bounded
+three-stage route search executes inside the WebAssembly component: adaptive
+forward isochrones first, destination-side reverse-isocrone bridge recovery
+second, and a time-dependent position/time/heading/tack graph fallback last.
+Every stage propagates forward through time and a route from any stage must pass
+an independent chronological replay before it is returned. OpenCPN
 brokers typed environmental samples published by iGRIB, batched chart checks,
 cancellation, a declared four-tab/form control schema, GPX output and retained
 route overlays. Forward departure comparisons run in up to four isolated
@@ -48,6 +52,39 @@ traces. The host can draw the selected route's isochrones, show the trace
 nearest the chart cursor and interpolate a boat marker at iGRIB's displayed
 forecast time. These are inspection aids, not evidence that unselected space
 or a chart segment is safe.
+
+The maximum-state setting bounds feasible labels retained after spatial,
+tack, incoming-heading and propulsion reduction; transient heading candidates
+do not consume that budget. Forward pruning is sector-balanced so a tack which
+temporarily increases destination range is not erased by a purely greedy
+ranking. Candidate fans include polar-derived optimum upwind/downwind VMG
+laylines as well as configured TWA limits. Raw candidates are reduced before
+the batched chart-coverage boundary while preserving local alternatives for
+chart rejection.
+
+The forward stage reserves bounded state capacity for recovery. Reverse
+recovery ranks historical forward states from the destination side and tests
+reproducible bridges directly and through destination-centred approach rings.
+If no bridge survives, bounded time-dependent A* explores position, forecast
+time, heading, tack and propulsion labels in a 120 NM passage corridor. The
+progress bar explicitly identifies `Forward isochrone`, `Reverse-isocrone
+recovery` and `Time-dependent graph fallback`, with retained/queued counters,
+so a difficult calculation is distinguishable from a stalled component.
+
+Current-aware replay distinguishes course over ground from vessel heading:
+the independently sampled current vector is removed from each delivered leg
+before applying polar, true-wind-angle and apparent-wind policy. Arrival legs
+retain the physically propagated closest-approach point within the configured
+destination tolerance rather than snapping a current-displaced track onto the
+waypoint.
+
+Weather used to admit a forward leg is sampled at its predicted midpoint,
+matching the independent replay boundary. This removes the former failure mode
+where start-of-hour wind admitted a leg which midpoint wind then rejected after
+a forecast shift. This reference remains a portable-runtime proof of concept:
+it demonstrates a professional bounded solver cascade over typed host services,
+but it is not a safety-certified navigator and does not import native SuperCPN
+or legacy Weather Routing objects into Wasm.
 
 When departure comparison is enabled, the Results tab opens automatically and
 lists every attempted departure, including failures. It reports the best
