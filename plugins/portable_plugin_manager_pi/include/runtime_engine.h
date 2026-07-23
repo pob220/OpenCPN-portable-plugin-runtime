@@ -2,6 +2,7 @@
 #define PORTABLE_PLUGIN_MANAGER_RUNTIME_ENGINE_H
 
 #include <cstdint>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <string>
@@ -26,6 +27,10 @@ struct PackageSnapshot {
   std::string state;
   std::string access;
   std::string diagnostic;
+  std::uint64_t generation = 0;
+  std::size_t pending_calls = 0;
+  std::uint64_t enable_count = 0;
+  std::uint64_t disable_count = 0;
 };
 
 struct OverlayPoint {
@@ -50,9 +55,11 @@ class RuntimeEngine {
       std::function<int(const RuntimeAction&, std::uint32_t*)>;
   using RemoveActions = std::function<void(const std::string&)>;
   using StateChanged = std::function<void()>;
+  using UiDispatch = std::function<void(std::function<void()>)>;
 
   RuntimeEngine(std::string storage_root, RegisterAction register_action,
-                RemoveActions remove_actions, StateChanged state_changed);
+                RemoveActions remove_actions, StateChanged state_changed,
+                UiDispatch ui_dispatch = {});
   ~RuntimeEngine();
 
   RuntimeEngine(const RuntimeEngine&) = delete;
@@ -74,6 +81,8 @@ class RuntimeEngine {
   void Shutdown();
   bool HandleAction(const std::string& package_id,
                     const std::string& action_id);
+  bool WaitForIdle(const std::string& package_id,
+                   std::chrono::milliseconds timeout);
   void SetPositionFix(const PlugIn_Position_Fix_Ex& fix);
   std::vector<PackageSnapshot> Packages() const;
   std::vector<OverlayScene> Scenes() const;

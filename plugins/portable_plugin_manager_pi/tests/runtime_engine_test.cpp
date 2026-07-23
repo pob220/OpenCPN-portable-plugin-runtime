@@ -142,7 +142,10 @@ int main() {
 
     CHECK(engine.Disable(package_id, &diagnostic));
     CHECK(!engine.IsEnabled(package_id));
-    CHECK(Snapshot(engine.Packages(), package_id)->state == "Disabled");
+    const auto disabled = engine.Packages();
+    CHECK(Snapshot(disabled, package_id)->state == "Disabled");
+    CHECK(Snapshot(disabled, package_id)->enable_count == 1);
+    CHECK(Snapshot(disabled, package_id)->disable_count == 1);
     CHECK(actions.empty());
 
     CHECK(engine.Enable(package_id, &diagnostic));
@@ -158,6 +161,7 @@ int main() {
     CHECK(actions.size() == 3);
 
     CHECK(engine.HandleAction(package_id, "igrib.failure-test"));
+    CHECK(engine.WaitForIdle(package_id, std::chrono::seconds(2)));
     CHECK(Snapshot(engine.Packages(), package_id)->state == "Failed");
     CHECK(!engine.IsEnabled(package_id));
     CHECK(actions.empty());

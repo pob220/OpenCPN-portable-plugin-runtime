@@ -2,6 +2,7 @@
 #define PORTABLE_PLUGIN_MANAGER_PI_H
 
 #include <memory>
+#include <atomic>
 
 #include <wx/bitmap.h>
 
@@ -70,6 +71,7 @@ class PortablePluginManagerPi final : public opencpn_plugin_121 {
   std::unique_ptr<PackageStore> package_store_;
   std::unique_ptr<PermissionStore> permission_store_;
   std::unique_ptr<RuntimeEngine> runtime_engine_;
+  std::shared_ptr<std::atomic_bool> ui_callback_gate_;
   std::unique_ptr<ManagerDialog> manager_dialog_;
   bool developer_mode_ = false;
   bool initialized_ = false;

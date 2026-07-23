@@ -67,6 +67,7 @@ add_library(portable_plugin_manager_pi MODULE
   src/permission_store.cpp
   src/portable_plugin_manager_pi.cpp
   src/runtime_engine.cpp
+  src/serial_executor.cpp
 )
 set_target_properties(portable_plugin_manager_pi PROPERTIES
   PREFIX "lib"
@@ -119,6 +120,21 @@ if(BUILD_TESTING)
       -Wall -Wextra -Wpedantic)
   endif()
   add_test(NAME ppm_action_registry COMMAND ppm_action_registry_test)
+
+  add_executable(ppm_serial_executor_test
+    src/serial_executor.cpp
+    tests/serial_executor_test.cpp
+  )
+  target_include_directories(ppm_serial_executor_test PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include")
+  target_link_libraries(ppm_serial_executor_test PRIVATE Threads::Threads)
+  if(MSVC)
+    target_compile_options(ppm_serial_executor_test PRIVATE /W4)
+  else()
+    target_compile_options(ppm_serial_executor_test PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
+  add_test(NAME ppm_serial_executor COMMAND ppm_serial_executor_test)
 
   add_executable(ppm_package_store_test
     src/package_store.cpp
@@ -200,6 +216,7 @@ if(BUILD_TESTING)
   add_executable(ppm_runtime_engine_test
     src/permission_store.cpp
     src/runtime_engine.cpp
+    src/serial_executor.cpp
     tests/runtime_engine_test.cpp
   )
   add_dependencies(ppm_runtime_engine_test ppm_test_igrib_component)

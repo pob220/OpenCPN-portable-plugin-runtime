@@ -216,10 +216,15 @@ void ManagerDialog::SetPackages(
     packages_->SetItem(row, 1, wxString::FromUTF8(package.version));
     packages_->SetItem(row, 2, wxString::FromUTF8(package.state));
     packages_->SetItem(row, 3, wxString::FromUTF8(package.access));
-    packages_->SetItem(
-        row, 4,
-        package.diagnostic.empty() ? "Wasmtime component"
-                                   : wxString::FromUTF8(package.diagnostic));
+    wxString details = wxString::Format(
+        "Generation %llu; queued %zu; lifecycle %llu/%llu",
+        static_cast<unsigned long long>(package.generation),
+        package.pending_calls,
+        static_cast<unsigned long long>(package.enable_count),
+        static_cast<unsigned long long>(package.disable_count));
+    if (!package.diagnostic.empty())
+      details += "; " + wxString::FromUTF8(package.diagnostic);
+    packages_->SetItem(row, 4, details);
     packages_->SetItemData(row, static_cast<long>(index));
     if (package.id == selected)
       packages_->SetItemState(row, wxLIST_STATE_SELECTED,

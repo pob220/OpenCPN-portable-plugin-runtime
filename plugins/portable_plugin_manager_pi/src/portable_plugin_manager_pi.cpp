@@ -1,5 +1,6 @@
 #include "portable_plugin_manager_pi.h"
 
+#include <wx/app.h>
 #include <wx/filename.h>
 #include <wx/log.h>
 #include <wx/msgdlg.h>
@@ -158,7 +159,15 @@ int PortablePluginManagerPi::Init() {
       [this](const std::string& package_id) {
         RemovePackageActions(package_id);
       },
-      [this]() { OnEngineStateChanged(); });
+      [this]() { OnEngineStateChanged(); },
+      [gate = (ui_callback_gate_ =
+                   std::make_shared<std::atomic_bool>(true))](
+          std::function<void()> task) {
+        if (!wxTheApp || !task) return;
+        wxTheApp->CallAfter([gate, task = std::move(task)]() mutable {
+          if (gate->load()) task();
+        });
+      });
   if (!runtime_engine_->LoadInstalled(developer_mode_)) {
     wxLogWarning(
         "PPM event=runtime-engine-load-completed-with-package-failures");
@@ -190,8 +199,10 @@ bool PortablePluginManagerPi::DeInit() {
   }
   if (runtime_engine_) {
     runtime_engine_->Shutdown();
+    if (ui_callback_gate_) ui_callback_gate_->store(false);
     runtime_engine_.reset();
   }
+  ui_callback_gate_.reset();
   permission_store_.reset();
   package_store_.reset();
   RemoveAllActions();

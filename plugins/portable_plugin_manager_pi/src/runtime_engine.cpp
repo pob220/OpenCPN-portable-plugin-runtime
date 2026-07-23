@@ -1,6 +1,7 @@
 #include "runtime_engine.h"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cctype>
 #include <cmath>
@@ -26,6 +27,7 @@
 #include "ocpn_plugin.h"
 #include "ocpn_portable_runtime.h"
 #include "permission_store.h"
+#include "serial_executor.h"
 
 namespace ppm {
 namespace {
@@ -117,8 +119,12 @@ class RuntimeEngine::Impl {
     std::set<std::string> permissions;
     ocpn_portable_runtime* runtime = nullptr;
     mutable std::mutex runtime_mutex;
-    bool enabled = false;
-    bool failed = false;
+    mutable std::mutex state_mutex;
+    SerialExecutor executor;
+    std::atomic_bool enabled{false};
+    std::atomic_bool failed{false};
+    std::atomic_uint64_t enable_count{0};
+    std::atomic_uint64_t disable_count{0};
     bool loadable = false;
     std::string diagnostic;
     std::vector<RuntimeAction> registered_actions;
@@ -126,11 +132,13 @@ class RuntimeEngine::Impl {
   };
 
   Impl(std::string storage_root, RegisterAction register_action,
-       RemoveActions remove_actions, StateChanged state_changed)
+       RemoveActions remove_actions, StateChanged state_changed,
+       UiDispatch ui_dispatch)
       : storage_root(std::move(storage_root)),
         register_action(std::move(register_action)),
         remove_actions(std::move(remove_actions)),
-        state_changed(std::move(state_changed)) {}
+        state_changed(std::move(state_changed)),
+        ui_dispatch(std::move(ui_dispatch)) {}
 
   ~Impl() { Shutdown(); }
 
@@ -150,6 +158,8 @@ class RuntimeEngine::Impl {
   void Shutdown();
   bool HandleAction(const std::string& package_id,
                     const std::string& action_id);
+  bool WaitForIdle(const std::string& package_id,
+                   std::chrono::milliseconds timeout);
   void Fail(Instance& instance, const std::string& operation,
             const std::string& diagnostic);
   Instance* Find(const std::string& package_id);
@@ -161,6 +171,20 @@ class RuntimeEngine::Impl {
   bool Permitted(const Instance& instance,
                  const std::string& permission) const {
     return instance.permissions.count(permission) != 0;
+  }
+  void Publish(std::function<void()> task) {
+    if (ui_dispatch)
+      ui_dispatch(std::move(task));
+    else
+      task();
+  }
+  void PublishStateChanged() {
+    const auto changed = state_changed;
+    Publish([changed]() { changed(); });
+  }
+  void PublishRemoveActions(const std::string& package_id) {
+    const auto remove = remove_actions;
+    Publish([remove, package_id]() { remove(package_id); });
   }
 
   static void Log(void* user_data, std::uint32_t level, const char* message,
@@ -223,8 +247,10 @@ class RuntimeEngine::Impl {
   RegisterAction register_action;
   RemoveActions remove_actions;
   StateChanged state_changed;
+  UiDispatch ui_dispatch;
   std::vector<std::unique_ptr<Instance>> instances;
   bool stopped = false;
+  mutable std::mutex position_mutex;
   bool position_valid = false;
   double latitude = 0.0;
   double longitude = 0.0;
@@ -295,6 +321,7 @@ std::int32_t RuntimeEngine::Impl::GetVesselPosition(
     return -1;
   }
   const auto& owner = *instance->owner;
+  std::lock_guard<std::mutex> lock(owner.position_mutex);
   if (!owner.position_valid) return -2;
   *latitude_out = owner.latitude;
   *longitude_out = owner.longitude;
@@ -398,8 +425,11 @@ std::int32_t RuntimeEngine::Impl::SubmitPolyline(
     }
     scene.points.push_back({points[index].latitude, points[index].longitude});
   }
-  instance->scenes[id] = std::move(scene);
-  instance->owner->state_changed();
+  {
+    std::lock_guard<std::mutex> lock(instance->state_mutex);
+    instance->scenes[id] = std::move(scene);
+  }
+  instance->owner->PublishStateChanged();
   return 0;
 }
 
@@ -409,8 +439,11 @@ std::int32_t RuntimeEngine::Impl::ClearScene(void* user_data,
   auto* instance = static_cast<Instance*>(user_data);
   const std::string id = Text(scene_id, scene_id_length);
   if (!instance || !instance->owner || !IsSafeName(id)) return -1;
-  instance->scenes.erase(id);
-  instance->owner->state_changed();
+  {
+    std::lock_guard<std::mutex> lock(instance->state_mutex);
+    instance->scenes.erase(id);
+  }
+  instance->owner->PublishStateChanged();
   return 0;
 }
 
@@ -561,6 +594,7 @@ bool RuntimeEngine::Impl::Start(Instance& instance,
   }
   instance.enabled = true;
   instance.failed = false;
+  ++instance.enable_count;
   instance.diagnostic.clear();
   wxLogMessage("PPM package-enabled id=%s version=%s", instance.id,
                instance.version);
@@ -569,21 +603,40 @@ bool RuntimeEngine::Impl::Start(Instance& instance,
 
 bool RuntimeEngine::Impl::Stop(Instance& instance, bool destroy,
                                std::string* diagnostic) {
+  const bool was_enabled = instance.enabled.exchange(false);
+  instance.executor.AdvanceGeneration();
+  if (!instance.executor.WaitIdle(std::chrono::seconds(6))) {
+    const std::string message =
+        "portable component did not reach its six-second action shutdown "
+        "barrier";
+    {
+      std::lock_guard<std::mutex> state_lock(instance.state_mutex);
+      instance.diagnostic = message;
+    }
+    remove_actions(instance.id);
+    if (diagnostic) *diagnostic = message;
+    return false;
+  }
   std::lock_guard<std::mutex> lock(instance.runtime_mutex);
   bool okay = true;
   std::array<char, kErrorCapacity> error{};
-  if (instance.runtime && instance.enabled &&
-      ocpn_portable_runtime_disable(instance.runtime, error.data(),
-                                    error.size()) != 0) {
-    okay = false;
-    instance.diagnostic =
-        error[0] ? error.data() : "runtime disable failed";
-    wxLogWarning("PPM package-disable-failed id=%s diagnostic=%s",
-                 instance.id, instance.diagnostic);
-    destroy = true;
+  if (instance.runtime && was_enabled) {
+    if (ocpn_portable_runtime_disable(instance.runtime, error.data(),
+                                      error.size()) != 0) {
+      okay = false;
+      instance.diagnostic =
+          error[0] ? error.data() : "runtime disable failed";
+      wxLogWarning("PPM package-disable-failed id=%s diagnostic=%s",
+                   instance.id, instance.diagnostic);
+      destroy = true;
+    } else {
+      ++instance.disable_count;
+    }
   }
-  instance.enabled = false;
-  instance.scenes.clear();
+  {
+    std::lock_guard<std::mutex> state_lock(instance.state_mutex);
+    instance.scenes.clear();
+  }
   remove_actions(instance.id);
   if (destroy && instance.runtime) {
     ocpn_portable_runtime_destroy(instance.runtime);
@@ -723,8 +776,10 @@ bool RuntimeEngine::Impl::RefreshPackage(const std::string& package_id,
   }
   for (auto item = instances.begin(); item != instances.end(); ++item) {
     if ((*item)->id != package_id) continue;
-    std::string ignored;
-    Stop(**item, true, &ignored);
+    if (!Stop(**item, true, diagnostic)) {
+      state_changed();
+      return false;
+    }
     instances.erase(item);
     break;
   }
@@ -826,17 +881,21 @@ void RuntimeEngine::Impl::Fail(Instance& instance,
                                const std::string& diagnostic) {
   instance.failed = true;
   instance.enabled = false;
-  instance.diagnostic = operation + ": " + diagnostic;
-  instance.scenes.clear();
-  remove_actions(instance.id);
+  {
+    std::lock_guard<std::mutex> state_lock(instance.state_mutex);
+    instance.diagnostic = operation + ": " + diagnostic;
+    instance.scenes.clear();
+  }
   if (instance.runtime) {
     ocpn_portable_runtime_destroy(instance.runtime);
     instance.runtime = nullptr;
   }
   instance.registered_actions.clear();
-  wxLogError("PPM package-failed id=%s diagnostic=%s", instance.id,
-             instance.diagnostic);
-  state_changed();
+  const std::string id = instance.id;
+  const std::string message = operation + ": " + diagnostic;
+  wxLogError("PPM package-failed id=%s diagnostic=%s", id, message);
+  PublishRemoveActions(id);
+  PublishStateChanged();
 }
 
 bool RuntimeEngine::Impl::HandleAction(const std::string& package_id,
@@ -848,18 +907,38 @@ bool RuntimeEngine::Impl::HandleAction(const std::string& package_id,
   if (item == instances.end()) return false;
   Instance& instance = **item;
   if (!instance.enabled || instance.failed || !instance.runtime) return true;
-  std::unique_lock<std::mutex> lock(instance.runtime_mutex, std::try_to_lock);
-  if (!lock.owns_lock()) {
-    wxLogWarning("PPM package-busy id=%s action=%s", package_id, action_id);
-    return true;
-  }
-  std::array<char, kErrorCapacity> error{};
-  if (ocpn_portable_runtime_on_action(
-          instance.runtime, action_id.data(), action_id.size(), error.data(),
-          error.size()) != 0) {
-    Fail(instance, "action " + action_id, error.data());
+  const std::uint64_t generation = instance.executor.Generation();
+  const auto posted = instance.executor.Post(
+      generation, [&instance, action_id](std::uint64_t task_generation) {
+        if (task_generation != instance.executor.Generation() ||
+            !instance.enabled || instance.failed) {
+          return;
+        }
+        std::lock_guard<std::mutex> lock(instance.runtime_mutex);
+        if (task_generation != instance.executor.Generation() ||
+            !instance.enabled || instance.failed || !instance.runtime) {
+          return;
+        }
+        std::array<char, kErrorCapacity> error{};
+        if (ocpn_portable_runtime_on_action(
+                instance.runtime, action_id.data(), action_id.size(),
+                error.data(), error.size()) != 0) {
+          instance.owner->Fail(
+              instance, "action " + action_id,
+              error[0] ? error.data() : "portable component action failed");
+        }
+      });
+  if (posted != SerialExecutor::PostResult::kAccepted) {
+    wxLogWarning("PPM package-action-not-queued id=%s action=%s reason=%d",
+                 package_id, action_id, static_cast<int>(posted));
   }
   return true;
+}
+
+bool RuntimeEngine::Impl::WaitForIdle(const std::string& package_id,
+                                      std::chrono::milliseconds timeout) {
+  Instance* instance = Find(package_id);
+  return instance && instance->executor.WaitIdle(timeout);
 }
 
 void RuntimeEngine::Impl::Shutdown() {
@@ -875,10 +954,12 @@ void RuntimeEngine::Impl::Shutdown() {
 RuntimeEngine::RuntimeEngine(std::string storage_root,
                              RegisterAction register_action,
                              RemoveActions remove_actions,
-                             StateChanged state_changed)
+                             StateChanged state_changed,
+                             UiDispatch ui_dispatch)
     : impl_(std::make_unique<Impl>(storage_root, std::move(register_action),
                                   std::move(remove_actions),
-                                  std::move(state_changed))),
+                                  std::move(state_changed),
+                                  std::move(ui_dispatch))),
       storage_root_(std::move(storage_root)) {}
 
 RuntimeEngine::~RuntimeEngine() = default;
@@ -932,7 +1013,13 @@ bool RuntimeEngine::HandleAction(const std::string& package_id,
   return impl_->HandleAction(package_id, action_id);
 }
 
+bool RuntimeEngine::WaitForIdle(const std::string& package_id,
+                                std::chrono::milliseconds timeout) {
+  return impl_->WaitForIdle(package_id, timeout);
+}
+
 void RuntimeEngine::SetPositionFix(const PlugIn_Position_Fix_Ex& fix) {
+  std::lock_guard<std::mutex> lock(impl_->position_mutex);
   impl_->position_valid =
       std::isfinite(fix.Lat) && std::isfinite(fix.Lon) &&
       fix.Lat >= -90.0 && fix.Lat <= 90.0 && fix.Lon >= -180.0 &&
@@ -949,6 +1036,11 @@ std::vector<PackageSnapshot> RuntimeEngine::Packages() const {
   std::vector<PackageSnapshot> result;
   result.reserve(impl_->instances.size());
   for (const auto& instance : impl_->instances) {
+    std::string diagnostic;
+    {
+      std::lock_guard<std::mutex> lock(instance->state_mutex);
+      diagnostic = instance->diagnostic;
+    }
     result.push_back(
          {instance->id, instance->name, instance->version,
          instance->failed ? "Failed"
@@ -956,7 +1048,11 @@ std::vector<PackageSnapshot> RuntimeEngine::Packages() const {
          : instance->runtime ? "Disabled"
                              : "Unloaded",
          "Unknown",
-         instance->diagnostic});
+         diagnostic,
+         instance->executor.Generation(),
+         instance->executor.Pending(),
+         instance->enable_count.load(),
+         instance->disable_count.load()});
   }
   return result;
 }
@@ -965,6 +1061,7 @@ std::vector<OverlayScene> RuntimeEngine::Scenes() const {
   std::vector<OverlayScene> result;
   for (const auto& instance : impl_->instances) {
     if (!instance->enabled || instance->failed) continue;
+    std::lock_guard<std::mutex> lock(instance->state_mutex);
     for (const auto& item : instance->scenes) result.push_back(item.second);
   }
   return result;
