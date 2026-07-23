@@ -1,0 +1,38 @@
+{
+  "schema": "org.opencpn.portable-ui/0.2",
+  "surface": "polars.editor",
+  "role": "vessel-performance-editor",
+  "kind": "modeless-window",
+  "title": "iPolars — Portable Vessel Performance Editor",
+  "tabs": ["Polar editor", "Boat XML", "Validation"],
+  "menus": [
+    {
+      "label": "File",
+      "items": [
+        {"id": "new-polar", "label": "New polar"},
+        {"id": "new-boat", "label": "New boat XML"},
+        {"separator": true},
+        {"id": "refresh", "label": "Refresh"}
+      ]
+    }
+  ],
+  "controls": [
+    {"id": "document-type", "tab": "Polar editor", "type": "status", "label": "Document"},
+    {"id": "open", "tab": "Polar editor", "type": "file-open", "label": "Open .pol or boat .xml…"},
+    {"id": "save-as", "tab": "Polar editor", "type": "file-save", "label": "Save as…"},
+    {"id": "new-polar", "tab": "Polar editor", "type": "button", "label": "New polar"},
+    {"id": "new-angle", "tab": "Polar editor", "type": "number", "label": "New TWA (degrees)"},
+    {"id": "add-angle", "tab": "Polar editor", "type": "button", "label": "Add angle"},
+    {"id": "new-wind", "tab": "Polar editor", "type": "number", "label": "New TWS (knots)"},
+    {"id": "add-wind", "tab": "Polar editor", "type": "button", "label": "Add wind speed"},
+    {"id": "remove-angle", "tab": "Polar editor", "type": "button", "label": "Remove selected angle"},
+    {"id": "remove-wind", "tab": "Polar editor", "type": "button", "label": "Remove selected wind speed"},
+    {"id": "normalize", "tab": "Polar editor", "type": "button", "label": "Sort and normalize axes"},
+    {"id": "interpolate", "tab": "Polar editor", "type": "button", "label": "Interpolate bounded gaps"},
+    {"id": "polar-grid", "tab": "Polar editor", "type": "grid", "label": "Boat speed through water (knots)", "columns": ["TWA / TWS"]},
+    {"id": "new-boat", "tab": "Boat XML", "type": "button", "label": "New boat XML"},
+    {"id": "boat-grid", "tab": "Boat XML", "type": "grid", "label": "Referenced polar files", "columns": ["Polar file", "Crossover %"]},
+    {"id": "diagnostics", "tab": "Validation", "type": "diagnostics", "label": "Interoperability and validation report"},
+    {"id": "refresh", "tab": "Validation", "type": "button", "label": "Validate now"}
+  ]
+}

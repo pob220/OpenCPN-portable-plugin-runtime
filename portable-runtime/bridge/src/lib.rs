@@ -22,7 +22,7 @@ wasmtime::component::bindgen!({
     world: "plugin-world",
 });
 
-const HOST_ABI_VERSION: u32 = 9;
+const HOST_ABI_VERSION: u32 = 10;
 const ROUTE_POINT_LIMIT: usize = 20_000;
 const ROUTE_INSPECTION_POINT_LIMIT: usize = 200_000;
 const ROUTE_INSPECTION_LINE_LIMIT: usize = 10_000;
@@ -35,6 +35,7 @@ const POLAR_GRID_LIMIT: usize = 8;
 const POLAR_AXIS_LIMIT: usize = 200;
 const POLAR_CELL_LIMIT: usize = 200_000;
 const PRIVATE_READ_LIMIT: usize = 8 * 1024 * 1024;
+const USER_FILE_LIMIT: usize = 8 * 1024 * 1024;
 const EPOCH_TICK: Duration = Duration::from_millis(100);
 const CALL_EPOCH_DEADLINE: u64 = 50;
 const ROUTING_BASE_FUEL: u64 = 2_000_000_000;
@@ -292,6 +293,7 @@ pub struct HostCallbacks {
     clear_scene: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> i32>,
     start_job: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize, u32) -> i32>,
     cancel_job: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> i32>,
+    open_surface: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> i32>,
     open_environmental_viewer: Option<unsafe extern "C" fn(*mut c_void) -> i32>,
     open_weather_routing: Option<unsafe extern "C" fn(*mut c_void) -> i32>,
     environment_sample_batch: Option<
@@ -331,6 +333,11 @@ pub struct HostCallbacks {
     storage_private_read: Option<
         unsafe extern "C" fn(*mut c_void, *const c_char, usize, *mut u8, usize, *mut usize) -> i32,
     >,
+    user_file_read: Option<
+        unsafe extern "C" fn(*mut c_void, *const c_char, usize, *mut u8, usize, *mut usize) -> i32,
+    >,
+    user_file_write:
+        Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize, *const u8, usize) -> i32>,
 }
 
 unsafe impl Send for HostCallbacks {}
@@ -698,6 +705,23 @@ impl opencpn::portable::host::Host for HostState {
             .ok_or_else(|| callback_error("cancel-job", code))
     }
 
+    fn open_surface(&mut self, surface_id: String) -> Result<(), String> {
+        let callback = self
+            .callbacks
+            .open_surface
+            .ok_or_else(|| "open-surface service unavailable".to_string())?;
+        let code = unsafe {
+            callback(
+                self.callbacks.user_data,
+                surface_id.as_ptr().cast(),
+                surface_id.len(),
+            )
+        };
+        (code == 0)
+            .then_some(())
+            .ok_or_else(|| callback_error("open-surface", code))
+    }
+
     fn open_environmental_viewer(&mut self) -> Result<(), String> {
         let callback = self
             .callbacks
@@ -914,6 +938,52 @@ impl opencpn::portable::host::Host for HostState {
         }
         value.truncate(value_len);
         Ok(value)
+    }
+
+    fn user_file_read(&mut self, grant_token: String) -> Result<Vec<u8>, String> {
+        let callback = self
+            .callbacks
+            .user_file_read
+            .ok_or_else(|| "user-file-read service unavailable".to_string())?;
+        let mut value = vec![0_u8; USER_FILE_LIMIT];
+        let mut value_len = 0_usize;
+        let code = unsafe {
+            callback(
+                self.callbacks.user_data,
+                grant_token.as_ptr().cast(),
+                grant_token.len(),
+                value.as_mut_ptr(),
+                value.len(),
+                &mut value_len,
+            )
+        };
+        if code != 0 || value_len > value.len() {
+            return Err(callback_error("user-file-read", code));
+        }
+        value.truncate(value_len);
+        Ok(value)
+    }
+
+    fn user_file_write(&mut self, grant_token: String, value: Vec<u8>) -> Result<(), String> {
+        if value.len() > USER_FILE_LIMIT {
+            return Err("user file size limit exceeded".to_string());
+        }
+        let callback = self
+            .callbacks
+            .user_file_write
+            .ok_or_else(|| "user-file-write service unavailable".to_string())?;
+        let code = unsafe {
+            callback(
+                self.callbacks.user_data,
+                grant_token.as_ptr().cast(),
+                grant_token.len(),
+                value.as_ptr(),
+                value.len(),
+            )
+        };
+        (code == 0)
+            .then_some(())
+            .ok_or_else(|| callback_error("user-file-write", code))
     }
 }
 

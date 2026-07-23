@@ -252,6 +252,18 @@ int32_t StoragePrivateRead(void*, const char*, size_t, uint8_t* value,
   return 0;
 }
 
+int32_t OpenSurface(void*, const char*, size_t) { return 0; }
+
+int32_t UserFileRead(void*, const char*, size_t, uint8_t*, size_t,
+                     size_t* value_len) {
+  *value_len = 0;
+  return 0;
+}
+
+int32_t UserFileWrite(void*, const char*, size_t, const uint8_t*, size_t) {
+  return 0;
+}
+
 ocpn_portable_host_callbacks Callbacks(HostState* state) {
   return {OCPN_PORTABLE_HOST_ABI_VERSION,
           state,
@@ -264,6 +276,7 @@ ocpn_portable_host_callbacks Callbacks(HostState* state) {
           ClearScene,
           StartJob,
           CancelJob,
+          OpenSurface,
           OpenEnvironmentalViewer,
           OpenWeatherRouting,
           EnvironmentSampleBatch,
@@ -271,7 +284,9 @@ ocpn_portable_host_callbacks Callbacks(HostState* state) {
           RoutingCancelled,
           ChartsQuerySegments,
           NetworkGetToPrivate,
-          StoragePrivateRead};
+          StoragePrivateRead,
+          UserFileRead,
+          UserFileWrite};
 }
 
 bool CallSucceeded(int32_t result, const char* operation, const char* error) {

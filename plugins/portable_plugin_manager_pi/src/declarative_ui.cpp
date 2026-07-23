@@ -179,7 +179,7 @@ bool SupportedControlType(const std::string& type) {
       "navigation-create", "navigation-object", "navigation-route",
       "number",          "optional-number", "position-source",
       "progress",        "slider",          "status",
-      "table",           "text",            "toggle"};
+      "table",           "grid",            "text",            "toggle"};
   return supported.count(type) != 0;
 }
 
@@ -219,7 +219,8 @@ bool ParseControls(const wxJSONValue& document,
     }
     if (value.HasMember("columns")) {
       const wxJSONValue columns = value.ItemAt("columns");
-      if (control.type != "table" || !columns.IsArray() ||
+      if ((control.type != "table" && control.type != "grid") ||
+          !columns.IsArray() ||
           columns.Size() == 0 || columns.Size() > kMaximumColumns) {
         *diagnostic = "table columns are invalid or exceed policy";
         return false;

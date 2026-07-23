@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define OCPN_PORTABLE_HOST_ABI_VERSION 9u
+#define OCPN_PORTABLE_HOST_ABI_VERSION 10u
 
 typedef struct ocpn_portable_runtime ocpn_portable_runtime;
 
@@ -211,6 +211,8 @@ typedef struct ocpn_portable_host_callbacks {
   int32_t (*start_job)(void* user_data, const char* job_id, size_t job_id_len,
                        uint32_t work_units);
   int32_t (*cancel_job)(void* user_data, const char* job_id, size_t job_id_len);
+  int32_t (*open_surface)(void* user_data, const char* surface_id,
+                          size_t surface_id_len);
   int32_t (*open_environmental_viewer)(void* user_data);
   int32_t (*open_weather_routing)(void* user_data);
   int32_t (*environment_sample_batch)(
@@ -233,6 +235,12 @@ typedef struct ocpn_portable_host_callbacks {
   int32_t (*storage_private_read)(void* user_data, const char* private_name,
                                   size_t private_name_len, uint8_t* value,
                                   size_t value_capacity, size_t* value_len);
+  int32_t (*user_file_read)(void* user_data, const char* grant_token,
+                            size_t grant_token_len, uint8_t* value,
+                            size_t value_capacity, size_t* value_len);
+  int32_t (*user_file_write)(void* user_data, const char* grant_token,
+                             size_t grant_token_len, const uint8_t* value,
+                             size_t value_len);
 } ocpn_portable_host_callbacks;
 
 ocpn_portable_runtime* ocpn_portable_runtime_create(

@@ -71,6 +71,7 @@ interface host {
   clear-scene: func(scene-id: string) -> result<_, string>;
   start-job: func(job-id: string, work-units: u32) -> result<_, string>;
   cancel-job: func(job-id: string) -> result<_, string>;
+  open-surface: func(surface-id: string) -> result<_, string>;
   open-environmental-viewer: func() -> result<_, string>;
   open-weather-routing: func() -> result<_, string>;
   environment-sample-batch: func(requests: list<environment-sample-request>) -> result<list<environment-sample>, string>;
@@ -80,6 +81,8 @@ interface host {
   network-get-to-private: func(request-id: string, url: string,
                                private-name: string, max-bytes: u64) -> result<_, string>;
   storage-private-read: func(private-name: string) -> result<list<u8>, string>;
+  user-file-read: func(grant-token: string) -> result<list<u8>, string>;
+  user-file-write: func(grant-token: string, value: list<u8>) -> result<_, string>;
 }
 
 interface plugin {

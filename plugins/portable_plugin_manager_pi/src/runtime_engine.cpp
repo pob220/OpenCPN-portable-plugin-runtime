@@ -16,6 +16,8 @@
 #include <utility>
 #include <vector>
 
+#include <openssl/rand.h>
+
 #include <wx/dir.h>
 #include <wx/filename.h>
 #include <wx/jsonreader.h>
@@ -41,6 +43,8 @@ constexpr std::size_t kErrorCapacity = 4096;
 constexpr std::size_t kSettingCapacity = 64 * 1024;
 constexpr std::size_t kOverlayPointLimit = 1'000'000;
 constexpr std::size_t kPrivateReadLimit = 8 * 1024 * 1024;
+constexpr std::size_t kUserFileLimit = 8 * 1024 * 1024;
+constexpr std::size_t kUserFileGrantLimit = 32;
 constexpr std::size_t kSurfaceDocumentLimit = 1024 * 1024;
 constexpr std::size_t kSurfaceStateLimit = 64 * 1024;
 
@@ -112,6 +116,13 @@ std::string ReadSmallFile(const fs::path& path, std::size_t limit,
 
 class RuntimeEngine::Impl {
  public:
+  struct UserFileGrant {
+    fs::path path;
+    bool writable = false;
+    bool consumed = false;
+    std::uint64_t generation = 0;
+  };
+
   struct Instance {
     Impl* owner = nullptr;
     std::string id;
@@ -135,6 +146,7 @@ class RuntimeEngine::Impl {
     std::vector<RuntimeAction> registered_actions;
     std::map<std::string, OverlayScene> scenes;
     std::map<std::string, DeclarativeSurface> surfaces;
+    std::map<std::string, UserFileGrant> user_file_grants;
   };
 
   Impl(std::string storage_root, RegisterAction register_action,
@@ -174,6 +186,9 @@ class RuntimeEngine::Impl {
                           const std::string& surface_id,
                           const std::string& control_id,
                           const std::string& value_json);
+  bool RegisterUserFileGrant(const std::string& package_id,
+                             const std::string& path, bool writable,
+                             std::string* token, std::string* diagnostic);
   bool WaitForIdle(const std::string& package_id,
                    std::chrono::milliseconds timeout);
   void Fail(Instance& instance, const std::string& operation,
@@ -241,6 +256,10 @@ class RuntimeEngine::Impl {
   }
   static std::int32_t OpenNamedSurface(void* user_data,
                                        const std::string& surface_id);
+  static std::int32_t OpenSurface(void* user_data, const char* surface_id,
+                                  std::size_t surface_id_length) {
+    return OpenNamedSurface(user_data, Text(surface_id, surface_id_length));
+  }
   static std::int32_t EnvironmentSampleBatch(
       void*, const ocpn_portable_environment_sample_request*, std::size_t,
       ocpn_portable_environment_sample*, std::size_t, char* error,
@@ -264,6 +283,14 @@ class RuntimeEngine::Impl {
       void* user_data, const char* private_name,
       std::size_t private_name_length, std::uint8_t* value,
       std::size_t value_capacity, std::size_t* value_length);
+  static std::int32_t UserFileRead(
+      void* user_data, const char* grant_token,
+      std::size_t grant_token_length, std::uint8_t* value,
+      std::size_t value_capacity, std::size_t* value_length);
+  static std::int32_t UserFileWrite(
+      void* user_data, const char* grant_token,
+      std::size_t grant_token_length, const std::uint8_t* value,
+      std::size_t value_length);
   void DeliverJobEvent(Instance* instance, const JobEvent& event);
 
   fs::path storage_root;
@@ -371,6 +398,163 @@ std::int32_t RuntimeEngine::Impl::OpenNamedSurface(
   instance->owner->Publish([opened, package_id, surface]() {
     opened(package_id, surface);
   });
+  return 0;
+}
+
+bool RuntimeEngine::Impl::RegisterUserFileGrant(
+    const std::string& package_id, const std::string& path_value,
+    bool writable, std::string* token, std::string* diagnostic) {
+  Instance* instance = Find(package_id);
+  if (!instance || !instance->enabled || instance->failed ||
+      !Permitted(*instance, "storage.user-selected")) {
+    if (diagnostic)
+      *diagnostic = "package is unavailable or lacks user-selected file access";
+    return false;
+  }
+  fs::path path = fs::path(path_value).lexically_normal();
+  std::error_code error;
+  if (!path.is_absolute()) {
+    if (diagnostic) *diagnostic = "selected path is not absolute";
+    return false;
+  }
+  if (writable) {
+    if (fs::is_directory(path, error) || fs::is_symlink(path, error)) {
+      if (diagnostic) *diagnostic = "save target must not be a directory or link";
+      return false;
+    }
+    error.clear();
+    const fs::path parent = fs::canonical(path.parent_path(), error);
+    if (error || !fs::is_directory(parent, error)) {
+      if (diagnostic) *diagnostic = "save target directory is unavailable";
+      return false;
+    }
+    path = parent / path.filename();
+  } else {
+    path = fs::canonical(path, error);
+    if (error || !fs::is_regular_file(path, error) ||
+        fs::file_size(path, error) > kUserFileLimit || error) {
+      if (diagnostic)
+        *diagnostic = "selected file is unavailable or exceeds the 8 MiB limit";
+      return false;
+    }
+  }
+
+  std::array<unsigned char, 16> random{};
+  if (RAND_bytes(random.data(), static_cast<int>(random.size())) != 1) {
+    if (diagnostic) *diagnostic = "could not create a secure file grant";
+    return false;
+  }
+  static constexpr char digits[] = "0123456789abcdef";
+  std::string generated = "ufg-";
+  generated.reserve(4 + random.size() * 2);
+  for (const unsigned char byte : random) {
+    generated.push_back(digits[byte >> 4]);
+    generated.push_back(digits[byte & 0x0f]);
+  }
+  {
+    std::lock_guard<std::mutex> lock(instance->state_mutex);
+    if (instance->user_file_grants.size() >= kUserFileGrantLimit) {
+      if (diagnostic) *diagnostic = "package has too many active file grants";
+      return false;
+    }
+    instance->user_file_grants.emplace(
+        generated, UserFileGrant{path, writable, false,
+                                 instance->executor.Generation()});
+  }
+  if (token) *token = generated;
+  return true;
+}
+
+std::int32_t RuntimeEngine::Impl::UserFileRead(
+    void* user_data, const char* grant_token,
+    std::size_t grant_token_length, std::uint8_t* value,
+    std::size_t value_capacity, std::size_t* value_length) {
+  auto* instance = static_cast<Instance*>(user_data);
+  const std::string token = Text(grant_token, grant_token_length);
+  if (!instance || !instance->owner || !value_length ||
+      !instance->owner->Permitted(*instance, "storage.user-selected") ||
+      !instance->enabled || instance->failed || value_capacity > kUserFileLimit) {
+    return -1;
+  }
+  fs::path path;
+  {
+    std::lock_guard<std::mutex> lock(instance->state_mutex);
+    const auto item = instance->user_file_grants.find(token);
+    if (item == instance->user_file_grants.end() || item->second.writable ||
+        item->second.consumed ||
+        item->second.generation != instance->executor.Generation()) {
+      return -2;
+    }
+    path = item->second.path;
+  }
+  bool okay = false;
+  const std::string contents = ReadSmallFile(path, kUserFileLimit, &okay);
+  if (!okay || contents.size() > value_capacity ||
+      (!value && !contents.empty())) {
+    return -3;
+  }
+  if (!contents.empty()) std::memcpy(value, contents.data(), contents.size());
+  *value_length = contents.size();
+  return 0;
+}
+
+std::int32_t RuntimeEngine::Impl::UserFileWrite(
+    void* user_data, const char* grant_token,
+    std::size_t grant_token_length, const std::uint8_t* value,
+    std::size_t value_length) {
+  auto* instance = static_cast<Instance*>(user_data);
+  const std::string token = Text(grant_token, grant_token_length);
+  if (!instance || !instance->owner || value_length > kUserFileLimit ||
+      (!value && value_length != 0) ||
+      !instance->owner->Permitted(*instance, "storage.user-selected") ||
+      !instance->enabled || instance->failed) {
+    return -1;
+  }
+  fs::path path;
+  {
+    std::lock_guard<std::mutex> lock(instance->state_mutex);
+    const auto item = instance->user_file_grants.find(token);
+    if (item == instance->user_file_grants.end() || !item->second.writable ||
+        item->second.consumed ||
+        item->second.generation != instance->executor.Generation()) {
+      return -2;
+    }
+    item->second.consumed = true;
+    path = item->second.path;
+  }
+  std::array<unsigned char, 8> suffix{};
+  if (RAND_bytes(suffix.data(), static_cast<int>(suffix.size())) != 1)
+    return -3;
+  std::string suffix_text;
+  static constexpr char digits[] = "0123456789abcdef";
+  for (const unsigned char byte : suffix) {
+    suffix_text.push_back(digits[byte >> 4]);
+    suffix_text.push_back(digits[byte & 0x0f]);
+  }
+  const fs::path temporary =
+      path.parent_path() / (path.filename().string() + ".ppm-" + suffix_text);
+  {
+    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+    if (!output) return -4;
+    output.write(reinterpret_cast<const char*>(value),
+                 static_cast<std::streamsize>(value_length));
+    output.flush();
+    if (!output) {
+      std::error_code ignored;
+      fs::remove(temporary, ignored);
+      return -4;
+    }
+  }
+  std::error_code error;
+  fs::permissions(temporary, fs::perms::owner_read | fs::perms::owner_write,
+                  fs::perm_options::replace, error);
+  error.clear();
+  fs::rename(temporary, path, error);
+  if (error) {
+    std::error_code ignored;
+    fs::remove(temporary, ignored);
+    return -5;
+  }
   return 0;
 }
 
@@ -657,6 +841,7 @@ bool RuntimeEngine::Impl::Start(Instance& instance,
     callbacks.clear_scene = ClearScene;
     callbacks.start_job = StartJob;
     callbacks.cancel_job = CancelJob;
+    callbacks.open_surface = OpenSurface;
     callbacks.open_environmental_viewer = OpenEnvironmentalViewer;
     callbacks.open_weather_routing = OpenWeatherRouting;
     callbacks.environment_sample_batch = EnvironmentSampleBatch;
@@ -665,6 +850,8 @@ bool RuntimeEngine::Impl::Start(Instance& instance,
     callbacks.charts_query_segments = ChartsQuerySegments;
     callbacks.network_get_to_private = NetworkGetToPrivate;
     callbacks.storage_private_read = StoragePrivateRead;
+    callbacks.user_file_read = UserFileRead;
+    callbacks.user_file_write = UserFileWrite;
     instance.runtime = ocpn_portable_runtime_create(
         instance.component_path.c_str(), &callbacks, error.data(), error.size());
     if (!instance.runtime ||
@@ -762,6 +949,7 @@ bool RuntimeEngine::Impl::Stop(Instance& instance, bool destroy,
   {
     std::lock_guard<std::mutex> state_lock(instance.state_mutex);
     instance.scenes.clear();
+    instance.user_file_grants.clear();
   }
   remove_actions(instance.id);
   if (destroy && instance.runtime) {
@@ -1062,6 +1250,7 @@ void RuntimeEngine::Impl::Fail(Instance& instance,
     std::lock_guard<std::mutex> state_lock(instance.state_mutex);
     instance.diagnostic = operation + ": " + diagnostic;
     instance.scenes.clear();
+    instance.user_file_grants.clear();
   }
   if (instance.runtime) {
     ocpn_portable_runtime_destroy(instance.runtime);
@@ -1264,6 +1453,13 @@ bool RuntimeEngine::HandleSurfaceEvent(
     const std::string& control_id, const std::string& value_json) {
   return impl_->HandleSurfaceEvent(package_id, surface_id, control_id,
                                    value_json);
+}
+
+bool RuntimeEngine::RegisterUserFileGrant(
+    const std::string& package_id, const std::string& path, bool writable,
+    std::string* token, std::string* diagnostic) {
+  return impl_->RegisterUserFileGrant(package_id, path, writable, token,
+                                      diagnostic);
 }
 
 bool RuntimeEngine::WaitForIdle(const std::string& package_id,

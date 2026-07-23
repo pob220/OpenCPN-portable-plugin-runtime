@@ -28,8 +28,10 @@ bool ReadJson(const wxString& path, wxJSONValue* value) {
 int main() {
   wxJSONValue routing;
   wxJSONValue environment;
+  wxJSONValue polars;
   CHECK(ReadJson(PPM_TEST_ROUTING_UI, &routing));
   CHECK(ReadJson(PPM_TEST_IGRIB_UI, &environment));
+  CHECK(ReadJson(PPM_TEST_IPOLARS_UI, &polars));
 
   ppm::DeclarativeSurface parsed;
   std::string diagnostic;
@@ -51,6 +53,15 @@ int main() {
   CHECK(parsed.id == "environment.viewer");
   CHECK(parsed.controls.size() == 15);
   CHECK(parsed.tabs.empty());
+
+  if (!ppm::ParseDeclarativeSurface(
+          polars, "polars.editor", &parsed, &diagnostic)) {
+    std::cerr << "iPolars surface: " << diagnostic << '\n';
+    return 1;
+  }
+  CHECK(parsed.tabs.size() == 3);
+  CHECK(parsed.controls.size() == 17);
+  CHECK(parsed.controls[12].type == "grid");
 
   wxJSONValue invalid = routing;
   invalid["controls"][1]["id"] = invalid["controls"][0]["id"];

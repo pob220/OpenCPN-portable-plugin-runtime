@@ -1,0 +1,30 @@
+{
+  "format_version": 1,
+  "id": "org.opencpn.ipolars",
+  "name": "iPolars",
+  "version": "0.1.0",
+  "description": "Portable polar and OpenCPN Weather Routing boat editor",
+  "component": "component/ipolars.wasm",
+  "runtime": ">=0.1.0 <0.2.0",
+  "portable_api": ">=0.1.0 <0.2.0",
+  "surfaces": {
+    "polars.editor": "ui/ipolars.ui.json"
+  },
+  "provides": [
+    {
+      "interface": "org.opencpn.vessel-performance.editor",
+      "version": "0.1.0"
+    }
+  ],
+  "permissions": [
+    "ui.commands",
+    "settings.read-write",
+    "storage.user-selected"
+  ],
+  "resources": [
+    "resources/ipolars.svg",
+    "ui/ipolars.ui.json"
+  ],
+  "licenses": ["GPL-2.0-or-later"],
+  "development": true
+}

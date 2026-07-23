@@ -96,6 +96,9 @@ class RuntimeEngine {
                           const std::string& surface_id,
                           const std::string& control_id,
                           const std::string& value_json);
+  bool RegisterUserFileGrant(const std::string& package_id,
+                             const std::string& path, bool writable,
+                             std::string* token, std::string* diagnostic);
   bool WaitForIdle(const std::string& package_id,
                    std::chrono::milliseconds timeout);
   void SetPositionFix(const PlugIn_Position_Fix_Ex& fix);

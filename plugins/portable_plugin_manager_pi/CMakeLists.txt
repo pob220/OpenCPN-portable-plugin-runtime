@@ -133,7 +133,8 @@ if(BUILD_TESTING)
     "${OPENCPN_SOURCE_DIR}/libs/wxJSON/include")
   target_compile_definitions(ppm_declarative_ui_test PRIVATE
     PPM_TEST_ROUTING_UI="${OPENCPN_SOURCE_DIR}/portable-plugins/iweather-routing/package/iweather-routing.ui.json"
-    PPM_TEST_IGRIB_UI="${OPENCPN_SOURCE_DIR}/portable-plugins/igrib/package/igrib-viewer.ui.json")
+    PPM_TEST_IGRIB_UI="${OPENCPN_SOURCE_DIR}/portable-plugins/igrib/package/igrib-viewer.ui.json"
+    PPM_TEST_IPOLARS_UI="${OPENCPN_SOURCE_DIR}/portable-plugins/ipolars/package/ui/ipolars.ui.json")
   target_link_libraries(ppm_declarative_ui_test PRIVATE
     ${wxWidgets_LIBRARIES}
     ocpn::wxjson)
@@ -252,6 +253,29 @@ if(BUILD_TESTING)
   add_custom_target(ppm_test_igrib_component
                     DEPENDS "${PPM_TEST_IGRIB_WASM}")
 
+  set(PPM_TEST_IPOLARS_TARGET_DIR
+      "${CMAKE_CURRENT_BINARY_DIR}/ppm-test-ipolars-target")
+  set(PPM_TEST_IPOLARS_WASM
+      "${PPM_TEST_IPOLARS_TARGET_DIR}/wasm32-wasip2/release/ipolars_portable_component.wasm")
+  file(GLOB_RECURSE PPM_TEST_IPOLARS_SOURCES CONFIGURE_DEPENDS
+    "${OPENCPN_SOURCE_DIR}/portable-plugins/ipolars/component/src/*.rs")
+  add_custom_command(
+    OUTPUT "${PPM_TEST_IPOLARS_WASM}"
+    COMMAND ${CMAKE_COMMAND} -E env
+            "CARGO_TARGET_DIR=${PPM_TEST_IPOLARS_TARGET_DIR}"
+            "${PPM_CARGO_EXECUTABLE}" build --locked --offline --release
+            --target wasm32-wasip2
+            --manifest-path
+            "${OPENCPN_SOURCE_DIR}/portable-plugins/ipolars/component/Cargo.toml"
+    DEPENDS ${PPM_TEST_IPOLARS_SOURCES}
+            "${OPENCPN_SOURCE_DIR}/portable-plugins/ipolars/component/Cargo.toml"
+            "${OPENCPN_SOURCE_DIR}/portable-plugins/ipolars/component/Cargo.lock"
+            "${OPENCPN_SOURCE_DIR}/portable-runtime/wit/opencpn-portable.wit"
+    COMMENT "Building the iPolars lifecycle test component"
+    VERBATIM)
+  add_custom_target(ppm_test_ipolars_component
+                    DEPENDS "${PPM_TEST_IPOLARS_WASM}")
+
   add_executable(ppm_runtime_engine_test
     src/declarative_ui.cpp
     src/job_scheduler.cpp
@@ -272,6 +296,7 @@ if(BUILD_TESTING)
   target_link_libraries(ppm_runtime_engine_test PRIVATE
     ${wxWidgets_LIBRARIES}
     ocpn::wxjson
+    OpenSSL::Crypto
     ppm_runtime_bridge
     Threads::Threads
     ${CMAKE_DL_LIBS})
@@ -285,4 +310,39 @@ if(BUILD_TESTING)
       -Wall -Wextra -Wpedantic)
   endif()
   add_test(NAME ppm_runtime_engine COMMAND ppm_runtime_engine_test)
+
+  add_executable(ppm_ipolars_runtime_test
+    src/declarative_ui.cpp
+    src/job_scheduler.cpp
+    src/permission_store.cpp
+    src/runtime_engine.cpp
+    src/serial_executor.cpp
+    tests/ipolars_runtime_test.cpp
+  )
+  add_dependencies(ppm_ipolars_runtime_test ppm_test_ipolars_component)
+  target_include_directories(ppm_ipolars_runtime_test PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include"
+    "${OPENCPN_SOURCE_DIR}/include"
+    "${OPENCPN_SOURCE_DIR}/libs/wxJSON/include"
+    "${PPM_RUNTIME_SOURCE_DIR}/bridge/include")
+  target_compile_definitions(ppm_ipolars_runtime_test PRIVATE
+    PPM_TEST_IPOLARS_WASM="${PPM_TEST_IPOLARS_WASM}"
+    PPM_TEST_IPOLARS_UI="${OPENCPN_SOURCE_DIR}/portable-plugins/ipolars/package/ui/ipolars.ui.json")
+  target_link_libraries(ppm_ipolars_runtime_test PRIVATE
+    ${wxWidgets_LIBRARIES}
+    ocpn::wxjson
+    OpenSSL::Crypto
+    ppm_runtime_bridge
+    Threads::Threads
+    ${CMAKE_DL_LIBS})
+  if(UNIX AND NOT APPLE)
+    target_link_libraries(ppm_ipolars_runtime_test PRIVATE m)
+  endif()
+  if(MSVC)
+    target_compile_options(ppm_ipolars_runtime_test PRIVATE /W4)
+  else()
+    target_compile_options(ppm_ipolars_runtime_test PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
+  add_test(NAME ppm_ipolars_runtime COMMAND ppm_ipolars_runtime_test)
 endif()

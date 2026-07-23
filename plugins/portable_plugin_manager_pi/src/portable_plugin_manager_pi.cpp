@@ -367,10 +367,42 @@ void PortablePluginManagerPi::OpenPackageSurface(
   auto dialog = std::make_unique<SurfaceDialog>(
       nullptr, surface,
       [this, package_id, surface_id = surface.id](
-          const std::string& control_id, const std::string& value_json) {
+          const std::string& control_id, const std::string& value_json,
+          const std::vector<SurfaceDialog::UserFileSelection>& selections) {
+        std::string delivered_value = value_json;
+        if (!selections.empty()) {
+          std::vector<std::string> tokens;
+          tokens.reserve(selections.size());
+          for (const auto& selection : selections) {
+            std::string token;
+            std::string diagnostic;
+            if (!runtime_engine_ ||
+                !runtime_engine_->RegisterUserFileGrant(
+                    package_id, selection.path, selection.writable, &token,
+                    &diagnostic)) {
+              ApplySurfaceResponse(package_id, surface_id, control_id, {},
+                                   diagnostic.empty()
+                                       ? "Could not grant access to the "
+                                         "selected file."
+                                       : diagnostic);
+              return;
+            }
+            tokens.push_back(std::move(token));
+          }
+          if (tokens.size() == 1) {
+            delivered_value = "\"" + tokens.front() + "\"";
+          } else {
+            delivered_value = "[";
+            for (std::size_t index = 0; index < tokens.size(); ++index) {
+              if (index != 0) delivered_value += ",";
+              delivered_value += "\"" + tokens[index] + "\"";
+            }
+            delivered_value += "]";
+          }
+        }
         if (!runtime_engine_ ||
             !runtime_engine_->HandleSurfaceEvent(
-                package_id, surface_id, control_id, value_json)) {
+                package_id, surface_id, control_id, delivered_value)) {
           ApplySurfaceResponse(package_id, surface_id, control_id, {},
                                "Package is disabled, busy, or unavailable.");
         }
@@ -378,6 +410,9 @@ void PortablePluginManagerPi::OpenPackageSurface(
   dialog->Show();
   dialog->Raise();
   surface_dialogs_.emplace(key, std::move(dialog));
+  if (runtime_engine_)
+    runtime_engine_->HandleSurfaceEvent(package_id, surface.id,
+                                        "surface-opened", "null");
   wxLogMessage("PPM event=surface-opened package=%s surface=%s", package_id,
                surface.id);
 }
