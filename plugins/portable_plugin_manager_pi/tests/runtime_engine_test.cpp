@@ -6,6 +6,7 @@
 #include <iostream>
 #include <set>
 #include <string>
+#include <thread>
 
 #include <wx/init.h>
 
@@ -162,21 +163,36 @@ int main() {
     CHECK(engine.WaitForIdle(package_id, std::chrono::seconds(2)));
     CHECK(opened_surfaces == 1);
     CHECK(opened_surface_valid);
-    CHECK(Snapshot(engine.Packages(), package_id)->state == "Failed");
-    CHECK(engine.Enable(package_id, &diagnostic));
     CHECK(engine.IsEnabled(package_id));
+    CHECK(Snapshot(engine.Packages(), package_id)->state == "Enabled");
+    CHECK(engine.Scenes().size() == 1);
 
     CHECK(engine.Disable(package_id, &diagnostic));
     CHECK(!engine.IsEnabled(package_id));
     const auto disabled = engine.Packages();
     CHECK(Snapshot(disabled, package_id)->state == "Disabled");
-    CHECK(Snapshot(disabled, package_id)->enable_count == 2);
+    CHECK(Snapshot(disabled, package_id)->enable_count == 1);
     CHECK(Snapshot(disabled, package_id)->disable_count == 1);
     CHECK(actions.empty());
 
     CHECK(engine.Enable(package_id, &diagnostic));
     CHECK(engine.IsEnabled(package_id));
     CHECK(actions.size() == 3);
+
+    CHECK(engine.HandleAction(package_id, "igrib.toggle"));
+    bool running_job_seen = false;
+    for (int attempt = 0; attempt < 100; ++attempt) {
+      if (Snapshot(engine.Packages(), package_id)->job_count != 0) {
+        running_job_seen = true;
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    CHECK(running_job_seen);
+    CHECK(engine.Disable(package_id, &diagnostic));
+    CHECK(Snapshot(engine.Packages(), package_id)->job_count == 0);
+    CHECK(engine.Enable(package_id, &diagnostic));
+    CHECK(engine.IsEnabled(package_id));
 
     CHECK(engine.Unload(package_id, &diagnostic));
     CHECK(Snapshot(engine.Packages(), package_id)->state == "Unloaded");

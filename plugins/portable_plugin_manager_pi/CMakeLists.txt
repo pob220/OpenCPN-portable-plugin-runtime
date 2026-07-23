@@ -63,6 +63,7 @@ add_subdirectory("${OPENCPN_SOURCE_DIR}/libs/wxJSON"
 add_library(portable_plugin_manager_pi MODULE
   src/action_registry.cpp
   src/declarative_ui.cpp
+  src/job_scheduler.cpp
   src/manager_dialog.cpp
   src/package_store.cpp
   src/permission_store.cpp
@@ -143,6 +144,21 @@ if(BUILD_TESTING)
       -Wall -Wextra -Wpedantic)
   endif()
   add_test(NAME ppm_declarative_ui COMMAND ppm_declarative_ui_test)
+
+  add_executable(ppm_job_scheduler_test
+    src/job_scheduler.cpp
+    tests/job_scheduler_test.cpp
+  )
+  target_include_directories(ppm_job_scheduler_test PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include")
+  target_link_libraries(ppm_job_scheduler_test PRIVATE Threads::Threads)
+  if(MSVC)
+    target_compile_options(ppm_job_scheduler_test PRIVATE /W4)
+  else()
+    target_compile_options(ppm_job_scheduler_test PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
+  add_test(NAME ppm_job_scheduler COMMAND ppm_job_scheduler_test)
 
   add_executable(ppm_serial_executor_test
     src/serial_executor.cpp
@@ -238,6 +254,7 @@ if(BUILD_TESTING)
 
   add_executable(ppm_runtime_engine_test
     src/declarative_ui.cpp
+    src/job_scheduler.cpp
     src/permission_store.cpp
     src/runtime_engine.cpp
     src/serial_executor.cpp

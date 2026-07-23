@@ -28,6 +28,7 @@
 #include "ocpn_plugin.h"
 #include "ocpn_portable_runtime.h"
 #include "declarative_ui.h"
+#include "job_scheduler.h"
 #include "permission_store.h"
 #include "serial_executor.h"
 
@@ -227,11 +228,11 @@ class RuntimeEngine::Impl {
   static std::int32_t ClearScene(void* user_data, const char* scene_id,
                                  std::size_t scene_id_length);
   static std::int32_t Unsupported(void*) { return -1; }
-  static std::int32_t StartJob(void*, const char*, std::size_t,
-                               std::uint32_t) {
-    return -1;
-  }
-  static std::int32_t CancelJob(void*, const char*, std::size_t) { return -1; }
+  static std::int32_t StartJob(void* user_data, const char* job_id,
+                               std::size_t job_id_length,
+                               std::uint32_t work_units);
+  static std::int32_t CancelJob(void* user_data, const char* job_id,
+                                std::size_t job_id_length);
   static std::int32_t OpenEnvironmentalViewer(void* user_data) {
     return OpenNamedSurface(user_data, "environment.viewer");
   }
@@ -263,6 +264,7 @@ class RuntimeEngine::Impl {
       void* user_data, const char* private_name,
       std::size_t private_name_length, std::uint8_t* value,
       std::size_t value_capacity, std::size_t* value_length);
+  void DeliverJobEvent(Instance* instance, const JobEvent& event);
 
   fs::path storage_root;
   RegisterAction register_action;
@@ -271,6 +273,7 @@ class RuntimeEngine::Impl {
   UiDispatch ui_dispatch;
   SurfaceOpened surface_opened;
   SurfaceResponse surface_response;
+  JobScheduler jobs;
   std::vector<std::unique_ptr<Instance>> instances;
   bool stopped = false;
   mutable std::mutex position_mutex;
@@ -282,6 +285,74 @@ class RuntimeEngine::Impl {
   bool has_cog = false;
   bool has_sog = false;
 };
+
+std::int32_t RuntimeEngine::Impl::StartJob(
+    void* user_data, const char* job_id, std::size_t job_id_length,
+    std::uint32_t work_units) {
+  auto* instance = static_cast<Instance*>(user_data);
+  const std::string id = Text(job_id, job_id_length);
+  if (!instance || !instance->owner || !instance->enabled ||
+      instance->failed || !IsSafeName(id) ||
+      !instance->owner->Permitted(*instance, "jobs.compute")) {
+    return -1;
+  }
+  const std::uint64_t generation = instance->executor.Generation();
+  std::string diagnostic;
+  return instance->owner->jobs.Start(
+             instance->id, id, generation, work_units,
+             [owner = instance->owner, instance](const JobEvent& event) {
+               owner->DeliverJobEvent(instance, event);
+             },
+             &diagnostic)
+             ? 0
+             : -2;
+}
+
+std::int32_t RuntimeEngine::Impl::CancelJob(
+    void* user_data, const char* job_id, std::size_t job_id_length) {
+  auto* instance = static_cast<Instance*>(user_data);
+  const std::string id = Text(job_id, job_id_length);
+  if (!instance || !instance->owner || !IsSafeName(id) ||
+      !instance->owner->Permitted(*instance, "jobs.compute")) {
+    return -1;
+  }
+  return instance->owner->jobs.Cancel(
+             instance->id, id, instance->executor.Generation())
+             ? 0
+             : -2;
+}
+
+void RuntimeEngine::Impl::DeliverJobEvent(Instance* instance,
+                                          const JobEvent& event) {
+  if (!instance || event.owner != instance->id ||
+      event.generation != instance->executor.Generation()) {
+    return;
+  }
+  instance->executor.Post(
+      event.generation, [instance, event](std::uint64_t task_generation) {
+        if (task_generation != instance->executor.Generation() ||
+            !instance->enabled || instance->failed) {
+          return;
+        }
+        std::lock_guard<std::mutex> lock(instance->runtime_mutex);
+        if (task_generation != instance->executor.Generation() ||
+            !instance->enabled || instance->failed || !instance->runtime) {
+          return;
+        }
+        std::array<char, kErrorCapacity> error{};
+        if (ocpn_portable_runtime_on_job_event(
+                instance->runtime, event.id.data(), event.id.size(),
+                static_cast<std::uint32_t>(event.kind), event.progress,
+                event.message.data(), event.message.size(), error.data(),
+                error.size()) != 0) {
+          instance->owner->Fail(
+              *instance, "job event " + event.id,
+              error[0] ? error.data() : "portable job event failed");
+        } else {
+          instance->owner->PublishStateChanged();
+        }
+      });
+}
 
 std::int32_t RuntimeEngine::Impl::OpenNamedSurface(
     void* user_data, const std::string& surface_id) {
@@ -648,6 +719,18 @@ bool RuntimeEngine::Impl::Stop(Instance& instance, bool destroy,
                                std::string* diagnostic) {
   const bool was_enabled = instance.enabled.exchange(false);
   instance.executor.AdvanceGeneration();
+  jobs.CancelOwner(instance.id);
+  if (!jobs.WaitOwnerIdle(instance.id, std::chrono::seconds(2))) {
+    const std::string message =
+        "portable jobs did not reach their two-second cancellation barrier";
+    {
+      std::lock_guard<std::mutex> state_lock(instance.state_mutex);
+      instance.diagnostic = message;
+    }
+    remove_actions(instance.id);
+    if (diagnostic) *diagnostic = message;
+    return false;
+  }
   if (!instance.executor.WaitIdle(std::chrono::seconds(6))) {
     const std::string message =
         "portable component did not reach its six-second action shutdown "
@@ -973,6 +1056,8 @@ void RuntimeEngine::Impl::Fail(Instance& instance,
                                const std::string& diagnostic) {
   instance.failed = true;
   instance.enabled = false;
+  instance.executor.AdvanceGeneration();
+  jobs.CancelOwner(instance.id);
   {
     std::lock_guard<std::mutex> state_lock(instance.state_mutex);
     instance.diagnostic = operation + ": " + diagnostic;
@@ -1083,7 +1168,14 @@ bool RuntimeEngine::Impl::HandleSurfaceEvent(
 bool RuntimeEngine::Impl::WaitForIdle(const std::string& package_id,
                                       std::chrono::milliseconds timeout) {
   Instance* instance = Find(package_id);
-  return instance && instance->executor.WaitIdle(timeout);
+  if (!instance) return false;
+  const auto started = std::chrono::steady_clock::now();
+  if (!jobs.WaitOwnerIdle(package_id, timeout)) return false;
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - started);
+  return elapsed >= timeout
+             ? instance->executor.WaitIdle(std::chrono::milliseconds(0))
+             : instance->executor.WaitIdle(timeout - elapsed);
 }
 
 void RuntimeEngine::Impl::Shutdown() {
@@ -1093,6 +1185,7 @@ void RuntimeEngine::Impl::Shutdown() {
     std::string ignored;
     Stop(*instance, true, &ignored);
   }
+  jobs.Shutdown();
   state_changed();
 }
 
@@ -1195,6 +1288,7 @@ void RuntimeEngine::SetPositionFix(const PlugIn_Position_Fix_Ex& fix) {
 std::vector<PackageSnapshot> RuntimeEngine::Packages() const {
   std::vector<PackageSnapshot> result;
   result.reserve(impl_->instances.size());
+  const auto jobs = impl_->jobs.Snapshots();
   for (const auto& instance : impl_->instances) {
     std::string diagnostic;
     {
@@ -1214,6 +1308,9 @@ std::vector<PackageSnapshot> RuntimeEngine::Packages() const {
          instance->enable_count.load(),
          instance->disable_count.load()});
     result.back().surface_count = instance->surfaces.size();
+    result.back().job_count = static_cast<std::size_t>(std::count_if(
+        jobs.begin(), jobs.end(),
+        [&](const auto& job) { return job.owner == instance->id; }));
   }
   return result;
 }
