@@ -438,6 +438,64 @@ int main() {
     CHECK(!services.Disable("org.opencpn.igrib", &diagnostic));
     CHECK(diagnostic.find("disable the dependent package first") !=
           std::string::npos);
+
+    std::atomic_bool route_completed{false};
+    std::atomic_bool route_succeeded{true};
+    std::atomic_bool route_id_valid{true};
+    std::mutex route_diagnostic_mutex;
+    std::string route_diagnostic;
+    services.SetRoutingCompletedCallback(
+        [&](const std::string& id, bool succeeded, ppm::RoutingOutcome,
+            const std::string& failure) {
+          route_id_valid = id == "org.opencpn.iweather-routing";
+          route_succeeded = succeeded;
+          {
+            std::lock_guard<std::mutex> lock(route_diagnostic_mutex);
+            route_diagnostic = failure;
+          }
+          route_completed = true;
+        });
+    ppm::RoutingRequest request;
+    request.parameters.start_latitude = 50.0;
+    request.parameters.start_longitude = -4.0;
+    request.parameters.destination_latitude = 50.05;
+    request.parameters.destination_longitude = -3.95;
+    request.parameters.departure_unix_time = 1780000000;
+    request.parameters.time_step_seconds = 3600;
+    request.parameters.heading_step_degrees = 15;
+    request.parameters.refined_heading_step_degrees = 5;
+    request.parameters.adaptive_headings = 1;
+    request.parameters.spatial_cell_nautical_miles = 3.0;
+    request.parameters.labels_per_cell = 2;
+    request.parameters.max_hours = 24;
+    request.parameters.max_states = 10'000;
+    request.parameters.min_true_wind_angle_degrees = 40.0;
+    request.parameters.max_true_wind_angle_degrees = 160.0;
+    request.parameters.maximum_latitude_degrees = 89.0;
+    request.parameters.upwind_efficiency = 1.0;
+    request.parameters.downwind_efficiency = 1.0;
+    request.parameters.maximum_search_angle_degrees = 120.0;
+    request.parameters.destination_tolerance_nm = 1.0;
+    ppm::RoutingPolar polar;
+    polar.identity = "Runtime service test";
+    polar.true_wind_speeds_knots = {0.0, 10.0, 20.0, 40.0};
+    polar.true_wind_angles_degrees = {0.0, 40.0, 90.0, 160.0, 180.0};
+    polar.boat_speeds_knots = {
+        0.0, 0.0,  0.0,  0.0,  0.0, 0.0, 3.86, 5.47, 3.92, 3.76,
+        0.0, 3.98, 6.18, 5.30, 4.90, 0.0, 2.33, 3.99, 3.60, 3.33};
+    request.polars.push_back(std::move(polar));
+    CHECK(services.StartRoute("org.opencpn.iweather-routing",
+                              std::move(request), &diagnostic));
+    CHECK(services.WaitForRoute("org.opencpn.iweather-routing",
+                                std::chrono::seconds(5)));
+    CHECK(route_completed);
+    CHECK(route_id_valid);
+    CHECK(!route_succeeded);
+    {
+      std::lock_guard<std::mutex> lock(route_diagnostic_mutex);
+      CHECK(!route_diagnostic.empty());
+    }
+
     CHECK(services.Disable("org.opencpn.iweather-routing", &diagnostic));
     CHECK(services.Disable("org.opencpn.igrib", &diagnostic));
     services.Shutdown();

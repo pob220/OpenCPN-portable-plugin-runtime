@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "declarative_ui.h"
+#include "routing_service.h"
 
 struct PlugIn_Position_Fix_Ex;
 
@@ -67,6 +68,12 @@ public:
   using SurfaceResponse = std::function<void(
       const std::string&, const std::string&, const std::string&,
       const std::string&, const std::string&)>;
+  using RoutingProgress =
+      std::function<void(const std::string&, std::uint8_t,
+                         const std::string&)>;
+  using RoutingCompleted =
+      std::function<void(const std::string&, bool, RoutingOutcome,
+                         const std::string&)>;
 
   RuntimeEngine(std::string storage_root, RegisterAction register_action,
                 RemoveActions remove_actions, StateChanged state_changed,
@@ -79,6 +86,8 @@ public:
   bool LoadInstalled(bool developer_mode);
   void SetSurfaceOpenedCallback(SurfaceOpened callback);
   void SetSurfaceResponseCallback(SurfaceResponse callback);
+  void SetRoutingProgressCallback(RoutingProgress callback);
+  void SetRoutingCompletedCallback(RoutingCompleted callback);
   bool RefreshPackage(const std::string& package_id, bool developer_mode,
                       std::string* diagnostic);
   bool Enable(const std::string& package_id, std::string* diagnostic);
@@ -104,6 +113,11 @@ public:
   bool SelectEnvironmentDataset(const std::string& package_id,
                                 const std::vector<std::string>& selected_paths);
   std::string EnvironmentSummary(const std::string& package_id) const;
+  bool StartRoute(const std::string& package_id, RoutingRequest request,
+                  std::string* diagnostic);
+  bool CancelRoute(const std::string& package_id);
+  bool WaitForRoute(const std::string& package_id,
+                    std::chrono::milliseconds timeout);
   bool WaitForIdle(const std::string& package_id,
                    std::chrono::milliseconds timeout);
   void SetPositionFix(const PlugIn_Position_Fix_Ex& fix);

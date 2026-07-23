@@ -14,6 +14,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -51,6 +52,12 @@ constexpr std::size_t kUserFileLimit = 8 * 1024 * 1024;
 constexpr std::size_t kUserFileGrantLimit = 32;
 constexpr std::size_t kSurfaceDocumentLimit = 1024 * 1024;
 constexpr std::size_t kSurfaceStateLimit = 64 * 1024;
+constexpr std::size_t kRoutePointLimit = 20'000;
+constexpr std::size_t kRouteInspectionPointLimit = 200'000;
+constexpr std::size_t kRouteInspectionLineLimit = 10'000;
+constexpr std::size_t kRoutePolarLimit = 16;
+constexpr std::size_t kRoutePolarAxisLimit = 512;
+constexpr std::size_t kRoutePolarCellLimit = 256 * 1024;
 
 std::string Text(const char* value, std::size_t length) {
   return value && length ? std::string(value, length) : std::string();
@@ -126,6 +133,11 @@ public:
   };
 
   struct Instance {
+    ~Instance() {
+      routing_cancelled = true;
+      if (routing_worker.joinable()) routing_worker.join();
+    }
+
     Impl* owner = nullptr;
     std::string id;
     std::string name;
@@ -146,6 +158,11 @@ public:
     std::atomic_bool failed{false};
     std::atomic_uint64_t enable_count{0};
     std::atomic_uint64_t disable_count{0};
+    std::atomic_bool routing_cancelled{false};
+    std::atomic_bool routing_running{false};
+    mutable std::mutex routing_mutex;
+    std::condition_variable routing_changed;
+    std::thread routing_worker;
     bool loadable = false;
     std::string diagnostic;
     std::vector<RuntimeAction> registered_actions;
@@ -172,6 +189,12 @@ public:
   void SetSurfaceResponseCallback(SurfaceResponse callback) {
     surface_response = std::move(callback);
   }
+  void SetRoutingProgressCallback(RoutingProgress callback) {
+    routing_progress = std::move(callback);
+  }
+  void SetRoutingCompletedCallback(RoutingCompleted callback) {
+    routing_completed = std::move(callback);
+  }
   bool RefreshPackage(const std::string& package_id, bool developer_mode,
                       std::string* diagnostic);
   bool Enable(const std::string& package_id, std::string* diagnostic);
@@ -197,6 +220,11 @@ public:
   bool SelectEnvironmentDataset(const std::string& package_id,
                                 const std::vector<std::string>& selected_paths);
   std::string EnvironmentSummary(const std::string& package_id) const;
+  bool StartRoute(const std::string& package_id, RoutingRequest request,
+                  std::string* diagnostic);
+  bool CancelRoute(const std::string& package_id);
+  bool WaitForRoute(const std::string& package_id,
+                    std::chrono::milliseconds timeout);
   bool WaitForIdle(const std::string& package_id,
                    std::chrono::milliseconds timeout);
   void DeliverNavigationSentence(const std::string& sentence);
@@ -317,8 +345,10 @@ public:
       void* user_data, const ocpn_portable_environment_sample_request* requests,
       std::size_t request_count, ocpn_portable_environment_sample* results,
       std::size_t result_count, char* error, std::size_t error_capacity);
-  static void RoutingProgress(void*, std::uint8_t, const char*, std::size_t) {}
-  static std::uint8_t RoutingCancelled(void*) { return 0; }
+  static void RoutingProgressCallback(void* user_data, std::uint8_t percent,
+                                      const char* message,
+                                      std::size_t message_length);
+  static std::uint8_t RoutingCancelled(void* user_data);
   static std::int32_t ChartsQuerySegments(
       void* user_data, const ocpn_portable_geo_segment* segments,
       std::size_t segment_count, ocpn_portable_chart_segment_result* results,
@@ -352,6 +382,8 @@ public:
   UiDispatch ui_dispatch;
   SurfaceOpened surface_opened;
   SurfaceResponse surface_response;
+  RoutingProgress routing_progress;
+  RoutingCompleted routing_completed;
   JobScheduler jobs;
   std::vector<std::unique_ptr<Instance>> instances;
   bool stopped = false;
@@ -584,6 +616,305 @@ std::string RuntimeEngine::Impl::EnvironmentSummary(
   return instance && instance->environment_provider
              ? instance->environment_provider->Summary()
              : "No environmental provider is loaded";
+}
+
+bool RuntimeEngine::Impl::StartRoute(const std::string& package_id,
+                                     RoutingRequest request,
+                                     std::string* diagnostic) {
+  Instance* instance = Find(package_id);
+  if (!instance || !instance->enabled || instance->failed ||
+      !instance->runtime) {
+    if (diagnostic) *diagnostic = "routing package is not enabled";
+    return false;
+  }
+  if (!Permitted(*instance, "weather-routing.compute")) {
+    if (diagnostic)
+      *diagnostic = "weather-routing.compute permission is not granted";
+    return false;
+  }
+  if (request.polars.empty() || request.polars.size() > kRoutePolarLimit ||
+      !std::isfinite(request.parameters.start_latitude) ||
+      !std::isfinite(request.parameters.start_longitude) ||
+      !std::isfinite(request.parameters.destination_latitude) ||
+      !std::isfinite(request.parameters.destination_longitude) ||
+      std::abs(request.parameters.start_latitude) > 90.0 ||
+      std::abs(request.parameters.destination_latitude) > 90.0 ||
+      std::abs(request.parameters.start_longitude) > 180.0 ||
+      std::abs(request.parameters.destination_longitude) > 180.0) {
+    if (diagnostic) *diagnostic = "invalid route endpoints or polar count";
+    return false;
+  }
+  for (const auto& polar : request.polars) {
+    const std::size_t wind_count = polar.true_wind_speeds_knots.size();
+    const std::size_t angle_count = polar.true_wind_angles_degrees.size();
+    if (polar.identity.empty() || polar.identity.size() > 1024 ||
+        wind_count < 2 || angle_count < 2 ||
+        wind_count > kRoutePolarAxisLimit ||
+        angle_count > kRoutePolarAxisLimit ||
+        wind_count > kRoutePolarCellLimit / angle_count ||
+        polar.boat_speeds_knots.size() != wind_count * angle_count ||
+        !std::all_of(polar.true_wind_speeds_knots.begin(),
+                     polar.true_wind_speeds_knots.end(),
+                     [](double value) {
+                       return std::isfinite(value) && value >= 0.0 &&
+                              value <= 250.0;
+                     }) ||
+        !std::all_of(polar.true_wind_angles_degrees.begin(),
+                     polar.true_wind_angles_degrees.end(),
+                     [](double value) {
+                       return std::isfinite(value) && value >= 0.0 &&
+                              value <= 180.0;
+                     }) ||
+        !std::all_of(polar.boat_speeds_knots.begin(),
+                     polar.boat_speeds_knots.end(), [](double value) {
+                       return std::isfinite(value) && value >= 0.0 &&
+                              value <= 250.0;
+                     }) ||
+        std::adjacent_find(polar.true_wind_speeds_knots.begin(),
+                           polar.true_wind_speeds_knots.end(),
+                           [](double left, double right) {
+                             return right <= left;
+                           }) != polar.true_wind_speeds_knots.end() ||
+        std::adjacent_find(polar.true_wind_angles_degrees.begin(),
+                           polar.true_wind_angles_degrees.end(),
+                           [](double left, double right) {
+                             return right <= left;
+                           }) != polar.true_wind_angles_degrees.end()) {
+      if (diagnostic) *diagnostic = "invalid or unbounded polar grid";
+      return false;
+    }
+  }
+
+  std::thread previous_worker;
+  {
+    std::lock_guard<std::mutex> route_lock(instance->routing_mutex);
+    if (instance->routing_running) {
+      if (diagnostic) *diagnostic = "a route calculation is already running";
+      return false;
+    }
+    if (instance->routing_worker.joinable())
+      previous_worker = std::move(instance->routing_worker);
+  }
+  if (previous_worker.joinable()) previous_worker.join();
+
+  std::array<char, kErrorCapacity> clone_error{};
+  ocpn_portable_runtime* replica = nullptr;
+  {
+    std::lock_guard<std::mutex> runtime_lock(instance->runtime_mutex);
+    if (instance->enabled && !instance->failed && instance->runtime) {
+      replica = ocpn_portable_runtime_clone_compute(
+          instance->runtime, clone_error.data(), clone_error.size());
+    }
+  }
+  if (!replica) {
+    if (diagnostic) {
+      *diagnostic = clone_error[0] ? clone_error.data()
+                                   : "could not create routing worker";
+    }
+    return false;
+  }
+
+  {
+    std::lock_guard<std::mutex> route_lock(instance->routing_mutex);
+    if (!instance->enabled || instance->failed || instance->routing_running) {
+      ocpn_portable_runtime_destroy(replica);
+      if (diagnostic) *diagnostic = "routing package changed state";
+      return false;
+    }
+    instance->routing_cancelled = false;
+    instance->routing_running = true;
+    try {
+      instance->routing_worker = std::thread([instance, replica,
+                                              request = std::move(
+                                                  request)]() mutable {
+      std::unique_ptr<ocpn_portable_runtime,
+                      decltype(&ocpn_portable_runtime_destroy)>
+          worker_runtime(replica, ocpn_portable_runtime_destroy);
+      RoutingOutcome outcome;
+      std::string failure;
+      bool success = false;
+      try {
+        std::vector<ocpn_portable_polar_grid> polar_views;
+        polar_views.reserve(request.polars.size());
+        for (const auto& polar : request.polars) {
+          polar_views.push_back({polar.identity.data(), polar.identity.size(),
+                                 polar.true_wind_speeds_knots.data(),
+                                 polar.true_wind_speeds_knots.size(),
+                                 polar.true_wind_angles_degrees.data(),
+                                 polar.true_wind_angles_degrees.size(),
+                                 polar.boat_speeds_knots.data(),
+                                 polar.boat_speeds_knots.size()});
+        }
+        request.parameters.polars = polar_views.data();
+        request.parameters.polar_count = polar_views.size();
+
+        std::vector<ocpn_portable_route_point> points(kRoutePointLimit);
+        std::vector<ocpn_portable_route_environment_point> environment(
+            kRoutePointLimit);
+        std::vector<ocpn_portable_route_point> isochrone_points(
+            kRouteInspectionPointLimit);
+        std::vector<ocpn_portable_route_line> isochrones(
+            kRouteInspectionLineLimit);
+        std::vector<ocpn_portable_route_point> trace_points(
+            kRouteInspectionPointLimit);
+        std::vector<ocpn_portable_route_line> traces(kRouteInspectionLineLimit);
+        std::array<char, kErrorCapacity> error{};
+        std::array<char, kErrorCapacity> result_diagnostic{};
+        ocpn_portable_route_result result{};
+        result.points = points.data();
+        result.point_capacity = points.size();
+        result.isochrone_points = isochrone_points.data();
+        result.isochrone_point_capacity = isochrone_points.size();
+        result.isochrones = isochrones.data();
+        result.isochrone_capacity = isochrones.size();
+        result.trace_points = trace_points.data();
+        result.trace_point_capacity = trace_points.size();
+        result.traces = traces.data();
+        result.trace_capacity = traces.size();
+        result.route_environment = environment.data();
+        result.route_environment_capacity = environment.size();
+        result.diagnostic = result_diagnostic.data();
+        result.diagnostic_capacity = result_diagnostic.size();
+
+        const int status = ocpn_portable_runtime_calculate_route(
+            worker_runtime.get(), &request.parameters, &result, error.data(),
+            error.size());
+        worker_runtime.reset();
+
+        const bool bounded =
+            result.point_count <= points.size() &&
+            result.route_environment_count <= environment.size() &&
+            result.isochrone_point_count <= isochrone_points.size() &&
+            result.isochrone_count <= isochrones.size() &&
+            result.trace_point_count <= trace_points.size() &&
+            result.trace_count <= traces.size() &&
+            result.diagnostic_len < result_diagnostic.size();
+        auto valid_lines = [](const auto& lines, std::size_t line_count,
+                              std::size_t point_count) {
+          for (std::size_t index = 0; index < line_count; ++index) {
+            if (lines[index].point_offset > point_count ||
+                lines[index].point_count >
+                    point_count - lines[index].point_offset) {
+              return false;
+            }
+          }
+          return true;
+        };
+        const bool valid_spans =
+            bounded &&
+            valid_lines(isochrones, result.isochrone_count,
+                        result.isochrone_point_count) &&
+            valid_lines(traces, result.trace_count, result.trace_point_count);
+        success = status == 0 && bounded && valid_spans;
+        if (!bounded || !valid_spans) {
+          failure =
+              "routing component returned an invalid or oversized "
+              "result";
+        } else {
+          outcome.points.assign(points.begin(),
+                                points.begin() + result.point_count);
+          outcome.route_environment.assign(
+              environment.begin(),
+              environment.begin() + result.route_environment_count);
+          auto copy_lines = [](const auto& source_points,
+                               const auto& source_lines, std::size_t line_count,
+                               auto* destination) {
+            destination->reserve(line_count);
+            for (std::size_t index = 0; index < line_count; ++index) {
+              const auto& line = source_lines[index];
+              RoutingInspectionLine copied;
+              copied.unix_time = line.unix_time;
+              copied.points.assign(
+                  source_points.begin() + line.point_offset,
+                  source_points.begin() + line.point_offset + line.point_count);
+              destination->push_back(std::move(copied));
+            }
+          };
+          copy_lines(isochrone_points, isochrones, result.isochrone_count,
+                     &outcome.isochrones);
+          copy_lines(trace_points, traces, result.trace_count, &outcome.traces);
+          outcome.diagnostic.assign(result_diagnostic.data(),
+                                    result.diagnostic_len);
+          outcome.distance_nautical_miles = result.distance_nautical_miles;
+          outcome.duration_seconds = result.duration_seconds;
+          outcome.states_examined = result.states_examined;
+          outcome.average_speed_knots = result.average_speed_knots;
+          outcome.maximum_speed_knots = result.maximum_speed_knots;
+          outcome.average_sog_knots = result.average_sog_knots;
+          outcome.maximum_sog_knots = result.maximum_sog_knots;
+          outcome.average_wind_knots = result.average_wind_knots;
+          outcome.maximum_wind_knots = result.maximum_wind_knots;
+          outcome.average_current_knots = result.average_current_knots;
+          outcome.maximum_current_knots = result.maximum_current_knots;
+          outcome.tacks = result.tacks;
+          outcome.motor_seconds = result.motor_seconds;
+          outcome.estimated_fuel_litres = result.estimated_fuel_litres;
+          outcome.propulsion_transitions = result.propulsion_transitions;
+          outcome.comfort_level = result.comfort_level;
+          outcome.metrics_available = result.metrics_available;
+          if (!success) {
+            failure = error[0] ? error.data() : outcome.diagnostic;
+            if (failure.empty()) failure = "route calculation failed";
+          }
+        }
+      } catch (const std::exception& exception) {
+        failure =
+            std::string("routing worker failed safely: ") + exception.what();
+      } catch (...) {
+        failure = "routing worker failed safely with an unknown error";
+      }
+
+      {
+        std::lock_guard<std::mutex> route_lock(instance->routing_mutex);
+        instance->routing_running = false;
+      }
+      instance->routing_changed.notify_all();
+      const auto completed = instance->owner->routing_completed;
+      if (completed) {
+        const std::string id = instance->id;
+        instance->owner->Publish([completed, id, success,
+                                  outcome = std::move(outcome),
+                                  failure = std::move(failure)]() mutable {
+          completed(id, success, std::move(outcome), failure);
+        });
+      }
+      });
+    } catch (const std::exception& exception) {
+      instance->routing_running = false;
+      ocpn_portable_runtime_destroy(replica);
+      if (diagnostic)
+        *diagnostic =
+            std::string("could not start routing worker: ") + exception.what();
+      return false;
+    }
+  }
+  return true;
+}
+
+bool RuntimeEngine::Impl::CancelRoute(const std::string& package_id) {
+  Instance* instance = Find(package_id);
+  if (!instance) return false;
+  instance->routing_cancelled = true;
+  return instance->routing_running;
+}
+
+bool RuntimeEngine::Impl::WaitForRoute(const std::string& package_id,
+                                       std::chrono::milliseconds timeout) {
+  Instance* instance = Find(package_id);
+  if (!instance) return false;
+  std::thread worker;
+  {
+    std::unique_lock<std::mutex> route_lock(instance->routing_mutex);
+    if (!instance->routing_changed.wait_for(
+            route_lock, timeout,
+            [instance]() { return !instance->routing_running; })) {
+      return false;
+    }
+    if (instance->routing_worker.joinable())
+      worker = std::move(instance->routing_worker);
+  }
+  if (worker.joinable()) worker.join();
+  return true;
 }
 
 std::int32_t RuntimeEngine::Impl::UserFileRead(void* user_data,
@@ -902,7 +1233,8 @@ std::int32_t RuntimeEngine::Impl::EnvironmentSampleBatch(
   if (!provider->environment_provider->SampleBatch(
           input, &sampled,
           [consumer]() {
-            return !consumer->enabled || consumer->failed || !consumer->owner ||
+            return !consumer->enabled || consumer->failed ||
+                   consumer->routing_cancelled || !consumer->owner ||
                    consumer->owner->stopped;
           },
           &diagnostic) ||
@@ -923,6 +1255,29 @@ std::int32_t RuntimeEngine::Impl::EnvironmentSampleBatch(
         static_cast<std::uint8_t>(sampled[index].available);
   }
   return 0;
+}
+
+void RuntimeEngine::Impl::RoutingProgressCallback(
+    void* user_data, std::uint8_t percent, const char* message,
+    std::size_t message_length) {
+  auto* instance = static_cast<Instance*>(user_data);
+  if (!instance || !instance->owner || !instance->owner->routing_progress)
+    return;
+  const auto callback = instance->owner->routing_progress;
+  const std::string id = instance->id;
+  const std::string text = Text(message, message_length);
+  instance->owner->Publish(
+      [callback, id, percent, text]() { callback(id, percent, text); });
+}
+
+std::uint8_t RuntimeEngine::Impl::RoutingCancelled(void* user_data) {
+  auto* instance = static_cast<Instance*>(user_data);
+  return instance &&
+                 (instance->routing_cancelled || !instance->enabled ||
+                  instance->failed || !instance->owner ||
+                  instance->owner->stopped)
+             ? 1U
+             : 0U;
 }
 
 std::int32_t RuntimeEngine::Impl::ChartsQuerySegments(
@@ -1044,7 +1399,7 @@ bool RuntimeEngine::Impl::Start(Instance& instance, std::string* diagnostic) {
     callbacks.open_environmental_viewer = OpenEnvironmentalViewer;
     callbacks.open_weather_routing = OpenWeatherRouting;
     callbacks.environment_sample_batch = EnvironmentSampleBatch;
-    callbacks.routing_progress = RoutingProgress;
+    callbacks.routing_progress = RoutingProgressCallback;
     callbacks.routing_cancelled = RoutingCancelled;
     callbacks.charts_query_segments = ChartsQuerySegments;
     callbacks.network_get_to_private = NetworkGetToPrivate;
@@ -1128,9 +1483,21 @@ bool RuntimeEngine::Impl::Stop(Instance& instance, bool destroy,
   if (instance.environment_provider) {
     instance.environment_provider->RequestStop();
   }
+  instance.routing_cancelled = true;
   const bool was_enabled = instance.enabled.exchange(false);
   instance.executor.AdvanceGeneration();
   jobs.CancelOwner(instance.id);
+  if (!WaitForRoute(instance.id, std::chrono::seconds(10))) {
+    const std::string message =
+        "weather routing did not reach its ten-second cancellation barrier";
+    {
+      std::lock_guard<std::mutex> state_lock(instance.state_mutex);
+      instance.diagnostic = message;
+    }
+    remove_actions(instance.id);
+    if (diagnostic) *diagnostic = message;
+    return false;
+  }
   if (!jobs.WaitOwnerIdle(instance.id, std::chrono::seconds(2))) {
     const std::string message =
         "portable jobs did not reach their two-second cancellation barrier";
@@ -1502,8 +1869,10 @@ void RuntimeEngine::Impl::Fail(Instance& instance, const std::string& operation,
                                const std::string& diagnostic) {
   instance.failed = true;
   instance.enabled = false;
+  instance.routing_cancelled = true;
   instance.executor.AdvanceGeneration();
   jobs.CancelOwner(instance.id);
+  WaitForRoute(instance.id, std::chrono::seconds(10));
   {
     std::lock_guard<std::mutex> state_lock(instance.state_mutex);
     instance.diagnostic = operation + ": " + diagnostic;
@@ -1616,11 +1985,18 @@ bool RuntimeEngine::Impl::WaitForIdle(const std::string& package_id,
   if (!instance) return false;
   const auto started = std::chrono::steady_clock::now();
   if (!jobs.WaitOwnerIdle(package_id, timeout)) return false;
-  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+  auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - started);
-  return elapsed >= timeout
-             ? instance->executor.WaitIdle(std::chrono::milliseconds(0))
-             : instance->executor.WaitIdle(timeout - elapsed);
+  if (!instance->executor.WaitIdle(
+          elapsed >= timeout ? std::chrono::milliseconds(0)
+                             : timeout - elapsed)) {
+    return false;
+  }
+  elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - started);
+  return WaitForRoute(package_id, elapsed >= timeout
+                                      ? std::chrono::milliseconds(0)
+                                      : timeout - elapsed);
 }
 
 void RuntimeEngine::Impl::DeliverNavigationSentence(
@@ -1698,6 +2074,14 @@ void RuntimeEngine::SetSurfaceResponseCallback(SurfaceResponse callback) {
   impl_->SetSurfaceResponseCallback(std::move(callback));
 }
 
+void RuntimeEngine::SetRoutingProgressCallback(RoutingProgress callback) {
+  impl_->SetRoutingProgressCallback(std::move(callback));
+}
+
+void RuntimeEngine::SetRoutingCompletedCallback(RoutingCompleted callback) {
+  impl_->SetRoutingCompletedCallback(std::move(callback));
+}
+
 bool RuntimeEngine::RefreshPackage(const std::string& package_id,
                                    bool developer_mode,
                                    std::string* diagnostic) {
@@ -1768,6 +2152,21 @@ bool RuntimeEngine::SelectEnvironmentDataset(
 std::string RuntimeEngine::EnvironmentSummary(
     const std::string& package_id) const {
   return impl_->EnvironmentSummary(package_id);
+}
+
+bool RuntimeEngine::StartRoute(const std::string& package_id,
+                               RoutingRequest request,
+                               std::string* diagnostic) {
+  return impl_->StartRoute(package_id, std::move(request), diagnostic);
+}
+
+bool RuntimeEngine::CancelRoute(const std::string& package_id) {
+  return impl_->CancelRoute(package_id);
+}
+
+bool RuntimeEngine::WaitForRoute(const std::string& package_id,
+                                 std::chrono::milliseconds timeout) {
+  return impl_->WaitForRoute(package_id, timeout);
 }
 
 bool RuntimeEngine::WaitForIdle(const std::string& package_id,
