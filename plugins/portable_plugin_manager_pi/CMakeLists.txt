@@ -64,6 +64,7 @@ add_library(portable_plugin_manager_pi MODULE
   src/action_registry.cpp
   src/manager_dialog.cpp
   src/package_store.cpp
+  src/permission_store.cpp
   src/portable_plugin_manager_pi.cpp
   src/runtime_engine.cpp
 )
@@ -139,6 +140,40 @@ if(BUILD_TESTING)
   endif()
   add_test(NAME ppm_package_store COMMAND ppm_package_store_test)
 
+  add_executable(ppm_permission_store_test
+    src/permission_store.cpp
+    tests/permission_store_test.cpp
+  )
+  target_include_directories(ppm_permission_store_test PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include")
+  if(MSVC)
+    target_compile_options(ppm_permission_store_test PRIVATE /W4)
+  else()
+    target_compile_options(ppm_permission_store_test PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
+  add_test(NAME ppm_permission_store COMMAND ppm_permission_store_test)
+
+  add_executable(ppm_package_cli
+    src/package_store.cpp
+    src/permission_store.cpp
+    tools/package_cli.cpp
+  )
+  target_include_directories(ppm_package_cli PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include"
+    "${OPENCPN_SOURCE_DIR}/libs/wxJSON/include")
+  target_link_libraries(ppm_package_cli PRIVATE
+    ${wxWidgets_LIBRARIES}
+    ocpn::wxjson
+    LibArchive::LibArchive
+    OpenSSL::Crypto)
+  if(MSVC)
+    target_compile_options(ppm_package_cli PRIVATE /W4)
+  else()
+    target_compile_options(ppm_package_cli PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
+
   set(PPM_TEST_IGRIB_TARGET_DIR
       "${CMAKE_CURRENT_BINARY_DIR}/ppm-test-igrib-target")
   set(PPM_TEST_IGRIB_WASM
@@ -163,6 +198,7 @@ if(BUILD_TESTING)
                     DEPENDS "${PPM_TEST_IGRIB_WASM}")
 
   add_executable(ppm_runtime_engine_test
+    src/permission_store.cpp
     src/runtime_engine.cpp
     tests/runtime_engine_test.cpp
   )

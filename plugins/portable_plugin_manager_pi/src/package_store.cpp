@@ -50,6 +50,7 @@ struct ValidatedArchive {
   wxJSONValue manifest;
   std::string manifest_bytes;
   std::string checksum_bytes;
+  std::string signature_bytes;
   std::map<std::string, std::string> checksums;
   std::map<std::string, EntryInfo> entries;
   std::string id;
@@ -519,6 +520,11 @@ bool VerifySignature(const std::string& signature_bytes,
     *diagnostic = "invalid signing key identifier";
     return false;
   }
+  if (key_id.rfind("org.opencpn.development.", 0) == 0 &&
+      !developer_mode) {
+    *diagnostic = "development signing keys are disabled";
+    return false;
+  }
   const fs::path public_key_path = trust_root / (key_id + ".pem");
   std::unique_ptr<FILE, FileCloser> key_file(
       std::fopen(public_key_path.c_str(), "rb"));
@@ -557,6 +563,73 @@ bool VerifySignature(const std::string& signature_bytes,
   return true;
 }
 
+bool ValidateManifestFields(ValidatedArchive* validated,
+                            std::string* diagnostic) {
+  wxJSONValue& manifest = validated->manifest;
+  if (!manifest["format_version"].IsInt() ||
+      manifest["format_version"].AsInt() != 1 ||
+      !manifest["id"].IsString() || !manifest["name"].IsString() ||
+      !manifest["version"].IsString() ||
+      !manifest["component"].IsString() ||
+      !manifest["runtime"].IsString() ||
+      !manifest["portable_api"].IsString() ||
+      !manifest["permissions"].IsArray() ||
+      !manifest["development"].IsBool()) {
+    *diagnostic = "manifest has missing or mistyped required fields";
+    return false;
+  }
+  validated->id = manifest["id"].AsString().ToStdString();
+  validated->name = manifest["name"].AsString().ToStdString();
+  validated->version = manifest["version"].AsString().ToStdString();
+  validated->development = manifest["development"].AsBool();
+  std::string component;
+  if (!IsSafeIdentifier(validated->id, true) ||
+      !IsSemanticVersion(validated->version) || validated->name.empty() ||
+      validated->name.size() > 256 ||
+      manifest["runtime"].AsString() != ">=0.1.0 <0.2.0" ||
+      manifest["portable_api"].AsString() != ">=0.1.0 <0.2.0" ||
+      !CheckedArchivePath(manifest["component"].AsString().utf8_str(),
+                          &component, diagnostic) ||
+      validated->entries.count(component) == 0 ||
+      validated->entries.at(component).directory) {
+    if (diagnostic->empty()) *diagnostic = "invalid manifest identity";
+    return false;
+  }
+  wxJSONValue permissions = manifest["permissions"];
+  std::set<std::string> unique_permissions;
+  for (int index = 0; index < permissions.Size(); ++index) {
+    if (!permissions[index].IsString()) {
+      *diagnostic = "manifest permission is not a string";
+      return false;
+    }
+    const std::string permission =
+        permissions[index].AsString().ToStdString();
+    if (permission.empty() || !unique_permissions.insert(permission).second) {
+      *diagnostic = "manifest permission is empty or duplicated";
+      return false;
+    }
+  }
+  return true;
+}
+
+bool ValidateFileSet(const ValidatedArchive& validated,
+                     std::string* diagnostic) {
+  std::set<std::string> actual;
+  for (const auto& item : validated.entries) {
+    if (!item.second.directory && item.first != "checksums.sha256" &&
+        item.first != "signature.json") {
+      actual.insert(item.first);
+    }
+  }
+  std::set<std::string> expected;
+  for (const auto& item : validated.checksums) expected.insert(item.first);
+  if (actual != expected) {
+    *diagnostic = "checksum file list differs from package contents";
+    return false;
+  }
+  return true;
+}
+
 bool ValidateArchive(const fs::path& path, const fs::path& trust_root,
                      bool developer_mode, ValidatedArchive* validated,
                      std::string* diagnostic) {
@@ -570,7 +643,6 @@ bool ValidateArchive(const fs::path& path, const fs::path& trust_root,
   if (!input) return false;
   std::set<std::string> folded_names;
   std::uintmax_t expanded = 0;
-  std::string signature_bytes;
   archive_entry* raw_entry = nullptr;
   int header_result = ARCHIVE_OK;
   while ((header_result =
@@ -628,8 +700,8 @@ bool ValidateArchive(const fs::path& path, const fs::path& trust_root,
         return false;
       }
     } else if (name == "signature.json") {
-      if (!ReadArchiveEntry(input.get(), kMaxManifestBytes, &signature_bytes,
-                            diagnostic)) {
+      if (!ReadArchiveEntry(input.get(), kMaxManifestBytes,
+                            &validated->signature_bytes, diagnostic)) {
         return false;
       }
     } else {
@@ -655,61 +727,14 @@ bool ValidateArchive(const fs::path& path, const fs::path& trust_root,
                       diagnostic)) {
     return false;
   }
-  wxJSONValue& manifest = validated->manifest;
-  if (!manifest["format_version"].IsInt() ||
-      manifest["format_version"].AsInt() != 1 ||
-      !manifest["id"].IsString() || !manifest["name"].IsString() ||
-      !manifest["version"].IsString() ||
-      !manifest["component"].IsString() ||
-      !manifest["runtime"].IsString() ||
-      !manifest["portable_api"].IsString() ||
-      !manifest["permissions"].IsArray() ||
-      !manifest["development"].IsBool()) {
-    *diagnostic = "manifest has missing or mistyped required fields";
-    return false;
-  }
-  validated->id = manifest["id"].AsString().ToStdString();
-  validated->name = manifest["name"].AsString().ToStdString();
-  validated->version = manifest["version"].AsString().ToStdString();
-  validated->development = manifest["development"].AsBool();
-  std::string component;
-  if (!IsSafeIdentifier(validated->id, true) ||
-      !IsSemanticVersion(validated->version) || validated->name.empty() ||
-      validated->name.size() > 256 ||
-      manifest["runtime"].AsString() != ">=0.1.0 <0.2.0" ||
-      manifest["portable_api"].AsString() != ">=0.1.0 <0.2.0" ||
-      !CheckedArchivePath(manifest["component"].AsString().utf8_str(),
-                          &component, diagnostic) ||
-      validated->entries.count(component) == 0 ||
-      validated->entries.at(component).directory) {
-    if (diagnostic->empty()) *diagnostic = "invalid manifest identity";
-    return false;
-  }
+  if (!ValidateManifestFields(validated, diagnostic)) return false;
   if (validated->development && !developer_mode) {
     *diagnostic = "development packages are disabled";
     return false;
   }
-  wxJSONValue permissions = manifest["permissions"];
-  for (int index = 0; index < permissions.Size(); ++index) {
-    if (!permissions[index].IsString()) {
-      *diagnostic = "manifest permission is not a string";
-      return false;
-    }
-  }
-  std::set<std::string> actual;
-  for (const auto& item : validated->entries) {
-    if (!item.second.directory && item.first != "checksums.sha256" &&
-        item.first != "signature.json") {
-      actual.insert(item.first);
-    }
-  }
-  std::set<std::string> expected;
-  for (const auto& item : validated->checksums) expected.insert(item.first);
-  if (actual != expected) {
-    *diagnostic = "checksum file list differs from archive";
-    return false;
-  }
-  return VerifySignature(signature_bytes, validated->checksum_bytes,
+  if (!ValidateFileSet(*validated, diagnostic)) return false;
+  return VerifySignature(validated->signature_bytes,
+                         validated->checksum_bytes,
                          trust_root, validated->development, developer_mode,
                          diagnostic);
 }
@@ -827,6 +852,28 @@ bool ExtractValidated(const fs::path& archive_path,
     *diagnostic = archive_error_string(input.get());
     return false;
   }
+  const auto write_metadata = [&](const fs::path& path,
+                                  const std::string& contents) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output.write(contents.data(),
+                 static_cast<std::streamsize>(contents.size()));
+    if (!output) return false;
+    output.close();
+    std::error_code error;
+    fs::permissions(path,
+                    fs::perms::owner_read | fs::perms::group_read |
+                        fs::perms::others_read,
+                    fs::perm_options::replace, error);
+    return !error;
+  };
+  if (!write_metadata(staging / "checksums.sha256",
+                      validated.checksum_bytes) ||
+      (!validated.signature_bytes.empty() &&
+       !write_metadata(staging / "signature.json",
+                       validated.signature_bytes))) {
+    *diagnostic = "could not retain package verification metadata";
+    return false;
+  }
   return true;
 }
 
@@ -849,13 +896,36 @@ bool ReadManifestIdentity(const fs::path& root, StoredPackage* package) {
       !ParseJson(bytes, &manifest, &diagnostic) ||
       !manifest["id"].IsString() || !manifest["name"].IsString() ||
       !manifest["version"].IsString() ||
-      !manifest["development"].IsBool()) {
+      !manifest["development"].IsBool() ||
+      !manifest["permissions"].IsArray()) {
     return false;
   }
   package->id = manifest["id"].AsString().ToStdString();
   package->name = manifest["name"].AsString().ToStdString();
   package->version = manifest["version"].AsString().ToStdString();
   package->development = manifest["development"].AsBool();
+  wxJSONValue permissions = manifest["permissions"];
+  std::set<std::string> unique_permissions;
+  for (int index = 0; index < permissions.Size(); ++index) {
+    if (!permissions[index].IsString()) return false;
+    const std::string permission =
+        permissions[index].AsString().ToStdString();
+    if (permission.empty() || !unique_permissions.insert(permission).second)
+      return false;
+    package->permissions.push_back(permission);
+  }
+  std::sort(package->permissions.begin(), package->permissions.end());
+  std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> hash(
+      EVP_MD_CTX_new(), &EVP_MD_CTX_free);
+  std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+  unsigned digest_length = 0;
+  if (!hash ||
+      EVP_DigestInit_ex(hash.get(), EVP_sha256(), nullptr) != 1 ||
+      EVP_DigestUpdate(hash.get(), bytes.data(), bytes.size()) != 1 ||
+      EVP_DigestFinal_ex(hash.get(), digest.data(), &digest_length) != 1) {
+    return false;
+  }
+  package->manifest_digest = HexDigest(digest.data(), digest_length);
   package->root = root;
   return IsSafeIdentifier(package->id, true) &&
          IsSemanticVersion(package->version);
@@ -867,9 +937,75 @@ bool ReadEnabled(const fs::path& root, const std::string& id) {
   return input.get(value) && value == '1';
 }
 
+bool ReadDiskFile(const fs::path& path, std::size_t limit,
+                  std::string* contents, std::string* diagnostic) {
+  std::error_code error;
+  const auto size = fs::file_size(path, error);
+  if (error || size > limit) {
+    *diagnostic = "installed metadata is missing or exceeds policy";
+    return false;
+  }
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    *diagnostic = "could not read installed metadata";
+    return false;
+  }
+  contents->assign(std::istreambuf_iterator<char>(input),
+                   std::istreambuf_iterator<char>());
+  if (input.bad()) {
+    *diagnostic = "could not read installed metadata";
+    return false;
+  }
+  return true;
+}
+
+bool HashDiskFile(const fs::path& path, std::uintmax_t size_limit,
+                  std::string* digest, std::string* diagnostic) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    *diagnostic = "could not read installed package file";
+    return false;
+  }
+  std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> hash(
+      EVP_MD_CTX_new(), &EVP_MD_CTX_free);
+  if (!hash || EVP_DigestInit_ex(hash.get(), EVP_sha256(), nullptr) != 1) {
+    *diagnostic = "could not initialize installed-file digest";
+    return false;
+  }
+  std::array<unsigned char, 1024 * 1024> buffer{};
+  std::uintmax_t total = 0;
+  while (input) {
+    input.read(reinterpret_cast<char*>(buffer.data()), buffer.size());
+    const auto count = input.gcount();
+    if (count <= 0) break;
+    if (static_cast<std::uintmax_t>(count) > size_limit - total ||
+        EVP_DigestUpdate(hash.get(), buffer.data(),
+                         static_cast<std::size_t>(count)) != 1) {
+      *diagnostic = "installed package file exceeds policy";
+      return false;
+    }
+    total += static_cast<std::uintmax_t>(count);
+  }
+  if (!input.eof()) {
+    *diagnostic = "could not read installed package file";
+    return false;
+  }
+  std::array<unsigned char, EVP_MAX_MD_SIZE> bytes{};
+  unsigned length = 0;
+  if (EVP_DigestFinal_ex(hash.get(), bytes.data(), &length) != 1) {
+    *diagnostic = "could not finalize installed-file digest";
+    return false;
+  }
+  *digest = HexDigest(bytes.data(), length);
+  return true;
+}
+
 }  // namespace
 
-PackageStore::PackageStore(fs::path root) : root_(std::move(root)) {}
+PackageStore::PackageStore(fs::path root, fs::path trust_root)
+    : root_(std::move(root)),
+      trust_root_(trust_root.empty() ? root_ / "trust"
+                                     : std::move(trust_root)) {}
 
 StoreResult PackageStore::Inspect(const fs::path& archive_path) const {
   ValidatedArchive validated;
@@ -884,6 +1020,115 @@ StoreResult PackageStore::Inspect(const fs::path& archive_path) const {
           validated.id,
           PackagesRoot() / validated.id,
           {}};
+}
+
+StoreResult PackageStore::AuditInstalled(
+    const std::string& package_id) const {
+  if (!IsSafeIdentifier(package_id, true))
+    return Failure("invalid-id", "invalid package identifier");
+  const fs::path package_root = PackagesRoot() / package_id;
+  std::error_code error;
+  if (!fs::is_directory(package_root, error))
+    return Failure("not-installed", package_id + " is not installed");
+
+  ValidatedArchive validated;
+  std::set<std::string> folded_names;
+  std::uintmax_t expanded = 0;
+  std::size_t entry_count = 0;
+  for (fs::recursive_directory_iterator item(package_root, error), end;
+       !error && item != end; item.increment(error)) {
+    if (++entry_count > kMaxEntries)
+      return Failure("integrity-failed", "installed package has too many entries");
+    const fs::file_status status = item->symlink_status(error);
+    if (error) break;
+    if (!fs::is_directory(status) && !fs::is_regular_file(status))
+      return Failure("integrity-failed",
+                     "installed package contains a non-regular entry");
+    const fs::path relative = fs::relative(item->path(), package_root, error);
+    if (error) break;
+    std::string name;
+    std::string diagnostic;
+    const std::string generic = relative.generic_string();
+    if (!CheckedArchivePath(generic.c_str(), &name, &diagnostic))
+      return Failure("integrity-failed", diagnostic);
+    if (!folded_names.insert(LowerAscii(name)).second)
+      return Failure("integrity-failed",
+                     "installed package contains case-colliding paths");
+    const bool directory = fs::is_directory(status);
+    const auto permissions = status.permissions();
+    const bool executable =
+        (permissions & (fs::perms::owner_exec | fs::perms::group_exec |
+                        fs::perms::others_exec)) != fs::perms::none;
+    if (executable && !directory && name.rfind("helpers/", 0) != 0)
+      return Failure("integrity-failed",
+                     "installed executable is outside helpers");
+    std::uintmax_t size = 0;
+    if (!directory) {
+      size = item->file_size(error);
+      if (error || size > kMaxExpandedBytes - expanded)
+        return Failure("integrity-failed",
+                       "installed package exceeds size policy");
+      expanded += size;
+    }
+    validated.entries.emplace(name, EntryInfo{size, directory, executable});
+  }
+  if (error) return Failure("integrity-failed", error.message());
+
+  std::string diagnostic;
+  if (!ReadDiskFile(package_root / "manifest.json", kMaxManifestBytes,
+                    &validated.manifest_bytes, &diagnostic) ||
+      !ReadDiskFile(package_root / "checksums.sha256", kMaxManifestBytes,
+                    &validated.checksum_bytes, &diagnostic)) {
+    return Failure("integrity-failed", diagnostic);
+  }
+  if (fs::exists(package_root / "signature.json", error) &&
+      !ReadDiskFile(package_root / "signature.json", kMaxManifestBytes,
+                    &validated.signature_bytes, &diagnostic)) {
+    return Failure("integrity-failed", diagnostic);
+  }
+  if (error ||
+      !ParseJson(validated.manifest_bytes, &validated.manifest, &diagnostic) ||
+      !ParseChecksums(validated.checksum_bytes, &validated.checksums,
+                      &diagnostic) ||
+      !ValidateManifestFields(&validated, &diagnostic) ||
+      validated.id != package_id ||
+      !ValidateFileSet(validated, &diagnostic)) {
+    if (diagnostic.empty()) diagnostic = "installed package identity mismatch";
+    return Failure("integrity-failed", diagnostic);
+  }
+  if (validated.development && !developer_mode_)
+    return Failure("integrity-failed",
+                   "development packages are disabled");
+  if (!VerifySignature(validated.signature_bytes, validated.checksum_bytes,
+                       TrustRoot(), validated.development, developer_mode_,
+                       &diagnostic)) {
+    return Failure("integrity-failed", diagnostic);
+  }
+  for (const auto& expected : validated.checksums) {
+    std::string actual;
+    if (!HashDiskFile(package_root / fs::path(expected.first),
+                      kMaxExpandedBytes, &actual, &diagnostic) ||
+        actual != expected.second) {
+      if (diagnostic.empty())
+        diagnostic = "installed-file digest mismatch: " + expected.first;
+      return Failure("integrity-failed", diagnostic);
+    }
+  }
+  const fs::path component =
+      package_root /
+      validated.manifest["component"].AsString().ToStdString();
+  std::ifstream component_input(component, std::ios::binary);
+  std::array<unsigned char, 4> wasm_magic{};
+  component_input.read(reinterpret_cast<char*>(wasm_magic.data()),
+                       wasm_magic.size());
+  if (!component_input ||
+      wasm_magic != std::array<unsigned char, 4>{0x00, 0x61, 0x73, 0x6d}) {
+    return Failure("integrity-failed",
+                   "installed component is not WebAssembly");
+  }
+  return {true, "integrity-verified",
+          "Installed package signature and file digests verified", package_id,
+          package_root, {}};
 }
 
 StoreResult PackageStore::Install(const fs::path& archive_path, bool replace) {

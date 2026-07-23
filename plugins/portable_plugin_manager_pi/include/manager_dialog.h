@@ -15,6 +15,11 @@ class wxStaticText;
 namespace ppm {
 
 struct PackageSnapshot;
+struct PermissionEvaluation;
+struct StoredPackage;
+
+bool ConfirmPermissionApproval(wxWindow* parent, const StoredPackage& package,
+                               const PermissionEvaluation& evaluation);
 
 struct ManagerCallbacks {
   std::function<void(const std::string&)> install;
@@ -23,6 +28,7 @@ struct ManagerCallbacks {
   std::function<void(const std::string&)> unload;
   std::function<void(const std::string&)> remove;
   std::function<void(const std::string&)> rollback;
+  std::function<void(const std::string&)> revoke_permissions;
 };
 
 class ManagerDialog final : public wxDialog {
@@ -41,6 +47,7 @@ class ManagerDialog final : public wxDialog {
   void OnUnload(wxCommandEvent& event);
   void OnRemove(wxCommandEvent& event);
   void OnRollback(wxCommandEvent& event);
+  void OnRevokePermissions(wxCommandEvent& event);
   void OnSelectionChanged(wxListEvent& event);
   void RefreshButtonState();
   std::string SelectedPackageId() const;
@@ -55,6 +62,7 @@ class ManagerDialog final : public wxDialog {
   wxButton* unload_ = nullptr;
   wxButton* remove_ = nullptr;
   wxButton* rollback_ = nullptr;
+  wxButton* revoke_permissions_ = nullptr;
 };
 
 }  // namespace ppm

@@ -1,5 +1,7 @@
 #include "manager_dialog.h"
 
+#include <algorithm>
+
 #include <wx/button.h>
 #include <wx/filedlg.h>
 #include <wx/listctrl.h>
@@ -11,6 +13,7 @@
 #include <utility>
 
 #include "runtime_engine.h"
+#include "permission_store.h"
 
 namespace ppm {
 namespace {
@@ -22,13 +25,99 @@ enum : int {
   kUnload,
   kRemove,
   kRollback,
+  kRevokePermissions,
 };
+
+wxString RiskLabel(PermissionRisk risk) {
+  switch (risk) {
+    case PermissionRisk::kLow:
+      return "Low";
+    case PermissionRisk::kModerate:
+      return "Moderate";
+    case PermissionRisk::kHigh:
+      return "High";
+    case PermissionRisk::kNative:
+      return "Native code";
+  }
+  return "Unknown";
+}
 
 }  // namespace
 
+bool ConfirmPermissionApproval(wxWindow* parent,
+                               const StoredPackage& package,
+                               const PermissionEvaluation& evaluation) {
+  wxDialog dialog(parent, wxID_ANY, "Portable package permissions",
+                  wxDefaultPosition, wxSize(850, 560),
+                  wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+  auto* root = new wxBoxSizer(wxVERTICAL);
+  auto* heading = new wxStaticText(
+      &dialog, wxID_ANY,
+      wxString::FromUTF8(package.name) + " is requesting host access");
+  wxFont heading_font = heading->GetFont();
+  heading_font.SetWeight(wxFONTWEIGHT_BOLD);
+  heading->SetFont(heading_font);
+  root->Add(heading, 0, wxALL, 12);
+  root->Add(
+      new wxStaticText(
+          &dialog, wxID_ANY,
+          "Portable packages run in WebAssembly, and only the approved "
+          "capabilities below are exposed. All listed capabilities are "
+          "required by this package."),
+      0, wxLEFT | wxRIGHT | wxBOTTOM, 12);
+
+  auto* permissions = new wxListCtrl(
+      &dialog, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+      wxLC_REPORT | wxLC_SINGLE_SEL | wxLC_HRULES | wxLC_VRULES);
+  permissions->InsertColumn(0, "Access");
+  permissions->InsertColumn(1, "Risk");
+  permissions->InsertColumn(2, "What it permits");
+  permissions->SetColumnWidth(0, 220);
+  permissions->SetColumnWidth(1, 100);
+  permissions->SetColumnWidth(2, 480);
+  for (const auto& id : evaluation.requested) {
+    const PermissionDescriptor* descriptor = FindPermission(id);
+    if (!descriptor) continue;
+    const bool added =
+        std::find(evaluation.added.begin(), evaluation.added.end(), id) !=
+        evaluation.added.end();
+    const long row = permissions->InsertItem(
+        permissions->GetItemCount(),
+        (added ? "New — " : "") + wxString::FromUTF8(descriptor->label));
+    permissions->SetItem(row, 1, RiskLabel(descriptor->risk));
+    permissions->SetItem(row, 2,
+                         wxString::FromUTF8(descriptor->description));
+  }
+  root->Add(permissions, 1, wxEXPAND | wxLEFT | wxRIGHT, 12);
+
+  if (!evaluation.removed.empty()) {
+    root->Add(
+        new wxStaticText(
+            &dialog, wxID_ANY,
+            wxString::Format(
+                "%zu previously approved %s will be removed.",
+                evaluation.removed.size(),
+                evaluation.removed.size() == 1 ? "capability"
+                                               : "capabilities")),
+        0, wxALL, 12);
+  }
+  root->Add(
+      new wxStaticText(
+          &dialog, wxID_ANY,
+          "Approval is stored only for this package ID and exact capability "
+          "set. Any future access expansion requires a new decision."),
+      0, wxLEFT | wxRIGHT | wxTOP, 12);
+  auto* buttons = dialog.CreateButtonSizer(wxOK | wxCANCEL);
+  auto* approve = wxDynamicCast(dialog.FindWindow(wxID_OK), wxButton);
+  if (approve) approve->SetLabel("Approve access");
+  root->Add(buttons, 0, wxEXPAND | wxALL, 12);
+  dialog.SetSizer(root);
+  return dialog.ShowModal() == wxID_OK;
+}
+
 ManagerDialog::ManagerDialog(wxWindow* parent, ManagerCallbacks callbacks)
     : wxDialog(parent, wxID_ANY, "Portable Plugin Manager",
-               wxDefaultPosition, wxSize(820, 520),
+               wxDefaultPosition, wxSize(980, 540),
                wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER),
       callbacks_(std::move(callbacks)) {
   auto* root = new wxBoxSizer(wxVERTICAL);
@@ -51,11 +140,13 @@ ManagerDialog::ManagerDialog(wxWindow* parent, ManagerCallbacks callbacks)
   packages_->InsertColumn(0, "Package");
   packages_->InsertColumn(1, "Version");
   packages_->InsertColumn(2, "State");
-  packages_->InsertColumn(3, "Details");
+  packages_->InsertColumn(3, "Access");
+  packages_->InsertColumn(4, "Details");
   packages_->SetColumnWidth(0, 270);
   packages_->SetColumnWidth(1, 90);
   packages_->SetColumnWidth(2, 120);
-  packages_->SetColumnWidth(3, 250);
+  packages_->SetColumnWidth(3, 140);
+  packages_->SetColumnWidth(4, 250);
   root->Add(packages_, 1, wxEXPAND | wxLEFT | wxRIGHT, 12);
 
   auto* actions = new wxBoxSizer(wxHORIZONTAL);
@@ -66,11 +157,14 @@ ManagerDialog::ManagerDialog(wxWindow* parent, ManagerCallbacks callbacks)
   unload_ = new wxButton(this, kUnload, "Unload");
   remove_ = new wxButton(this, kRemove, "Remove…");
   rollback_ = new wxButton(this, kRollback, "Rollback…");
+  revoke_permissions_ =
+      new wxButton(this, kRevokePermissions, "Revoke access…");
   actions->Add(enable_, 0, wxRIGHT, 8);
   actions->Add(disable_, 0, wxRIGHT, 8);
   actions->Add(unload_, 0, wxRIGHT, 8);
   actions->Add(remove_, 0, wxRIGHT, 8);
   actions->Add(rollback_, 0, wxRIGHT, 8);
+  actions->Add(revoke_permissions_, 0, wxRIGHT, 8);
   actions->AddStretchSpacer();
   actions->Add(new wxButton(this, wxID_CLOSE, "Close"), 0);
   root->Add(actions, 0, wxEXPAND | wxALL, 12);
@@ -78,7 +172,7 @@ ManagerDialog::ManagerDialog(wxWindow* parent, ManagerCallbacks callbacks)
   root->Add(new wxStaticLine(this), 0, wxEXPAND | wxLEFT | wxRIGHT, 12);
   status_ = new wxStaticText(
       this, wxID_ANY, "Ready.");
-  status_->Wrap(770);
+  status_->Wrap(930);
   root->Add(status_, 0, wxEXPAND | wxALL, 12);
   SetSizer(root);
 
@@ -89,6 +183,8 @@ ManagerDialog::ManagerDialog(wxWindow* parent, ManagerCallbacks callbacks)
   Bind(wxEVT_BUTTON, &ManagerDialog::OnUnload, this, kUnload);
   Bind(wxEVT_BUTTON, &ManagerDialog::OnRemove, this, kRemove);
   Bind(wxEVT_BUTTON, &ManagerDialog::OnRollback, this, kRollback);
+  Bind(wxEVT_BUTTON, &ManagerDialog::OnRevokePermissions, this,
+       kRevokePermissions);
   Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { Hide(); }, wxID_CLOSE);
   packages_->Bind(wxEVT_LIST_ITEM_SELECTED,
                   &ManagerDialog::OnSelectionChanged, this);
@@ -119,8 +215,9 @@ void ManagerDialog::SetPackages(
         packages_->GetItemCount(), wxString::FromUTF8(package.name));
     packages_->SetItem(row, 1, wxString::FromUTF8(package.version));
     packages_->SetItem(row, 2, wxString::FromUTF8(package.state));
+    packages_->SetItem(row, 3, wxString::FromUTF8(package.access));
     packages_->SetItem(
-        row, 3,
+        row, 4,
         package.diagnostic.empty() ? "Wasmtime component"
                                    : wxString::FromUTF8(package.diagnostic));
     packages_->SetItemData(row, static_cast<long>(index));
@@ -202,6 +299,19 @@ void ManagerDialog::OnRollback(wxCommandEvent&) {
   }
 }
 
+void ManagerDialog::OnRevokePermissions(wxCommandEvent&) {
+  const std::string id = SelectedPackageId();
+  if (id.empty() || !callbacks_.revoke_permissions) return;
+  if (wxMessageBox(
+          "Revoke all approved access for " + wxString::FromUTF8(id) +
+              "?\n\nThe package will be disabled and unloaded. It must ask "
+              "again before it can run.",
+          "Revoke portable package access",
+          wxYES_NO | wxNO_DEFAULT | wxICON_WARNING, this) == wxYES) {
+    callbacks_.revoke_permissions(id);
+  }
+}
+
 void ManagerDialog::OnSelectionChanged(wxListEvent&) { RefreshButtonState(); }
 
 void ManagerDialog::RefreshButtonState() {
@@ -219,6 +329,7 @@ void ManagerDialog::RefreshButtonState() {
   unload_->Enable(selected && (state == "Enabled" || state == "Disabled"));
   remove_->Enable(selected);
   rollback_->Enable(selected);
+  revoke_permissions_->Enable(selected);
 }
 
 }  // namespace ppm

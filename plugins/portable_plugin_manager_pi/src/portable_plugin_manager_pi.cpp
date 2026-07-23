@@ -82,15 +82,21 @@ wxString ResolveStorageRoot() {
          "portable-plugin-manager";
 }
 
+wxString ResolveManagerDataRoot() {
+  const wxString installed =
+      GetPluginDataDir("portable_plugin_manager_pi");
+  if (!installed.empty() &&
+      wxFileName::FileExists(
+          installed + wxFileName::GetPathSeparator() + "manager.svg")) {
+    return installed;
+  }
+  return wxString::FromUTF8(PPM_SOURCE_DATA_DIR);
+}
+
 wxString ResolveManagerIcon() {
   const wxString separator = wxFileName::GetPathSeparator();
-  const wxString installed =
-      *GetpSharedDataLocation() + "plugins" + separator +
-      "portable_plugin_manager_pi" + separator + "manager.svg";
-  if (wxFileName::FileExists(installed)) return installed;
-  const wxString source =
-      wxString::FromUTF8(PPM_SOURCE_DATA_DIR) + separator + "manager.svg";
-  return wxFileName::FileExists(source) ? source : wxString();
+  const wxString icon = ResolveManagerDataRoot() + separator + "manager.svg";
+  return wxFileName::FileExists(icon) ? icon : wxString();
 }
 
 }  // namespace
@@ -127,9 +133,23 @@ int PortablePluginManagerPi::Init() {
   wxString developer;
   developer_mode_ =
       wxGetEnv("OCPN_PPM_DEVELOPER_MODE", &developer) && developer == "1";
-  package_store_ =
-      std::make_unique<PackageStore>(storage_root_.ToStdString());
+  const wxString trust_root =
+      ResolveManagerDataRoot() + wxFileName::GetPathSeparator() + "trust";
+  package_store_ = std::make_unique<PackageStore>(
+      storage_root_.ToStdString(), trust_root.ToStdString());
   package_store_->SetDeveloperMode(developer_mode_);
+  permission_store_ =
+      std::make_unique<PermissionStore>(storage_root_.ToStdString());
+  for (const auto& package : package_store_->Installed()) {
+    if (!package.enabled) continue;
+    const StoreResult audit = package_store_->AuditInstalled(package.id);
+    if (!audit.okay) {
+      package_store_->SetEnabled(package.id, false);
+      wxLogError("PPM event=installed-integrity-failed package=%s "
+                 "diagnostic=%s",
+                 package.id, audit.message);
+    }
+  }
   runtime_engine_ = std::make_unique<RuntimeEngine>(
       storage_root_.ToStdString(),
       [this](const RuntimeAction& action, std::uint32_t* host_action_id) {
@@ -142,6 +162,19 @@ int PortablePluginManagerPi::Init() {
   if (!runtime_engine_->LoadInstalled(developer_mode_)) {
     wxLogWarning(
         "PPM event=runtime-engine-load-completed-with-package-failures");
+  }
+  for (const auto& package : package_store_->Installed()) {
+    if (!package.enabled) continue;
+    wxString diagnostic;
+    std::string runtime_diagnostic;
+    if (!PreparePermissions(package.id, false, &diagnostic) ||
+        !runtime_engine_->Enable(package.id, &runtime_diagnostic)) {
+      package_store_->SetEnabled(package.id, false);
+      wxLogWarning("PPM event=startup-package-disabled package=%s "
+                   "diagnostic=%s%s",
+                   package.id, diagnostic,
+                   wxString::FromUTF8(runtime_diagnostic));
+    }
   }
   return WANTS_TOOLBAR_CALLBACK | INSTALLS_TOOLBAR_TOOL | WANTS_CONFIG |
          WANTS_NMEA_EVENTS | WANTS_OVERLAY_CALLBACK |
@@ -159,6 +192,7 @@ bool PortablePluginManagerPi::DeInit() {
     runtime_engine_->Shutdown();
     runtime_engine_.reset();
   }
+  permission_store_.reset();
   package_store_.reset();
   RemoveAllActions();
   initialized_ = false;
@@ -277,6 +311,8 @@ void PortablePluginManagerPi::ShowManager(wxWindow* parent) {
         [this](const std::string& id) { RemovePackage(id); };
     callbacks.rollback =
         [this](const std::string& id) { RollbackPackage(id); };
+    callbacks.revoke_permissions =
+        [this](const std::string& id) { RevokePackagePermissions(id); };
     manager_dialog_ =
         std::make_unique<ManagerDialog>(parent, std::move(callbacks));
     manager_dialog_->SetRuntimeSummary(
@@ -294,6 +330,55 @@ void PortablePluginManagerPi::SetManagerStatus(const wxString& status) {
   wxLogMessage("PPM event=manager-operation status=%s", status);
 }
 
+bool PortablePluginManagerPi::PreparePermissions(
+    const std::string& package_id, bool interactive,
+    wxString* diagnostic) {
+  const auto installed = package_store_->Installed();
+  const auto item =
+      std::find_if(installed.begin(), installed.end(), [&](const auto& value) {
+        return value.id == package_id;
+      });
+  if (item == installed.end()) {
+    if (diagnostic) *diagnostic = "Package is not installed.";
+    return false;
+  }
+  const PermissionEvaluation evaluation = permission_store_->Evaluate(*item);
+  if (!evaluation.okay) {
+    if (diagnostic)
+      *diagnostic = wxString::FromUTF8(evaluation.message);
+    return false;
+  }
+  if (!evaluation.added.empty()) {
+    if (!interactive) {
+      if (diagnostic)
+        *diagnostic = "Permission approval is required before this package "
+                      "can run.";
+      return false;
+    }
+    if (!ConfirmPermissionApproval(manager_dialog_.get(), *item, evaluation)) {
+      if (diagnostic) *diagnostic = "Permission approval was cancelled.";
+      return false;
+    }
+  }
+  if (!evaluation.current || !evaluation.manifest_current) {
+    const StoreResult granted = permission_store_->Grant(*item);
+    if (!granted.okay) {
+      if (diagnostic)
+        *diagnostic = "Could not save permission approval: " +
+                      wxString::FromUTF8(granted.message);
+      return false;
+    }
+  }
+  std::string runtime_diagnostic;
+  if (!runtime_engine_->SetGrantedPermissions(
+          package_id, item->permissions, &runtime_diagnostic)) {
+    if (diagnostic)
+      *diagnostic = wxString::FromUTF8(runtime_diagnostic);
+    return false;
+  }
+  return true;
+}
+
 bool PortablePluginManagerPi::RestorePreviousPackage(
     const std::string& package_id, bool enable_after_restore,
     wxString* diagnostic) {
@@ -302,6 +387,14 @@ bool PortablePluginManagerPi::RestorePreviousPackage(
     if (diagnostic)
       *diagnostic = "Rollback failed: " +
                     wxString::FromUTF8(rollback.message);
+    return false;
+  }
+  const StoreResult audit = package_store_->AuditInstalled(package_id);
+  if (!audit.okay) {
+    if (diagnostic)
+      *diagnostic = "Previous package was restored but failed integrity "
+                    "verification: " +
+                    wxString::FromUTF8(audit.message);
     return false;
   }
   std::string runtime_diagnostic;
@@ -314,11 +407,14 @@ bool PortablePluginManagerPi::RestorePreviousPackage(
     return false;
   }
   if (enable_after_restore) {
-    if (!runtime_engine_->Enable(package_id, &runtime_diagnostic) ||
+    wxString permission_diagnostic;
+    if (!PreparePermissions(package_id, false, &permission_diagnostic) ||
+        !runtime_engine_->Enable(package_id, &runtime_diagnostic) ||
         !package_store_->SetEnabled(package_id, true).okay) {
       if (diagnostic)
         *diagnostic = "Previous package was restored but could not be "
                       "re-enabled: " +
+                      permission_diagnostic +
                       wxString::FromUTF8(runtime_diagnostic);
       return false;
     }
@@ -368,7 +464,10 @@ void PortablePluginManagerPi::InstallPackage(
       std::string refresh_diagnostic;
       runtime_engine_->RefreshPackage(inspected.package_id, developer_mode_,
                                       &refresh_diagnostic);
+      wxString permission_diagnostic;
       if (was_enabled &&
+          PreparePermissions(inspected.package_id, false,
+                             &permission_diagnostic) &&
           runtime_engine_->Enable(inspected.package_id, &refresh_diagnostic)) {
         package_store_->SetEnabled(inspected.package_id, true);
       }
@@ -376,6 +475,20 @@ void PortablePluginManagerPi::InstallPackage(
     SetManagerStatus("Installation failed without replacing the current "
                      "package: " +
                      wxString::FromUTF8(result.message));
+    return;
+  }
+
+  const StoreResult audit = package_store_->AuditInstalled(result.package_id);
+  if (!audit.okay) {
+    wxString recovery;
+    if (replacing)
+      RestorePreviousPackage(result.package_id, was_enabled, &recovery);
+    else
+      package_store_->Remove(result.package_id);
+    SetManagerStatus(
+        "Installed package failed the independent on-disk integrity audit: " +
+        wxString::FromUTF8(audit.message) +
+        (recovery.empty() ? wxString() : "\n" + recovery));
     return;
   }
 
@@ -398,6 +511,13 @@ void PortablePluginManagerPi::InstallPackage(
   }
 
   if (was_enabled) {
+    wxString permission_diagnostic;
+    if (!PreparePermissions(result.package_id, true,
+                            &permission_diagnostic)) {
+      SetManagerStatus(
+          "Package updated and left disabled: " + permission_diagnostic);
+      return;
+    }
     if (!runtime_engine_->Enable(result.package_id, &runtime_diagnostic)) {
       wxString recovery;
       RestorePreviousPackage(result.package_id, true, &recovery);
@@ -424,6 +544,20 @@ void PortablePluginManagerPi::InstallPackage(
 }
 
 void PortablePluginManagerPi::EnablePackage(const std::string& package_id) {
+  const StoreResult audit = package_store_->AuditInstalled(package_id);
+  if (!audit.okay) {
+    package_store_->SetEnabled(package_id, false);
+    SetManagerStatus("Refusing to enable " + wxString::FromUTF8(package_id) +
+                     ": installed-package integrity check failed: " +
+                     wxString::FromUTF8(audit.message));
+    return;
+  }
+  wxString permission_diagnostic;
+  if (!PreparePermissions(package_id, true, &permission_diagnostic)) {
+    package_store_->SetEnabled(package_id, false);
+    SetManagerStatus("Package remains disabled: " + permission_diagnostic);
+    return;
+  }
   std::string diagnostic;
   if (!runtime_engine_->Enable(package_id, &diagnostic)) {
     package_store_->SetEnabled(package_id, false);
@@ -500,8 +634,11 @@ void PortablePluginManagerPi::RollbackPackage(
   runtime_engine_->Unload(package_id, &ignored);
   const StoreResult rolled_back = package_store_->Rollback(package_id);
   std::string runtime_diagnostic;
+  const StoreResult audit =
+      rolled_back.okay ? package_store_->AuditInstalled(package_id)
+                       : StoreResult{};
   const bool loaded =
-      rolled_back.okay &&
+      rolled_back.okay && audit.okay &&
       runtime_engine_->RefreshPackage(package_id, developer_mode_,
                                       &runtime_diagnostic);
   RefreshManager();
@@ -509,9 +646,27 @@ void PortablePluginManagerPi::RollbackPackage(
       loaded ? wxString::FromUTF8(package_id) +
                    " rolled back and left disabled for review."
              : "Rollback failed: " +
-                   wxString::FromUTF8(rolled_back.okay
-                                          ? runtime_diagnostic
-                                          : rolled_back.message));
+                   wxString::FromUTF8(
+                       !rolled_back.okay
+                           ? rolled_back.message
+                           : !audit.okay ? audit.message
+                                         : runtime_diagnostic));
+}
+
+void PortablePluginManagerPi::RevokePackagePermissions(
+    const std::string& package_id) {
+  package_store_->SetEnabled(package_id, false);
+  std::string ignored;
+  runtime_engine_->Unload(package_id, &ignored);
+  const StoreResult revoked = permission_store_->Revoke(package_id);
+  RefreshManager();
+  SetManagerStatus(
+      revoked.okay
+          ? wxString::FromUTF8(package_id) +
+                " disabled and unloaded; all stored access approval was "
+                "revoked."
+          : "Could not revoke package access: " +
+                wxString::FromUTF8(revoked.message));
 }
 
 void PortablePluginManagerPi::SetPositionFixEx(PlugIn_Position_Fix_Ex& fix) {
@@ -579,7 +734,25 @@ void PortablePluginManagerPi::OnEngineStateChanged() {
 
 void PortablePluginManagerPi::RefreshManager() {
   if (manager_dialog_ && runtime_engine_) {
-    const auto packages = runtime_engine_->Packages();
+    auto packages = runtime_engine_->Packages();
+    const auto installed = package_store_->Installed();
+    for (auto& package : packages) {
+      const auto item = std::find_if(
+          installed.begin(), installed.end(),
+          [&](const auto& value) { return value.id == package.id; });
+      if (item == installed.end()) {
+        package.access = "Unknown";
+        continue;
+      }
+      const PermissionEvaluation access = permission_store_->Evaluate(*item);
+      package.access =
+          !access.okay
+              ? "Blocked"
+              : access.current
+                    ? "Approved"
+                    : access.added.empty() ? "Access reduced"
+                                           : "Approval required";
+    }
     manager_dialog_->SetPackages(packages);
     const auto failures =
         std::count_if(packages.begin(), packages.end(), [](const auto& value) {

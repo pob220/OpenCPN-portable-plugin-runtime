@@ -8,6 +8,7 @@
 #include "action_registry.h"
 #include "ocpn_plugin.h"
 #include "package_store.h"
+#include "permission_store.h"
 #include "runtime_engine.h"
 
 namespace ppm {
@@ -52,6 +53,9 @@ class PortablePluginManagerPi final : public opencpn_plugin_121 {
   void UnloadPackage(const std::string& package_id);
   void RemovePackage(const std::string& package_id);
   void RollbackPackage(const std::string& package_id);
+  void RevokePackagePermissions(const std::string& package_id);
+  bool PreparePermissions(const std::string& package_id, bool interactive,
+                          wxString* diagnostic);
   void SetManagerStatus(const wxString& status);
   bool RestorePreviousPackage(const std::string& package_id,
                               bool enable_after_restore,
@@ -64,6 +68,7 @@ class PortablePluginManagerPi final : public opencpn_plugin_121 {
   wxBitmap plugin_bitmap_;
   wxString storage_root_;
   std::unique_ptr<PackageStore> package_store_;
+  std::unique_ptr<PermissionStore> permission_store_;
   std::unique_ptr<RuntimeEngine> runtime_engine_;
   std::unique_ptr<ManagerDialog> manager_dialog_;
   bool developer_mode_ = false;

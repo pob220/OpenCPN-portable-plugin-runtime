@@ -22,15 +22,19 @@ struct StoredPackage {
   std::string version;
   bool development = false;
   bool enabled = false;
+  std::vector<std::string> permissions;
+  std::string manifest_digest;
   std::filesystem::path root;
 };
 
 class PackageStore {
  public:
-  explicit PackageStore(std::filesystem::path root);
+  explicit PackageStore(std::filesystem::path root,
+                        std::filesystem::path trust_root = {});
 
   void SetDeveloperMode(bool enabled) { developer_mode_ = enabled; }
   StoreResult Inspect(const std::filesystem::path& archive) const;
+  StoreResult AuditInstalled(const std::string& package_id) const;
   StoreResult Install(const std::filesystem::path& archive, bool replace);
   StoreResult Remove(const std::string& package_id);
   StoreResult Rollback(const std::string& package_id);
@@ -39,10 +43,11 @@ class PackageStore {
 
   const std::filesystem::path& Root() const { return root_; }
   std::filesystem::path PackagesRoot() const { return root_ / "packages"; }
-  std::filesystem::path TrustRoot() const { return root_ / "trust"; }
+  const std::filesystem::path& TrustRoot() const { return trust_root_; }
 
  private:
   std::filesystem::path root_;
+  std::filesystem::path trust_root_;
   bool developer_mode_ = false;
 };
 

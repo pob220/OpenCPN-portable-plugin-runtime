@@ -25,6 +25,7 @@
 
 #include "ocpn_plugin.h"
 #include "ocpn_portable_runtime.h"
+#include "permission_store.h"
 
 namespace ppm {
 namespace {
@@ -100,14 +101,6 @@ std::string ReadSmallFile(const fs::path& path, std::size_t limit,
   return result;
 }
 
-bool PersistedEnabled(const fs::path& storage_root,
-                      const std::string& package_id) {
-  std::ifstream input(storage_root / "state" /
-                      (package_id + ".enabled"));
-  char value = '\0';
-  return input.get(value) && value == '1';
-}
-
 }  // namespace
 
 class RuntimeEngine::Impl {
@@ -120,6 +113,7 @@ class RuntimeEngine::Impl {
     fs::path package_root;
     fs::path component_path;
     fs::path private_root;
+    std::set<std::string> requested_permissions;
     std::set<std::string> permissions;
     ocpn_portable_runtime* runtime = nullptr;
     mutable std::mutex runtime_mutex;
@@ -144,6 +138,12 @@ class RuntimeEngine::Impl {
   bool RefreshPackage(const std::string& package_id, bool developer_mode,
                       std::string* diagnostic);
   bool Enable(const std::string& package_id, std::string* diagnostic);
+  bool SetGrantedPermissions(
+      const std::string& package_id,
+      const std::vector<std::string>& granted_permissions,
+      std::string* diagnostic);
+  std::vector<std::string> RequestedPermissions(
+      const std::string& package_id) const;
   bool Disable(const std::string& package_id, std::string* diagnostic);
   bool Unload(const std::string& package_id, std::string* diagnostic);
   bool IsEnabled(const std::string& package_id) const;
@@ -489,6 +489,11 @@ bool RuntimeEngine::Impl::Start(Instance& instance,
                         : instance.diagnostic;
     return false;
   }
+  if (instance.permissions != instance.requested_permissions) {
+    if (diagnostic) *diagnostic = "permission approval is required";
+    instance.diagnostic = "permission approval is required";
+    return false;
+  }
   std::lock_guard<std::mutex> lock(instance.runtime_mutex);
   std::array<char, kErrorCapacity> error{};
   if (!instance.runtime) {
@@ -644,25 +649,6 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
     return false;
   }
 
-  static const std::set<std::string> known_permissions = {
-      "ui.commands",
-      "navigation.position.read",
-      "navigation.objects.read",
-      "settings.read-write",
-      "overlay.submit",
-      "jobs.compute",
-      "environment.datasets",
-      "storage.user-selected",
-      "network.providers",
-      "helpers.environment.decode",
-      "helpers.environment.generate",
-      "charts.coverage",
-      "network.http",
-      "storage.private",
-      "credentials.provider",
-      "weather-routing.compute",
-      "environment.consume",
-      "navigation.routes.write"};
   wxJSONValue requested = manifest["permissions"];
   for (int index = 0; index < requested.Size(); ++index) {
     if (!requested[index].IsString()) {
@@ -671,12 +657,12 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
       break;
     }
     const std::string permission = requested[index].AsString().ToStdString();
-    if (known_permissions.count(permission) == 0) {
+    if (!FindPermission(permission)) {
       instance->failed = true;
       instance->diagnostic = "unknown permission: " + permission;
       break;
     }
-    instance->permissions.insert(permission);
+    instance->requested_permissions.insert(permission);
   }
   std::error_code filesystem_error;
   fs::create_directories(instance->private_root, filesystem_error);
@@ -722,9 +708,7 @@ bool RuntimeEngine::Impl::LoadInstalled(bool developer_mode) {
   bool okay = true;
   for (const auto& root : roots) {
     std::string diagnostic;
-    const bool activate =
-        PersistedEnabled(storage_root, root.filename().string());
-    if (!LoadRoot(root, developer_mode, activate, &diagnostic)) okay = false;
+    if (!LoadRoot(root, developer_mode, false, &diagnostic)) okay = false;
   }
   state_changed();
   return okay;
@@ -751,8 +735,7 @@ bool RuntimeEngine::Impl::RefreshPackage(const std::string& package_id,
     return !error;
   }
   const bool result =
-      LoadRoot(root, developer_mode,
-               PersistedEnabled(storage_root, package_id), diagnostic);
+      LoadRoot(root, developer_mode, false, diagnostic);
   state_changed();
   return result;
 }
@@ -768,6 +751,45 @@ bool RuntimeEngine::Impl::Enable(const std::string& package_id,
   const bool result = Start(*instance, diagnostic);
   state_changed();
   return result;
+}
+
+bool RuntimeEngine::Impl::SetGrantedPermissions(
+    const std::string& package_id,
+    const std::vector<std::string>& granted_permissions,
+    std::string* diagnostic) {
+  Instance* instance = Find(package_id);
+  if (!instance) {
+    if (diagnostic) *diagnostic = "package is not loaded";
+    return false;
+  }
+  std::set<std::string> granted;
+  for (const auto& permission : granted_permissions) {
+    if (!FindPermission(permission) ||
+        instance->requested_permissions.count(permission) == 0 ||
+        !granted.insert(permission).second) {
+      if (diagnostic)
+        *diagnostic = "grant contains an unknown, unrequested or duplicate "
+                      "permission";
+      return false;
+    }
+  }
+  if (granted != instance->requested_permissions) {
+    if (diagnostic)
+      *diagnostic = "grant does not cover all requested permissions";
+    return false;
+  }
+  instance->permissions = std::move(granted);
+  if (!instance->failed) instance->diagnostic.clear();
+  state_changed();
+  return true;
+}
+
+std::vector<std::string> RuntimeEngine::Impl::RequestedPermissions(
+    const std::string& package_id) const {
+  const Instance* instance = Find(package_id);
+  if (!instance) return {};
+  return {instance->requested_permissions.begin(),
+          instance->requested_permissions.end()};
 }
 
 bool RuntimeEngine::Impl::Disable(const std::string& package_id,
@@ -876,6 +898,19 @@ bool RuntimeEngine::Enable(const std::string& package_id,
   return impl_->Enable(package_id, diagnostic);
 }
 
+bool RuntimeEngine::SetGrantedPermissions(
+    const std::string& package_id,
+    const std::vector<std::string>& granted_permissions,
+    std::string* diagnostic) {
+  return impl_->SetGrantedPermissions(package_id, granted_permissions,
+                                      diagnostic);
+}
+
+std::vector<std::string> RuntimeEngine::RequestedPermissions(
+    const std::string& package_id) const {
+  return impl_->RequestedPermissions(package_id);
+}
+
 bool RuntimeEngine::Disable(const std::string& package_id,
                             std::string* diagnostic) {
   return impl_->Disable(package_id, diagnostic);
@@ -920,6 +955,7 @@ std::vector<PackageSnapshot> RuntimeEngine::Packages() const {
          : instance->enabled ? "Enabled"
          : instance->runtime ? "Disabled"
                              : "Unloaded",
+         "Unknown",
          instance->diagnostic});
   }
   return result;

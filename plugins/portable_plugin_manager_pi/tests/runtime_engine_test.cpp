@@ -121,11 +121,25 @@ int main() {
     auto packages = engine.Packages();
     CHECK(packages.size() == 1);
     CHECK(Snapshot(packages, package_id));
-    CHECK(Snapshot(packages, package_id)->state == "Enabled");
+    CHECK(Snapshot(packages, package_id)->state == "Unloaded");
+    CHECK(!engine.IsEnabled(package_id));
+    CHECK(actions.empty());
+    std::string diagnostic;
+    const auto requested = engine.RequestedPermissions(package_id);
+    CHECK(requested.size() == 15);
+    CHECK(!engine.Enable(package_id, &diagnostic));
+    CHECK(diagnostic == "permission approval is required");
+    CHECK(actions.empty());
+    diagnostic.clear();
+    CHECK(!engine.SetGrantedPermissions(
+        package_id, {requested.front()}, &diagnostic));
+    CHECK(!diagnostic.empty());
+    diagnostic.clear();
+    CHECK(engine.SetGrantedPermissions(package_id, requested, &diagnostic));
+    CHECK(engine.Enable(package_id, &diagnostic));
     CHECK(engine.IsEnabled(package_id));
     CHECK(actions.size() == 3);
 
-    std::string diagnostic;
     CHECK(engine.Disable(package_id, &diagnostic));
     CHECK(!engine.IsEnabled(package_id));
     CHECK(Snapshot(engine.Packages(), package_id)->state == "Disabled");
@@ -155,6 +169,11 @@ int main() {
 
     CHECK(engine.Unload(package_id, &diagnostic));
     CHECK(engine.RefreshPackage(package_id, true, &diagnostic));
+    CHECK(Snapshot(engine.Packages(), package_id)->state == "Unloaded");
+    CHECK(actions.empty());
+    CHECK(engine.SetGrantedPermissions(
+        package_id, engine.RequestedPermissions(package_id), &diagnostic));
+    CHECK(engine.Enable(package_id, &diagnostic));
     CHECK(Snapshot(engine.Packages(), package_id)->state == "Enabled");
     CHECK(actions.size() == 3);
     engine.Shutdown();

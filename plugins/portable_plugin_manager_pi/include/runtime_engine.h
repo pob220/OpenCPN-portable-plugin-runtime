@@ -24,6 +24,7 @@ struct PackageSnapshot {
   std::string name;
   std::string version;
   std::string state;
+  std::string access;
   std::string diagnostic;
 };
 
@@ -61,6 +62,12 @@ class RuntimeEngine {
   bool RefreshPackage(const std::string& package_id, bool developer_mode,
                       std::string* diagnostic);
   bool Enable(const std::string& package_id, std::string* diagnostic);
+  bool SetGrantedPermissions(
+      const std::string& package_id,
+      const std::vector<std::string>& granted_permissions,
+      std::string* diagnostic);
+  std::vector<std::string> RequestedPermissions(
+      const std::string& package_id) const;
   bool Disable(const std::string& package_id, std::string* diagnostic);
   bool Unload(const std::string& package_id, std::string* diagnostic);
   bool IsEnabled(const std::string& package_id) const;

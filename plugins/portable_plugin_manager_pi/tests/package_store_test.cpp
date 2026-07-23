@@ -230,6 +230,8 @@ int main() {
   CHECK(installed.code == "installed");
   CHECK(installed.package_id == "org.opencpn.test-package");
   CHECK(fs::is_regular_file(installed.destination / "component/test.wasm"));
+  CHECK(fs::is_regular_file(installed.destination / "checksums.sha256"));
+  CHECK(store.AuditInstalled(installed.package_id).okay);
 
   auto packages = store.Installed();
   CHECK(packages.size() == 1);
@@ -255,6 +257,7 @@ int main() {
   CHECK(rolled_back.okay);
   packages = store.Installed();
   CHECK(packages[0].version == "0.1.0");
+  CHECK(store.AuditInstalled(packages[0].id).okay);
 
   const fs::path bad_digest = archive_dir / "bad digest.ocpnp";
   PackageOptions bad_digest_options;
@@ -350,6 +353,9 @@ int main() {
   CHECK(BuildPackage(signed_production, "0.3.0", signed_options));
   CHECK(store.Inspect(signed_production).okay);
   CHECK(store.Install(signed_production, true).okay);
+  CHECK(store.AuditInstalled("org.opencpn.test-package").okay);
+  CHECK(fs::is_regular_file(
+      store.PackagesRoot() / "org.opencpn.test-package" / "signature.json"));
 
   const fs::path corrupt_signature =
       archive_dir / "corrupt signature.ocpnp";
@@ -359,6 +365,18 @@ int main() {
 
   ppm::PackageStore untrusted_store(test_root / "untrusted store");
   CHECK(!untrusted_store.Inspect(signed_production).okay);
+
+  const fs::path installed_component =
+      store.PackagesRoot() / "org.opencpn.test-package" /
+      "component/test.wasm";
+  fs::permissions(installed_component, fs::perms::owner_write,
+                  fs::perm_options::add);
+  {
+    std::ofstream tampered(installed_component,
+                           std::ios::binary | std::ios::trunc);
+    tampered << "tampered";
+  }
+  CHECK(!store.AuditInstalled("org.opencpn.test-package").okay);
 
   const auto removed = store.Remove("org.opencpn.test-package");
   CHECK(removed.okay);
