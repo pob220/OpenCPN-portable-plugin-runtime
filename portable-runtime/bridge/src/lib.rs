@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use wasmtime::component::ResourceTable;
 use wasmtime::component::{Component, HasSelf, Linker};
-use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
+use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use exports::opencpn::portable::plugin::JobEvent;
@@ -44,8 +44,14 @@ const ROUTING_BASE_FUEL: u64 = 2_000_000_000;
 // Budget fuel for both while retaining the state and epoch backstops.
 const ROUTING_FUEL_PER_RETAINED_STATE: u64 = 1_500_000;
 const ROUTING_MAX_FUEL: u64 = 250_000_000_000;
-const ROUTING_BASE_EPOCH_TICKS: u64 = 3_000;
-const ROUTING_EXTRA_EPOCH_TICKS: u64 = 15_000;
+// A routing export can now contain an independently bounded initial pass and
+// fine-corridor pass, and current-aware graph recovery deliberately falls back
+// to Dijkstra. Keep an absolute backstop, but do not abort a healthy default
+// 80,000-state route after the former seven-minute allowance. The resulting
+// deadline scales from 30 to 60 minutes; ordinary routes still return as soon
+// as they finish and remain cooperatively cancellable throughout.
+const ROUTING_BASE_EPOCH_TICKS: u64 = 18_000;
+const ROUTING_EXTRA_EPOCH_TICKS: u64 = 18_000;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -422,23 +428,35 @@ fn prepare_call(runtime: &mut Runtime) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn routing_epoch_deadline_ticks(requested_states: u32) -> u64 {
+    let bounded_states = u64::from(requested_states.clamp(100, 1_000_000));
+    ROUTING_BASE_EPOCH_TICKS
+        .saturating_add(bounded_states.saturating_mul(ROUTING_EXTRA_EPOCH_TICKS) / 1_000_000)
+}
+
+fn routing_epoch_deadline_minutes(requested_states: u32) -> u64 {
+    let milliseconds = routing_epoch_deadline_ticks(requested_states)
+        .saturating_mul(EPOCH_TICK.as_millis() as u64);
+    milliseconds.saturating_add(60_000 - 1) / 60_000
+}
+
 fn prepare_routing_call(runtime: &mut Runtime, requested_states: u32) -> anyhow::Result<()> {
     // Route calculation is a declared bounded workload, unlike a toolbar or
     // lifecycle callback.  Scale deterministic execution fuel with the
     // retained-state budget exposed by the route request, while clamping to
     // the component's public limit.  Scale the independent wall-clock
-    // backstop from five minutes to at most thirty minutes as well: recovery
-    // searches remain bounded, but a large declared route should not inherit
-    // the same deadline as a short coastal route.  Cancellation remains
-    // cooperative throughout all three solver stages.
+    // backstop from thirty to at most sixty minutes as well: two-pass recovery
+    // searches remain bounded, but a healthy difficult route should not be
+    // aborted at the former seven-minute default. Cancellation remains
+    // cooperative throughout all solver stages.
     let bounded_states = u64::from(requested_states.clamp(100, 1_000_000));
     let fuel = ROUTING_BASE_FUEL
         .saturating_add(bounded_states.saturating_mul(ROUTING_FUEL_PER_RETAINED_STATE))
         .min(ROUTING_MAX_FUEL);
-    let deadline_ticks = ROUTING_BASE_EPOCH_TICKS
-        .saturating_add(bounded_states.saturating_mul(ROUTING_EXTRA_EPOCH_TICKS) / 1_000_000);
     runtime.store.set_fuel(fuel)?;
-    runtime.store.set_epoch_deadline(deadline_ticks);
+    runtime
+        .store
+        .set_epoch_deadline(routing_epoch_deadline_ticks(requested_states));
     Ok(())
 }
 
@@ -916,6 +934,36 @@ fn ffi_result<T>(result: anyhow::Result<T>, error: *mut c_char, error_capacity: 
         Ok(_) => 0,
         Err(err) => {
             let message = format!("{err:#}");
+            write_error(error, error_capacity.min(ERROR_TEXT_LIMIT), &message);
+            -1
+        }
+    }
+}
+
+fn routing_error_message(error: &anyhow::Error, requested_states: u32) -> String {
+    match error.downcast_ref::<Trap>() {
+        Some(Trap::Interrupt) => format!(
+            "weather routing exceeded its bounded {}-minute runtime deadline while exploring a difficult route; the calculation was safely interrupted. Retry with fewer departure alternatives or workers, or reduce the search limits",
+            routing_epoch_deadline_minutes(requested_states)
+        ),
+        Some(Trap::OutOfFuel) => format!(
+            "weather routing exhausted its bounded computation budget for {} retained states; the calculation was safely interrupted. Retry with fewer departure alternatives or a smaller search, or increase the state limit",
+            requested_states.clamp(100, 1_000_000)
+        ),
+        _ => format!("{error:#}"),
+    }
+}
+
+fn ffi_routing_result<T>(
+    result: anyhow::Result<T>,
+    requested_states: u32,
+    error: *mut c_char,
+    error_capacity: usize,
+) -> i32 {
+    match result {
+        Ok(_) => 0,
+        Err(err) => {
+            let message = routing_error_message(&err, requested_states);
             write_error(error, error_capacity.min(ERROR_TEXT_LIMIT), &message);
             -1
         }
@@ -1518,7 +1566,7 @@ pub unsafe extern "C" fn ocpn_portable_runtime_calculate_route(
         }
         Ok(())
     })();
-    ffi_result(calculated, error, error_capacity)
+    ffi_routing_result(calculated, request.max_states, error, error_capacity)
 }
 
 #[unsafe(no_mangle)]
@@ -1540,4 +1588,38 @@ pub unsafe extern "C" fn ocpn_portable_runtime_test_trap(
         Ok(())
     })();
     ffi_result(result, error, error_capacity)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routing_deadline_accounts_for_default_two_pass_search() {
+        let default_ticks = routing_epoch_deadline_ticks(80_000);
+        assert!(default_ticks >= 30 * 60 * 10);
+        assert!(default_ticks <= 60 * 60 * 10);
+        assert_eq!(routing_epoch_deadline_minutes(80_000), 33);
+        assert_eq!(routing_epoch_deadline_ticks(1_000_000), 60 * 60 * 10);
+    }
+
+    #[test]
+    fn routing_interrupt_is_reported_without_a_wasm_backtrace() {
+        let error =
+            anyhow::Error::new(Trap::Interrupt).context("error while executing at wasm backtrace");
+        let message = routing_error_message(&error, 80_000);
+        assert!(message.contains("33-minute runtime deadline"));
+        assert!(message.contains("safely interrupted"));
+        assert!(!message.contains("wasm backtrace"));
+        assert!(!message.contains("wasm function"));
+    }
+
+    #[test]
+    fn routing_fuel_exhaustion_has_an_actionable_diagnostic() {
+        let error = anyhow::Error::new(Trap::OutOfFuel);
+        let message = routing_error_message(&error, 80_000);
+        assert!(message.contains("computation budget"));
+        assert!(message.contains("80000 retained states"));
+        assert!(!message.contains("wasm backtrace"));
+    }
 }

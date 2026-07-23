@@ -15,6 +15,8 @@
 #include <wx/app.h>
 #include <wx/checkbox.h>
 #include <wx/choice.h>
+#include <wx/datectrl.h>
+#include <wx/dateevt.h>
 #include <wx/datetime.h>
 #include <wx/dialog.h>
 #include <wx/filedlg.h>
@@ -43,8 +45,10 @@
 #include "ocpn_portable_runtime.h"
 #include "ocpndc.h"
 #include "navutil.h"
+#include "portable_departure_time.h"
 #include "portable_polar.h"
 #include "portable_ui_menu.h"
+#include "time_textbox.h"
 #include "viewport.h"
 
 namespace {
@@ -66,16 +70,6 @@ void AddRow(wxFlexGridSizer* grid, wxWindow* parent, const wxString& label,
 bool Number(wxTextCtrl* control, double* value) {
   return control && control->GetValue().ToDouble(value) &&
          std::isfinite(*value);
-}
-bool UtcTime(wxTextCtrl* control, int64_t* value) {
-  if (!control || !value) return false;
-  wxDateTime parsed;
-  const wxChar* end =
-      parsed.ParseFormat(control->GetValue(), "%Y-%m-%dT%H:%MZ");
-  if (!end || *end != 0 || !parsed.IsValid()) return false;
-  parsed.MakeFromTimezone(wxDateTime::UTC);
-  *value = parsed.GetTicks();
-  return true;
 }
 bool LoadSurface(const wxString& package_root, const wxString& surface_resource,
                  wxString* title, wxArrayString* tabs,
@@ -456,12 +450,6 @@ bool AppendRouteLeg(RoutingOutcome* passage, RoutingOutcome leg,
   return true;
 }
 
-wxString FormatUtc(int64_t unix_time) {
-  return wxDateTime(static_cast<time_t>(unix_time))
-      .ToUTC()
-      .Format("%d %b %Y %H:%M UTC");
-}
-
 wxString FormatElapsed(uint64_t seconds) {
   const uint64_t days = seconds / 86400;
   const uint64_t hours = (seconds % 86400) / 3600;
@@ -690,6 +678,12 @@ private:
   bool ApplyPositionSource(bool start, bool report_error = true);
   void UpdatePositionControls(bool start);
   void RelayoutRoutePanel();
+  PortableDepartureZone SelectedDepartureZone() const;
+  bool GetDepartureUnixTime(int64_t* unix_time, wxString* error) const;
+  void SetDepartureUnixTime(int64_t unix_time);
+  void UpdateDepartureSummary();
+  wxString FormatRoutingTime(int64_t unix_time) const;
+  void UpdateTimeColumnLabels();
   bool LoadVesselPerformance(const wxString& path, bool report_error = true);
   void LoadSettings();
   void SaveSettings();
@@ -743,10 +737,15 @@ private:
   std::map<wxString, wxMenuItem*> surface_menu_items;
   wxScrolledWindow* route_panel = nullptr;
   wxTextCtrl *start_lat = nullptr, *start_lon = nullptr, *dest_lat = nullptr,
-             *dest_lon = nullptr, *departure = nullptr;
+             *dest_lon = nullptr;
   wxChoice *start_source = nullptr, *start_waypoint = nullptr,
            *dest_source = nullptr, *dest_waypoint = nullptr,
-           *route_choice = nullptr;
+           *route_choice = nullptr, *departure_timezone = nullptr;
+  wxDatePickerCtrl* departure_date = nullptr;
+  TimeCtrl* departure_time = nullptr;
+  wxStaticText* departure_summary = nullptr;
+  wxButton *departure_now = nullptr, *departure_grib_time = nullptr;
+  std::vector<PortableDepartureZone> departure_time_zones;
   wxCheckBox* use_opencpn_route = nullptr;
   wxButton* refresh_positions = nullptr;
   wxFilePickerCtrl* vessel_performance_file = nullptr;
@@ -822,8 +821,65 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateRoutePanel(wxNotebook* book) {
                             wxString::Format("%.6f", initial_latitude + 1.0));
   dest_lon = new wxTextCtrl(panel, wxID_ANY,
                             wxString::Format("%.6f", initial_longitude + 1.5));
-  departure = new wxTextCtrl(
-      panel, wxID_ANY, wxDateTime::Now().ToUTC().Format("%Y-%m-%dT%H:%MZ"));
+  auto* departure_editor = new wxPanel(panel);
+  auto* departure_editor_root = new wxBoxSizer(wxVERTICAL);
+  auto* departure_fields = new wxBoxSizer(wxHORIZONTAL);
+  departure_date =
+      new wxDatePickerCtrl(departure_editor, wxID_ANY, wxDefaultDateTime,
+                           wxDefaultPosition, wxDefaultSize, wxDP_DEFAULT);
+  departure_time =
+      new TimeCtrl(departure_editor, wxID_ANY, wxDefaultDateTime,
+                   wxDefaultPosition, departure_editor->FromDIP(wxSize(80, -1)));
+  departure_timezone = new wxChoice(departure_editor, wxID_ANY);
+  departure_time_zones.clear();
+  auto add_zone = [this](const wxString& label,
+                         const PortableDepartureZone& zone) {
+    departure_timezone->Append(label);
+    departure_time_zones.push_back(zone);
+  };
+  add_zone("UTC", {});
+  add_zone("System local — " + PortableSystemTimeZoneName(),
+           {PortableDepartureZoneKind::kSystemLocal, 0});
+  const std::vector<int> fixed_offsets = {
+      -720, -660, -600, -570, -540, -480, -420, -360, -300, -240,
+      -210, -180, -120, -60,  60,   120,  180,  210,  240,  270,
+      300,  330,  345,  360,  390,  420,  480,  525,  540,  570,
+      600,  630,  660,  720,  765,  780,  840};
+  for (const int offset : fixed_offsets) {
+    const char sign = offset < 0 ? '-' : '+';
+    const int absolute = std::abs(offset);
+    add_zone(wxString::Format("Fixed UTC%c%02d:%02d", sign, absolute / 60,
+                              absolute % 60),
+             {PortableDepartureZoneKind::kFixedOffset, offset});
+  }
+  departure_timezone->SetSelection(0);
+  departure_timezone->SetMinSize(
+      departure_editor->FromDIP(wxSize(190, -1)));
+  departure_date->SetToolTip("Departure calendar date in the selected timezone");
+  departure_time->SetToolTip(
+      "Departure clock time in 24-hour HH:MM format");
+  departure_timezone->SetToolTip(
+      "Timezone used for departure entry and route schedules");
+  departure_fields->Add(departure_date, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT,
+                        6);
+  departure_fields->Add(departure_time, 0,
+                        wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+  departure_fields->Add(departure_timezone, 1, wxALIGN_CENTER_VERTICAL);
+  departure_editor_root->Add(departure_fields, 0, wxEXPAND);
+  auto* departure_actions = new wxBoxSizer(wxHORIZONTAL);
+  departure_now = new wxButton(departure_editor, wxID_ANY, "Now",
+                               wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+  departure_grib_time =
+      new wxButton(departure_editor, wxID_ANY, "Displayed GRIB time");
+  departure_actions->Add(departure_now, 0, wxRIGHT, 6);
+  departure_actions->Add(departure_grib_time, 0);
+  departure_editor_root->Add(departure_actions, 0, wxTOP, 6);
+  departure_summary = new wxStaticText(departure_editor, wxID_ANY, wxEmptyString);
+  departure_editor_root->Add(departure_summary, 0, wxEXPAND | wxTOP, 6);
+  departure_editor->SetSizer(departure_editor_root);
+  SetDepartureUnixTime(
+      ((static_cast<int64_t>(wxDateTime::Now().GetTicks()) + 899) / 900) *
+      900);
   vessel_performance_file = new wxFilePickerCtrl(
       panel, wxID_ANY, wxEmptyString, Label("vessel-performance-file"),
       "OpenCPN boat or polar (*.xml;*.pol)|*.xml;*.pol|All files|*",
@@ -854,7 +910,7 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateRoutePanel(wxNotebook* book) {
   AddRow(grid, panel, Label("destination-latitude"), dest_lat);
   AddRow(grid, panel, Label("destination-longitude"), dest_lon);
   AddRow(grid, panel, Label("opencpn-route"), route_choice);
-  AddRow(grid, panel, Label("departure-utc"), departure);
+  AddRow(grid, panel, Label("departure-utc"), departure_editor);
   AddRow(grid, panel, Label("vessel-performance-file"),
          vessel_performance_file);
   vessel_performance_status =
@@ -927,6 +983,31 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateRoutePanel(wxNotebook* book) {
       wxEVT_FILEPICKER_CHANGED, [this](wxFileDirPickerEvent&) {
         LoadVesselPerformance(vessel_performance_file->GetPath());
       });
+  departure_date->Bind(wxEVT_DATE_CHANGED,
+                       [this](wxDateEvent&) { UpdateDepartureSummary(); });
+  departure_time->Bind(wxEVT_TIME_CHANGED,
+                       [this](wxDateEvent&) { UpdateDepartureSummary(); });
+  departure_timezone->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
+    UpdateDepartureSummary();
+    UpdateTimeColumnLabels();
+    PopulateDepartureResults();
+    if (selected_departure_result != std::numeric_limits<size_t>::max())
+      SelectDepartureResult(selected_departure_result);
+    SaveSettings();
+  });
+  departure_now->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+    SetDepartureUnixTime(
+        ((static_cast<int64_t>(wxDateTime::Now().GetTicks()) + 59) / 60) * 60);
+  });
+  departure_grib_time->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+    int64_t forecast_time = 0;
+    if (displayed_environment_time &&
+        displayed_environment_time(&forecast_time)) {
+      SetDepartureUnixTime(forecast_time);
+    } else if (status) {
+      status->SetLabel("No displayed iGRIB forecast time is available");
+    }
+  });
   return panel;
 }
 
@@ -939,6 +1020,78 @@ void PortableWeatherRoutingHost::Impl::RelayoutRoutePanel() {
   if (provider) provider->Wrap(wrap_width);
   route_panel->Layout();
   route_panel->FitInside();
+}
+
+PortableDepartureZone
+PortableWeatherRoutingHost::Impl::SelectedDepartureZone() const {
+  if (!departure_timezone) return {};
+  const int selection = departure_timezone->GetSelection();
+  if (selection < 0 ||
+      static_cast<size_t>(selection) >= departure_time_zones.size())
+    return {};
+  return departure_time_zones[static_cast<size_t>(selection)];
+}
+
+bool PortableWeatherRoutingHost::Impl::GetDepartureUnixTime(
+    int64_t* unix_time, wxString* error) const {
+  if (!departure_date || !departure_time) {
+    if (error) *error = "Departure controls are unavailable";
+    return false;
+  }
+  const wxDateTime clock = departure_time->GetValue();
+  if (!clock.IsValid()) {
+    if (error) *error = "Enter the departure time as HH:MM";
+    return false;
+  }
+  return PortableDepartureToUnix(
+      departure_date->GetValue(), clock.GetHour(), clock.GetMinute(),
+      SelectedDepartureZone(), unix_time, error);
+}
+
+void PortableWeatherRoutingHost::Impl::SetDepartureUnixTime(
+    int64_t unix_time) {
+  if (!departure_date || !departure_time) return;
+  const wxDateTime wall =
+      PortableDepartureWallTime(unix_time, SelectedDepartureZone());
+  departure_date->SetValue(wall);
+  departure_time->SetValue(wall);
+  UpdateDepartureSummary();
+}
+
+void PortableWeatherRoutingHost::Impl::UpdateDepartureSummary() {
+  if (!departure_summary) return;
+  int64_t unix_time = 0;
+  wxString error;
+  if (!GetDepartureUnixTime(&unix_time, &error)) {
+    departure_summary->SetLabel(error);
+    departure_summary->SetToolTip(error);
+  } else {
+    const PortableDepartureZone zone = SelectedDepartureZone();
+    const wxString selected = FormatPortableDepartureTime(unix_time, zone);
+    const wxString utc = FormatPortableDepartureTime(unix_time, {});
+    departure_summary->SetLabel(
+        zone.kind == PortableDepartureZoneKind::kUtc
+            ? "Routing time: " + utc
+            : "Routing time: " + selected + " = " + utc);
+    departure_summary->SetToolTip(
+        "The portable routing engine receives the unambiguous UTC value");
+  }
+  RelayoutRoutePanel();
+}
+
+wxString PortableWeatherRoutingHost::Impl::FormatRoutingTime(
+    int64_t unix_time) const {
+  return FormatPortableDepartureTime(unix_time, SelectedDepartureZone());
+}
+
+void PortableWeatherRoutingHost::Impl::UpdateTimeColumnLabels() {
+  if (!route_schedule) return;
+  const wxString zone = PortableDepartureZoneLabel(
+      SelectedDepartureZone(), static_cast<int64_t>(wxDateTime::Now().GetTicks()));
+  wxListItem column;
+  column.SetMask(wxLIST_MASK_TEXT);
+  column.SetText("Time (" + zone + ")");
+  route_schedule->SetColumn(0, column);
 }
 
 bool PortableWeatherRoutingHost::Impl::LoadVesselPerformance(
@@ -1493,6 +1646,8 @@ void PortableWeatherRoutingHost::Impl::LoadSettings() {
   if (!pConfig) {
     vessel_performance_file->SetPath(bundled_polar);
     LoadVesselPerformance(bundled_polar, false);
+    UpdateDepartureSummary();
+    UpdateTimeColumnLabels();
     return;
   }
   const wxString old_path = pConfig->GetPath();
@@ -1501,6 +1656,33 @@ void PortableWeatherRoutingHost::Impl::LoadSettings() {
       pConfig->Read("vesselPerformancePath", bundled_polar);
   vessel_performance_file->SetPath(performance_path);
   LoadVesselPerformance(performance_path, false);
+  int64_t initial_departure = 0;
+  wxString departure_error;
+  const bool have_initial_departure =
+      GetDepartureUnixTime(&initial_departure, &departure_error);
+  PortableDepartureZone configured_zone;
+  const wxString configured_zone_setting =
+      pConfig->Read("departureTimeZone", "UTC");
+  if (ParsePortableDepartureZoneSetting(configured_zone_setting,
+                                        &configured_zone)) {
+    auto configured = std::find(departure_time_zones.begin(),
+                                departure_time_zones.end(), configured_zone);
+    if (configured == departure_time_zones.end() &&
+        configured_zone.kind == PortableDepartureZoneKind::kFixedOffset) {
+      const int offset = configured_zone.offset_minutes;
+      const char sign = offset < 0 ? '-' : '+';
+      const int absolute = std::abs(offset);
+      departure_timezone->Append(wxString::Format(
+          "Fixed UTC%c%02d:%02d", sign, absolute / 60, absolute % 60));
+      departure_time_zones.push_back(configured_zone);
+      configured = std::prev(departure_time_zones.end());
+    }
+    if (configured != departure_time_zones.end())
+      departure_timezone->SetSelection(
+          static_cast<int>(std::distance(departure_time_zones.begin(),
+                                         configured)));
+  }
+  if (have_initial_departure) SetDepartureUnixTime(initial_departure);
   avoid_land->SetValue(pConfig->ReadBool("avoidUnsafeCharts", true));
   use_opencpn_route->SetValue(pConfig->ReadBool("useOpenCpnRoute", false));
   configured_route_id = pConfig->Read("openCpnRouteId", wxEmptyString);
@@ -1601,15 +1783,19 @@ void PortableWeatherRoutingHost::Impl::LoadSettings() {
   fuel_consumption->Enable(propulsion_enabled);
   limit_fuel->Enable(propulsion_enabled);
   maximum_fuel->Enable(propulsion_enabled && limit_fuel->GetValue());
+  UpdateDepartureSummary();
+  UpdateTimeColumnLabels();
 }
 
 void PortableWeatherRoutingHost::Impl::SaveSettings() {
   if (!pConfig) return;
   const wxString old_path = pConfig->GetPath();
   pConfig->SetPath("/PortablePlugins/" + plugin_id + "/Routing");
-  pConfig->Write("settingsSchema", 5L);
+  pConfig->Write("settingsSchema", 6L);
   if (vessel_performance_file)
     pConfig->Write("vesselPerformancePath", vessel_performance_file->GetPath());
+  pConfig->Write("departureTimeZone",
+                 PortableDepartureZoneSetting(SelectedDepartureZone()));
   pConfig->Write("avoidUnsafeCharts", avoid_land->GetValue());
   pConfig->Write("useOpenCpnRoute", use_opencpn_route->GetValue());
   if (route_choice && route_choice->GetSelection() != wxNOT_FOUND &&
@@ -1797,7 +1983,13 @@ void PortableWeatherRoutingHost::Impl::PopulateManagerRouting(
   const long row = manager_routings->InsertItem(0, state);
   manager_routings->SetItem(row, 1, position_name(true));
   manager_routings->SetItem(row, 2, position_name(false));
-  manager_routings->SetItem(row, 3, departure ? departure->GetValue() : wxString());
+  int64_t configured_departure = 0;
+  wxString departure_error;
+  manager_routings->SetItem(
+      row, 3,
+      GetDepartureUnixTime(&configured_departure, &departure_error)
+          ? FormatRoutingTime(configured_departure)
+          : "Invalid departure");
   if (selected_departure_result != std::numeric_limits<size_t>::max() &&
       selected_departure_result < departure_result_rows.size() &&
       departure_result_rows[selected_departure_result].success) {
@@ -1805,8 +1997,8 @@ void PortableWeatherRoutingHost::Impl::PopulateManagerRouting(
         departure_result_rows[selected_departure_result].outcome;
     manager_routings->SetItem(
         row, 4,
-        FormatUtc(outcome.departure_unix_time +
-                  static_cast<int64_t>(outcome.duration_seconds)));
+        FormatRoutingTime(outcome.departure_unix_time +
+                          static_cast<int64_t>(outcome.duration_seconds)));
     manager_routings->SetItem(row, 5, FormatElapsed(outcome.duration_seconds));
     manager_routings->SetItem(
         row, 6, wxString::Format("%.1f NM", outcome.distance_nautical_miles));
@@ -1827,8 +2019,9 @@ void PortableWeatherRoutingHost::Impl::DispatchSurfaceAction(
   } else if (action == "refresh-positions") {
     RefreshNavigationPositions();
   } else if (action == "new-routing") {
-    departure->SetValue(
-        wxDateTime::Now().ToUTC().Format("%Y-%m-%dT%H:%MZ"));
+    SetDepartureUnixTime(
+        ((static_cast<int64_t>(wxDateTime::Now().GetTicks()) + 899) / 900) *
+        900);
     ShowEditor(0);
     PopulateManagerRouting("Not computed");
   } else if (action == "edit-routing" || action == "show-configuration") {
@@ -2037,13 +2230,15 @@ void PortableWeatherRoutingHost::Impl::Start() {
       (!ApplyPositionSource(true) || !ApplyPositionSource(false)))
     return;
   ocpn_portable_route_request request{};
+  wxString departure_error;
   if (!Number(start_lat, &request.start_latitude) ||
       !Number(start_lon, &request.start_longitude) ||
       !Number(dest_lat, &request.destination_latitude) ||
       !Number(dest_lon, &request.destination_longitude) ||
-      !UtcTime(departure, &request.departure_unix_time)) {
-    status->SetLabel(
-        "Enter valid positions and departure as YYYY-MM-DDTHH:MMZ");
+      !GetDepartureUnixTime(&request.departure_unix_time, &departure_error)) {
+    status->SetLabel(departure_error.empty()
+                         ? "Enter valid positions and a departure time"
+                         : departure_error);
     return;
   }
   std::vector<PortableNavigationPosition> routing_gates;
@@ -2274,9 +2469,11 @@ void PortableWeatherRoutingHost::Impl::Start() {
   PopulateManagerRouting("Calculating");
   departure_runs.store(run_count);
   departures_completed.store(0);
+  const PortableDepartureZone display_zone = SelectedDepartureZone();
   worker = std::thread([this, request, run_count, departure_step_seconds,
                         departure_times = std::move(departure_times),
                         parallel_worker_limit, selected_performance,
+                        display_zone,
                         routing_gates = std::move(routing_gates)] {
     std::vector<DepartureResult> results(run_count);
     for (unsigned run = 0; run < run_count; ++run)
@@ -2298,7 +2495,7 @@ void PortableWeatherRoutingHost::Impl::Start() {
         if ((environmental_availability[run] & 1) != 0) continue;
         results[run].error =
             "iGRIB has no wind data at the start position for departure " +
-            FormatUtc(departure_times[run]);
+            FormatPortableDepartureTime(departure_times[run], display_zone);
         departures_completed.fetch_add(1);
       }
     }
@@ -2486,13 +2683,13 @@ void PortableWeatherRoutingHost::Impl::PopulateDepartureResults() {
     departure_results->SetItemData(row, static_cast<long>(index));
     departure_results->SetItem(
         row, 1, FormatOffset(departure - nominal_departure_unix_time));
-    departure_results->SetItem(row, 2, FormatUtc(departure));
+    departure_results->SetItem(row, 2, FormatRoutingTime(departure));
     if (result.success) {
       const auto& outcome = result.outcome;
       departure_results->SetItem(
           row, 3,
-          FormatUtc(outcome.departure_unix_time +
-                    static_cast<int64_t>(outcome.duration_seconds)));
+          FormatRoutingTime(outcome.departure_unix_time +
+                            static_cast<int64_t>(outcome.duration_seconds)));
       departure_results->SetItem(row, 4,
                                  FormatElapsed(outcome.duration_seconds));
       departure_results->SetItem(
@@ -2587,7 +2784,7 @@ void PortableWeatherRoutingHost::Impl::SelectDepartureResult(size_t index) {
                                      : "Selected passage · ",
       FormatElapsed(selected.duration_seconds), route.size(), isochrones.size(),
       selected.distance_nautical_miles, selected.duration_seconds / 3600.0,
-      selected.states_examined, FormatUtc(selected.departure_unix_time),
+      selected.states_examined, FormatRoutingTime(selected.departure_unix_time),
       propulsion_metrics));
   export_gpx->Enable(!route.empty());
   if (send_to_opencpn) send_to_opencpn->Enable(!route.empty());
@@ -2634,7 +2831,7 @@ void PortableWeatherRoutingHost::Impl::SelectDepartureResult(size_t index) {
                     3600.0 / static_cast<double>(seconds)
               : 0.0;
       const long row = route_schedule->InsertItem(
-          route_schedule->GetItemCount(), FormatUtc(point.unix_time));
+          route_schedule->GetItemCount(), FormatRoutingTime(point.unix_time));
       route_schedule->SetItem(
           row, 1, wxString::Format("%.5f", point.latitude));
       route_schedule->SetItem(
@@ -2679,7 +2876,7 @@ void PortableWeatherRoutingHost::Impl::SelectDepartureResult(size_t index) {
     if (!route.empty() && (route.size() - 1) % stride != 0) {
       const auto& point = route.back();
       const long row = route_schedule->InsertItem(
-          route_schedule->GetItemCount(), FormatUtc(point.unix_time));
+          route_schedule->GetItemCount(), FormatRoutingTime(point.unix_time));
       route_schedule->SetItem(row, 1,
                               wxString::Format("%.5f", point.latitude));
       route_schedule->SetItem(row, 2,
@@ -2890,7 +3087,8 @@ void PortableWeatherRoutingHost::Impl::SendToOpenCpn() {
   points.front().name = "Route start";
   points.back().name = "Route destination";
   wxString error;
-  const wxString name = surface_title + " " + FormatUtc(route.front().unix_time);
+  const wxString name =
+      surface_title + " " + FormatRoutingTime(route.front().unix_time);
   if (!create_route(name, points, &error)) {
     status->SetLabel("Could not add route to OpenCPN: " + error);
     return;

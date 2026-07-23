@@ -1071,11 +1071,13 @@ if (OCPN_ENABLE_PORTABLE_PLUGINS)
     message(FATAL_ERROR "The portable-plugin prototype does not yet support Android")
   endif ()
   list(APPEND GUI_HDRS ${GUI_HDR_DIR}/portable_plugin_manager.h)
+  list(APPEND GUI_HDRS ${GUI_HDR_DIR}/portable_departure_time.h)
   list(APPEND GUI_HDRS ${GUI_HDR_DIR}/portable_environment_host.h)
   list(APPEND GUI_HDRS ${GUI_HDR_DIR}/portable_polar.h)
   list(APPEND GUI_HDRS ${GUI_HDR_DIR}/portable_ui_menu.h)
   list(APPEND GUI_HDRS ${GUI_HDR_DIR}/portable_weather_routing_host.h)
   list(APPEND GUI_SRC ${GUI_SRC_DIR}/portable_plugin_manager.cpp
+                      ${GUI_SRC_DIR}/portable_departure_time.cpp
                       ${GUI_SRC_DIR}/portable_environment_host.cpp
                       ${GUI_SRC_DIR}/portable_polar.cpp
                       ${GUI_SRC_DIR}/portable_ui_menu.cpp

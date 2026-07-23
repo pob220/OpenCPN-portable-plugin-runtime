@@ -7,8 +7,8 @@ use exports::opencpn::portable::plugin::{
     PolarGrid, RouteEnvironmentPoint, RouteInspectionLine, RoutePoint, RouteRequest, RouteResult,
 };
 use opencpn::portable::host::{
-    self, ChartCoverageState, ChartSegmentResult, EnvironmentSampleRequest, GeoPoint, GeoSegment,
-    LogLevel,
+    self, ChartCoverageState, ChartSegmentResult, EnvironmentSample, EnvironmentSampleRequest,
+    GeoPoint, GeoSegment, LogLevel,
 };
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 
@@ -225,6 +225,42 @@ fn route_chain(nodes: &[Node], endpoint: usize) -> Vec<RoutePoint> {
     }
     chain.reverse();
     chain
+}
+
+enum ArrivalCandidateDecision {
+    Accepted(usize),
+    Rejected(String),
+    BudgetExhausted,
+}
+
+/// Treat destination tolerance as a provisional geometric event. The
+/// candidate must pass independent replay before it can terminate a search;
+/// a rejected candidate is removed so recovery cannot accidentally seed from
+/// the same invalid predecessor chain.
+fn consider_arrival_candidate_with<F>(
+    nodes: &mut Vec<Node>,
+    candidate: Node,
+    examined: &mut u32,
+    state_limit: u32,
+    validate: F,
+) -> ArrivalCandidateDecision
+where
+    F: FnOnce(&[RoutePoint]) -> Result<(), String>,
+{
+    if *examined >= state_limit {
+        return ArrivalCandidateDecision::BudgetExhausted;
+    }
+    nodes.push(candidate);
+    let index = nodes.len() - 1;
+    *examined = examined.saturating_add(1);
+    let chain = route_chain(nodes, index);
+    match validate(&chain) {
+        Ok(()) => ArrivalCandidateDecision::Accepted(index),
+        Err(error) => {
+            nodes.pop();
+            ArrivalCandidateDecision::Rejected(error)
+        }
+    }
 }
 
 /// Build bounded, inspection-only geometry from the actual retained search
@@ -696,11 +732,22 @@ fn optimal_vmg_angles(request: &RouteRequest, tws: f64) -> Vec<f64> {
         .collect()
 }
 
+#[derive(Clone, Copy)]
 struct Motion {
     east_knots: f64,
     north_knots: f64,
     tack: i8,
     propulsion_mode: u8,
+}
+
+#[derive(Clone)]
+struct ArrivalRefinement {
+    candidate_index: usize,
+    node_index: usize,
+    heading: f64,
+    elapsed_seconds: u32,
+    motion: Motion,
+    fallback: Option<Node>,
 }
 
 fn motion_for_heading(
@@ -830,6 +877,265 @@ fn advance(lat: f64, lon: f64, east_knots: f64, north_knots: f64, seconds: u32) 
         lat2.to_degrees(),
         ((lon2.to_degrees() + 540.0) % 360.0) - 180.0,
         distance,
+    )
+}
+
+fn propagated_node(
+    request: &RouteRequest,
+    node_index: usize,
+    node: &Node,
+    heading: f64,
+    motion: Motion,
+    elapsed_seconds: u32,
+    target_latitude: f64,
+    target_longitude: f64,
+) -> Option<Node> {
+    let next_motor_seconds =
+        node.motor_seconds
+            .saturating_add(if motion.propulsion_mode == PROPULSION_SAIL {
+                0
+            } else {
+                u64::from(elapsed_seconds)
+            });
+    if !motor_budget_allows(request, next_motor_seconds) {
+        return None;
+    }
+    let (lat, lon, sailed) = advance(
+        node.lat,
+        node.lon,
+        motion.east_knots,
+        motion.north_knots,
+        elapsed_seconds,
+    );
+    if !lat.is_finite() || !lon.is_finite() || lat.abs() > request.maximum_latitude_degrees {
+        return None;
+    }
+    Some(Node {
+        lat,
+        lon,
+        time: node.time + i64::from(elapsed_seconds),
+        parent: Some(node_index),
+        sailed_nm: node.sailed_nm + sailed,
+        incoming_heading: heading,
+        tack: motion.tack,
+        propulsion_mode: motion.propulsion_mode,
+        motor_seconds: next_motor_seconds,
+        propulsion_run_seconds: next_propulsion_run_seconds(
+            node.propulsion_mode,
+            motion.propulsion_mode,
+            node.propulsion_run_seconds,
+            elapsed_seconds,
+        ),
+        propulsion_transitions: node.propulsion_transitions
+            + u32::from(motion.propulsion_mode != node.propulsion_mode),
+        consecutive_wait_seconds: 0,
+        reached_destination: distance_nm(lat, lon, target_latitude, target_longitude)
+            <= request.destination_tolerance_nm,
+    })
+}
+
+fn arrival_trial_seconds(
+    request: &RouteRequest,
+    node: &Node,
+    motion: Motion,
+    maximum_seconds: u32,
+) -> Option<u32> {
+    let target = bearing(
+        node.lat,
+        node.lon,
+        request.destination_latitude,
+        request.destination_longitude,
+    );
+    let target_radians = radians(target);
+    let direct_distance = distance_nm(
+        node.lat,
+        node.lon,
+        request.destination_latitude,
+        request.destination_longitude,
+    );
+    let ground_speed_squared = motion.east_knots.powi(2) + motion.north_knots.powi(2);
+    let along_target =
+        motion.east_knots * target_radians.sin() + motion.north_knots * target_radians.cos();
+    if ground_speed_squared <= 0.0025 || along_target <= 0.05 {
+        return None;
+    }
+    let closest_seconds = (direct_distance * along_target / ground_speed_squared * 3600.0).ceil();
+    if !closest_seconds.is_finite()
+        || closest_seconds < 1.0
+        || closest_seconds > f64::from(maximum_seconds)
+    {
+        return None;
+    }
+    let seconds = closest_seconds as u32;
+    let (latitude, longitude, _) = advance(
+        node.lat,
+        node.lon,
+        motion.east_knots,
+        motion.north_knots,
+        seconds,
+    );
+    (distance_nm(
+        latitude,
+        longitude,
+        request.destination_latitude,
+        request.destination_longitude,
+    ) <= request.destination_tolerance_nm)
+        .then_some(seconds)
+}
+
+fn arrival_midpoint_request(
+    node: &Node,
+    motion: Motion,
+    elapsed_seconds: u32,
+) -> EnvironmentSampleRequest {
+    let (latitude, longitude, _) = advance(
+        node.lat,
+        node.lon,
+        motion.east_knots,
+        motion.north_knots,
+        elapsed_seconds / 2,
+    );
+    EnvironmentSampleRequest {
+        latitude,
+        longitude,
+        unix_time: node.time + i64::from(elapsed_seconds / 2),
+    }
+}
+
+/// Re-evaluate provisionally shortened arrival legs at their real midpoint.
+///
+/// The ordinary predictor/corrector samples the midpoint of a complete
+/// routing step. An arrival may use only a fraction of that step, so reusing
+/// the complete-step sample can admit a leg which the independent replay
+/// correctly rejects. Two batched corrections keep the host-call cost
+/// bounded while converging the elapsed time and environmental midpoint.
+fn refine_shortened_arrivals_with<F>(
+    request: &RouteRequest,
+    nodes: &[Node],
+    candidates: &mut Vec<Node>,
+    mut refinements: Vec<ArrivalRefinement>,
+    mut sample_batch: F,
+) -> Result<(), String>
+where
+    F: FnMut(&[EnvironmentSampleRequest]) -> Result<Vec<EnvironmentSample>, String>,
+{
+    let mut replacements = vec![None; candidates.len()];
+    for refinement in &refinements {
+        replacements[refinement.candidate_index] = Some(refinement.fallback.clone());
+    }
+    for _ in 0..2 {
+        if refinements.is_empty() {
+            break;
+        }
+        let requests: Vec<_> = refinements
+            .iter()
+            .map(|refinement| {
+                arrival_midpoint_request(
+                    &nodes[refinement.node_index],
+                    refinement.motion,
+                    refinement.elapsed_seconds,
+                )
+            })
+            .collect();
+        let samples = sample_batch(&requests)?;
+        if samples.len() != refinements.len() {
+            return Err(
+                "environment provider returned the wrong shortened-arrival batch length".into(),
+            );
+        }
+        let mut corrected = Vec::with_capacity(refinements.len());
+        for (mut refinement, sample) in refinements.into_iter().zip(samples) {
+            let node = &nodes[refinement.node_index];
+            let Some((wind_u, wind_v, current_u, current_v)) = usable_environment(
+                request,
+                sample.wind_u_knots,
+                sample.wind_v_knots,
+                sample.current_u_knots,
+                sample.current_v_knots,
+                sample.wave_height_metres,
+            ) else {
+                continue;
+            };
+            let Some(midpoint_motion) = motion_for_heading(
+                request,
+                wind_u,
+                wind_v,
+                current_u,
+                current_v,
+                refinement.heading,
+                node.tack,
+                node.propulsion_mode,
+                node.propulsion_run_seconds,
+                refinement.elapsed_seconds,
+            ) else {
+                continue;
+            };
+            let Some(elapsed_seconds) =
+                arrival_trial_seconds(request, node, midpoint_motion, request.time_step_seconds)
+            else {
+                continue;
+            };
+            let Some(motion) = motion_for_heading(
+                request,
+                wind_u,
+                wind_v,
+                current_u,
+                current_v,
+                refinement.heading,
+                node.tack,
+                node.propulsion_mode,
+                node.propulsion_run_seconds,
+                elapsed_seconds,
+            ) else {
+                continue;
+            };
+            refinement.elapsed_seconds = elapsed_seconds;
+            refinement.motion = motion;
+            corrected.push(refinement);
+        }
+        refinements = corrected;
+    }
+    for refinement in refinements {
+        let Some(candidate) = propagated_node(
+            request,
+            refinement.node_index,
+            &nodes[refinement.node_index],
+            refinement.heading,
+            refinement.motion,
+            refinement.elapsed_seconds,
+            request.destination_latitude,
+            request.destination_longitude,
+        ) else {
+            continue;
+        };
+        if candidate.reached_destination {
+            replacements[refinement.candidate_index] = Some(Some(candidate));
+        }
+    }
+    let original = std::mem::take(candidates);
+    *candidates = original
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, candidate)| match replacements[index].take() {
+            None => Some(candidate),
+            Some(replacement) => replacement,
+        })
+        .collect();
+    Ok(())
+}
+
+fn refine_shortened_arrivals(
+    request: &RouteRequest,
+    nodes: &[Node],
+    candidates: &mut Vec<Node>,
+    refinements: Vec<ArrivalRefinement>,
+) -> Result<(), String> {
+    refine_shortened_arrivals_with(
+        request,
+        nodes,
+        candidates,
+        refinements,
+        host::environment_sample_batch,
     )
 }
 
@@ -1760,13 +2066,24 @@ fn destination_point(
 /// states from the destination side, then try reproducible forward bridges
 /// directly and through destination-centred approach rings.  Every bridge is
 /// still sailed forward in time and remains subject to the same host checks.
+struct ReverseRecoveryOutcome {
+    winner: Option<usize>,
+    rejected_candidates: u32,
+    last_rejection: Option<String>,
+}
+
 fn reverse_isochrone_recovery(
     request: &RouteRequest,
     nodes: &mut Vec<Node>,
     examined: &mut u32,
     corridor: Option<&RouteCorridor>,
     progress: ProgressRange,
-) -> Result<Option<usize>, String> {
+) -> Result<ReverseRecoveryOutcome, String> {
+    let mut outcome = ReverseRecoveryOutcome {
+        winner: None,
+        rejected_candidates: 0,
+        last_rejection: None,
+    };
     let graph_reserve = (request.max_states / 5)
         .max(100)
         .min(request.max_states / 3);
@@ -1822,7 +2139,24 @@ fn reverse_isochrone_recovery(
             reverse_state_limit,
             corridor,
         )? {
-            return Ok(Some(index));
+            let chain = route_chain(nodes, index);
+            match validate_delivered_route(request, &chain) {
+                Ok(_) => {
+                    outcome.winner = Some(index);
+                    return Ok(outcome);
+                }
+                Err(error) => {
+                    outcome.rejected_candidates = outcome.rejected_candidates.saturating_add(1);
+                    outcome.last_rejection = Some(error);
+                    progress.report(
+                        90 + ((seed_number * 4 / seed_count).min(4) as u8),
+                        &format!(
+                            "Reverse-isocrone recovery: provisional bridge failed independent replay; continuing with alternative approaches ({} rejected)",
+                            outcome.rejected_candidates
+                        ),
+                    );
+                }
+            }
         }
         nodes.truncate(checkpoint);
         approaches.sort_by(|left, right| {
@@ -1871,12 +2205,29 @@ fn reverse_isochrone_recovery(
                 reverse_state_limit,
                 corridor,
             )? {
-                return Ok(Some(index));
+                let chain = route_chain(nodes, index);
+                match validate_delivered_route(request, &chain) {
+                    Ok(_) => {
+                        outcome.winner = Some(index);
+                        return Ok(outcome);
+                    }
+                    Err(error) => {
+                        outcome.rejected_candidates = outcome.rejected_candidates.saturating_add(1);
+                        outcome.last_rejection = Some(error);
+                        progress.report(
+                            90 + ((seed_number * 4 / seed_count).min(4) as u8),
+                            &format!(
+                                "Reverse-isocrone recovery: provisional approach failed independent replay; continuing ({} rejected)",
+                                outcome.rejected_candidates
+                            ),
+                        );
+                    }
+                }
             }
             nodes.truncate(checkpoint);
         }
     }
-    Ok(None)
+    Ok(outcome)
 }
 
 struct GraphQueueEntry {
@@ -2332,6 +2683,8 @@ fn calculate_pass(
     let mut winner = None;
     let mut solver_path = "forward adaptive isochrone";
     let mut forward_failure = String::new();
+    let mut forward_rejected_arrivals = 0u32;
+    let mut last_forward_rejection = None;
     // Preserve bounded reverse and graph portions of the declared state budget.
     // Otherwise a difficult forward search can consume every label before the
     // explicitly requested reverse and graph stages begin.
@@ -2473,8 +2826,7 @@ fn calculate_pass(
         }
 
         let mut candidates: Vec<Node> = Vec::new();
-        let mut chart_segments: Vec<GeoSegment> = Vec::new();
-        let mut chart_ranges: Vec<std::ops::Range<usize>> = Vec::new();
+        let mut arrival_refinements = Vec::new();
         for ((node_index, heading, _, _), env) in
             drafts.into_iter().zip(midpoint_samples.into_iter())
         {
@@ -2520,18 +2872,6 @@ fn calculate_pass(
             {
                 continue;
             }
-            let target = bearing(
-                node.lat,
-                node.lon,
-                request.destination_latitude,
-                request.destination_longitude,
-            );
-            let direct_distance = distance_nm(
-                node.lat,
-                node.lon,
-                request.destination_latitude,
-                request.destination_longitude,
-            );
             let Some(full_step_motion) = motion_for_heading(
                 &request,
                 wind_u,
@@ -2546,115 +2886,99 @@ fn calculate_pass(
             ) else {
                 continue;
             };
-            // Do not snap a current-displaced ground track onto the
-            // destination. If the corrected trajectory passes within arrival
-            // tolerance, retain its real closest point and time.
-            let mut elapsed_seconds = request.time_step_seconds;
-            let mut motion = full_step_motion;
-            let target_radians = radians(target);
-            let ground_speed_squared = motion.east_knots.powi(2) + motion.north_knots.powi(2);
-            let along_target = motion.east_knots * target_radians.sin()
-                + motion.north_knots * target_radians.cos();
-            if ground_speed_squared > 0.0025 && along_target > 0.05 {
-                let closest_seconds =
-                    (direct_distance * along_target / ground_speed_squared * 3600.0).ceil();
-                if closest_seconds.is_finite()
-                    && closest_seconds >= 1.0
-                    && closest_seconds <= f64::from(request.time_step_seconds)
-                {
-                    let trial_seconds = closest_seconds as u32;
-                    if let Some(trial_motion) = motion_for_heading(
-                        &request,
-                        wind_u,
-                        wind_v,
-                        current_u,
-                        current_v,
-                        heading,
-                        node.tack,
-                        node.propulsion_mode,
-                        node.propulsion_run_seconds,
-                        trial_seconds,
-                    ) {
-                        let (trial_lat, trial_lon, _) = advance(
-                            node.lat,
-                            node.lon,
-                            trial_motion.east_knots,
-                            trial_motion.north_knots,
-                            trial_seconds,
-                        );
-                        if distance_nm(
-                            trial_lat,
-                            trial_lon,
-                            request.destination_latitude,
-                            request.destination_longitude,
-                        ) <= request.destination_tolerance_nm
-                        {
-                            elapsed_seconds = trial_seconds;
-                            motion = trial_motion;
-                        }
-                    }
-                }
-            }
-            let next_motor_seconds =
-                node.motor_seconds
-                    .saturating_add(if motion.propulsion_mode == PROPULSION_SAIL {
-                        0
-                    } else {
-                        u64::from(elapsed_seconds)
-                    });
-            let next_run_seconds = next_propulsion_run_seconds(
-                node.propulsion_mode,
-                motion.propulsion_mode,
-                node.propulsion_run_seconds,
-                elapsed_seconds,
-            );
-            if !motor_budget_allows(&request, next_motor_seconds) {
-                continue;
-            }
-            let (lat, lon, sailed) = advance(
-                node.lat,
-                node.lon,
-                motion.east_knots,
-                motion.north_knots,
-                elapsed_seconds,
-            );
-            if !lat.is_finite() || !lon.is_finite() || lat.abs() > request.maximum_latitude_degrees
-            {
-                continue;
-            }
-            if corridor.is_some_and(|route| !route.contains(lat, lon)) {
-                continue;
-            }
-            let reached_destination = distance_nm(
-                lat,
-                lon,
+            let full_step_candidate = propagated_node(
+                &request,
+                node_index,
+                node,
+                heading,
+                full_step_motion,
+                request.time_step_seconds,
                 request.destination_latitude,
                 request.destination_longitude,
-            ) <= request.destination_tolerance_nm;
-            candidates.push(Node {
-                lat,
-                lon,
-                time: node.time + i64::from(elapsed_seconds),
-                parent: Some(node_index),
-                sailed_nm: node.sailed_nm + sailed,
-                incoming_heading: heading,
-                tack: motion.tack,
-                propulsion_mode: motion.propulsion_mode,
-                motor_seconds: next_motor_seconds,
-                propulsion_run_seconds: next_run_seconds,
-                propulsion_transitions: node.propulsion_transitions
-                    + u32::from(motion.propulsion_mode != node.propulsion_mode),
-                consecutive_wait_seconds: 0,
-                reached_destination,
-            });
+            );
+            // Do not snap a current-displaced ground track onto the
+            // destination. A provisionally shortened leg is retained only
+            // after two fresh samples at its own changing midpoint.
+            let provisional =
+                arrival_trial_seconds(&request, node, full_step_motion, request.time_step_seconds)
+                    .and_then(|elapsed_seconds| {
+                        motion_for_heading(
+                            &request,
+                            wind_u,
+                            wind_v,
+                            current_u,
+                            current_v,
+                            heading,
+                            node.tack,
+                            node.propulsion_mode,
+                            node.propulsion_run_seconds,
+                            elapsed_seconds,
+                        )
+                        .map(|motion| (elapsed_seconds, motion))
+                    })
+                    .and_then(|(elapsed_seconds, motion)| {
+                        propagated_node(
+                            &request,
+                            node_index,
+                            node,
+                            heading,
+                            motion,
+                            elapsed_seconds,
+                            request.destination_latitude,
+                            request.destination_longitude,
+                        )
+                        .filter(|candidate| candidate.reached_destination)
+                        .map(|candidate| (candidate, elapsed_seconds, motion))
+                    });
+            let (candidate, refinement) =
+                if let Some((candidate, elapsed_seconds, motion)) = provisional {
+                    let candidate_index = candidates.len();
+                    (
+                        candidate,
+                        Some(ArrivalRefinement {
+                            candidate_index,
+                            node_index,
+                            heading,
+                            elapsed_seconds,
+                            motion,
+                            fallback: full_step_candidate,
+                        }),
+                    )
+                } else {
+                    let Some(candidate) = full_step_candidate else {
+                        continue;
+                    };
+                    (candidate, None)
+                };
+            if corridor.is_some_and(|route| !route.contains(candidate.lat, candidate.lon)) {
+                continue;
+            }
+            candidates.push(candidate);
+            if let Some(refinement) = refinement {
+                arrival_refinements.push(refinement);
+            }
+        }
+        refine_shortened_arrivals(&request, &nodes, &mut candidates, arrival_refinements)?;
+        candidates.retain(|candidate| {
+            candidate.lat.is_finite()
+                && candidate.lon.is_finite()
+                && candidate.lat.abs() <= request.maximum_latitude_degrees
+                && corridor.is_none_or(|route| route.contains(candidate.lat, candidate.lon))
+        });
+        let mut chart_segments: Vec<GeoSegment> = Vec::new();
+        let mut chart_ranges: Vec<std::ops::Range<usize>> = Vec::new();
+        for candidate in &candidates {
+            let parent = &nodes[candidate
+                .parent
+                .expect("a propagated candidate must have a parent")];
             let segment = GeoSegment {
                 start: GeoPoint {
-                    latitude: node.lat,
-                    longitude: node.lon,
+                    latitude: parent.lat,
+                    longitude: parent.lon,
                 },
                 end: GeoPoint {
-                    latitude: lat,
-                    longitude: lon,
+                    latitude: candidate.lat,
+                    longitude: candidate.lon,
                 },
             };
             let first = chart_segments.len();
@@ -2742,15 +3066,27 @@ fn calculate_pass(
                 request.destination_longitude,
             );
             if candidate.reached_destination || remaining <= request.destination_tolerance_nm {
-                if examined >= forward_state_limit {
-                    budget_exhausted = true;
-                    break;
+                match consider_arrival_candidate_with(
+                    &mut nodes,
+                    candidate,
+                    &mut examined,
+                    forward_state_limit,
+                    |chain| validate_delivered_route(&request, chain).map(|_| ()),
+                ) {
+                    ArrivalCandidateDecision::Accepted(index) => {
+                        winner = Some(index);
+                        break;
+                    }
+                    ArrivalCandidateDecision::Rejected(error) => {
+                        forward_rejected_arrivals = forward_rejected_arrivals.saturating_add(1);
+                        last_forward_rejection = Some(error);
+                        continue;
+                    }
+                    ArrivalCandidateDecision::BudgetExhausted => {
+                        budget_exhausted = true;
+                        break;
+                    }
                 }
-                nodes.push(candidate);
-                let index = nodes.len() - 1;
-                examined = examined.saturating_add(1);
-                winner = Some(index);
-                break;
             }
             // Quantise in approximate nautical-mile space.  Keeping several
             // labels per cell preserves materially different arrivals while
@@ -2820,7 +3156,7 @@ fn calculate_pass(
         }
     }
     if forward_failure.is_empty() && winner.is_none() {
-        forward_failure = if budget_exhausted {
+        let reason = if budget_exhausted {
             format!(
                 "forward isochrone used its reserved {}-state budget after {} forecast steps",
                 forward_state_limit, completed_layers
@@ -2831,6 +3167,16 @@ fn calculate_pass(
                 request.max_hours, completed_layers, examined, generated
             )
         };
+        forward_failure = reason;
+    }
+    if winner.is_none() && forward_rejected_arrivals > 0 {
+        forward_failure.push_str(&format!(
+            "; independently replayed and rejected {forward_rejected_arrivals} provisional arrival candidate(s){}",
+            last_forward_rejection
+                .as_ref()
+                .map(|error| format!(" (last rejection: {error})"))
+                .unwrap_or_default()
+        ));
     }
 
     // A forward endpoint is only provisional.  If independent replay rejects
@@ -2840,6 +3186,7 @@ fn calculate_pass(
         let chain = route_chain(&nodes, index);
         if let Err(error) = validate_delivered_route(&request, &chain) {
             forward_failure = format!("forward candidate rejected: {error}");
+            nodes.truncate(index);
             winner = None;
         }
     }
@@ -2852,24 +3199,27 @@ fn calculate_pass(
             ),
         );
         let checkpoint = nodes.len();
-        if let Some(index) =
-            reverse_isochrone_recovery(&request, &mut nodes, &mut examined, corridor, progress)?
-        {
-            let chain = route_chain(&nodes, index);
-            match validate_delivered_route(&request, &chain) {
-                Ok(_) => {
-                    winner = Some(index);
-                    solver_path = "reverse-isocrone recovery";
-                }
-                Err(error) => {
-                    forward_failure.push_str(&format!(
-                        "; reverse recovery candidate rejected by independent replay: {error}"
-                    ));
-                    nodes.truncate(checkpoint);
-                }
-            }
+        let reverse =
+            reverse_isochrone_recovery(&request, &mut nodes, &mut examined, corridor, progress)?;
+        if let Some(index) = reverse.winner {
+            winner = Some(index);
+            solver_path = "reverse-isocrone recovery";
         } else {
-            forward_failure.push_str("; reverse-isocrone recovery found no reproducible bridge");
+            nodes.truncate(checkpoint);
+            if reverse.rejected_candidates > 0 {
+                forward_failure.push_str(&format!(
+                    "; reverse-isocrone recovery rejected {} provisional bridge(s) and found no independently reproducible alternative{}",
+                    reverse.rejected_candidates,
+                    reverse
+                        .last_rejection
+                        .as_ref()
+                        .map(|error| format!(" (last rejection: {error})"))
+                        .unwrap_or_default()
+                ));
+            } else {
+                forward_failure
+                    .push_str("; reverse-isocrone recovery found no reproducible bridge");
+            }
         }
     }
 
@@ -3308,6 +3658,210 @@ mod tests {
                     segment.end.longitude,
                 ) <= VALIDATION_SEGMENT_NM + 0.01
         }));
+    }
+
+    #[test]
+    fn rejected_arrival_is_removed_before_trying_the_next_candidate() {
+        let mut nodes = vec![test_node()];
+        let mut examined = 1;
+        let mut first = test_node();
+        first.parent = Some(0);
+        first.time = 1800;
+        first.lon = -4.95;
+        first.reached_destination = true;
+
+        let rejected =
+            consider_arrival_candidate_with(&mut nodes, first, &mut examined, 10, |_| {
+                Err("provisional final leg is outside the TWA policy".into())
+            });
+        assert!(matches!(
+            rejected,
+            ArrivalCandidateDecision::Rejected(ref error)
+                if error.contains("outside the TWA policy")
+        ));
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(examined, 2);
+
+        let mut second = test_node();
+        second.parent = Some(0);
+        second.time = 1800;
+        second.lon = -4.96;
+        second.reached_destination = true;
+        let accepted =
+            consider_arrival_candidate_with(&mut nodes, second, &mut examined, 10, |_| Ok(()));
+        assert!(matches!(accepted, ArrivalCandidateDecision::Accepted(1)));
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(examined, 3);
+    }
+
+    #[test]
+    fn shortened_arrival_is_resampled_at_its_actual_midpoint() {
+        let mut request = test_request(false);
+        request.start_latitude = 0.0;
+        request.start_longitude = 0.0;
+        request.destination_latitude = 0.0;
+        request.destination_longitude = 0.05;
+        request.avoid_unsafe_charts = false;
+        request.use_waves = false;
+        request.require_wave_data = false;
+        let mut root = test_node();
+        root.lat = request.start_latitude;
+        root.lon = request.start_longitude;
+        let nodes = vec![root];
+        let provisional_motion = Motion {
+            east_knots: 6.0,
+            north_knots: 0.0,
+            tack: -1,
+            propulsion_mode: PROPULSION_SAIL,
+        };
+        let provisional_seconds = arrival_trial_seconds(
+            &request,
+            &nodes[0],
+            provisional_motion,
+            request.time_step_seconds,
+        )
+        .expect("the provisional motion should cross destination tolerance");
+        let provisional = propagated_node(
+            &request,
+            0,
+            &nodes[0],
+            90.0,
+            provisional_motion,
+            provisional_seconds,
+            request.destination_latitude,
+            request.destination_longitude,
+        )
+        .expect("the provisional arrival should be usable");
+        assert!(provisional.reached_destination);
+        let fallback = propagated_node(
+            &request,
+            0,
+            &nodes[0],
+            90.0,
+            provisional_motion,
+            request.time_step_seconds,
+            request.destination_latitude,
+            request.destination_longitude,
+        );
+        let mut candidates = vec![provisional];
+        let refinement = ArrivalRefinement {
+            candidate_index: 0,
+            node_index: 0,
+            heading: 90.0,
+            elapsed_seconds: provisional_seconds,
+            motion: provisional_motion,
+            fallback,
+        };
+        let mut sampled_midpoints = Vec::new();
+        refine_shortened_arrivals_with(
+            &request,
+            &nodes,
+            &mut candidates,
+            vec![refinement],
+            |requests| {
+                sampled_midpoints.extend_from_slice(requests);
+                Ok(requests
+                    .iter()
+                    .map(|_| EnvironmentSample {
+                        wind_u_knots: Some(0.0),
+                        wind_v_knots: Some(10.0),
+                        current_u_knots: Some(0.0),
+                        current_v_knots: Some(0.0),
+                        wave_height_metres: None,
+                    })
+                    .collect())
+            },
+        )
+        .expect("shortened arrival refinement should succeed");
+
+        assert_eq!(sampled_midpoints.len(), 2);
+        assert!(
+            sampled_midpoints
+                .iter()
+                .all(|sample| sample.unix_time > 0 && sample.unix_time < 1800)
+        );
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].reached_destination);
+        assert!(candidates[0].time < i64::from(request.time_step_seconds));
+    }
+
+    #[test]
+    fn invalid_shortened_arrival_keeps_the_valid_full_step_candidate() {
+        let mut request = test_request(false);
+        request.start_latitude = 0.0;
+        request.start_longitude = 0.0;
+        request.destination_latitude = 0.0;
+        request.destination_longitude = 0.05;
+        request.avoid_unsafe_charts = false;
+        request.use_waves = false;
+        request.require_wave_data = false;
+        let mut root = test_node();
+        root.lat = request.start_latitude;
+        root.lon = request.start_longitude;
+        let nodes = vec![root];
+        let motion = Motion {
+            east_knots: 6.0,
+            north_knots: 0.0,
+            tack: -1,
+            propulsion_mode: PROPULSION_SAIL,
+        };
+        let elapsed_seconds =
+            arrival_trial_seconds(&request, &nodes[0], motion, request.time_step_seconds)
+                .expect("the provisional motion should cross destination tolerance");
+        let provisional = propagated_node(
+            &request,
+            0,
+            &nodes[0],
+            90.0,
+            motion,
+            elapsed_seconds,
+            request.destination_latitude,
+            request.destination_longitude,
+        )
+        .expect("the provisional arrival should be usable");
+        let fallback = propagated_node(
+            &request,
+            0,
+            &nodes[0],
+            90.0,
+            motion,
+            request.time_step_seconds,
+            request.destination_latitude,
+            request.destination_longitude,
+        )
+        .expect("the complete routing step should remain usable");
+        let fallback_time = fallback.time;
+        let mut candidates = vec![provisional];
+
+        refine_shortened_arrivals_with(
+            &request,
+            &nodes,
+            &mut candidates,
+            vec![ArrivalRefinement {
+                candidate_index: 0,
+                node_index: 0,
+                heading: 90.0,
+                elapsed_seconds,
+                motion,
+                fallback: Some(fallback),
+            }],
+            |requests| {
+                Ok(requests
+                    .iter()
+                    .map(|_| EnvironmentSample {
+                        wind_u_knots: None,
+                        wind_v_knots: None,
+                        current_u_knots: None,
+                        current_v_knots: None,
+                        wave_height_metres: None,
+                    })
+                    .collect())
+            },
+        )
+        .expect("an unavailable shortened midpoint should use the complete step");
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].time, fallback_time);
     }
 
     #[test]
