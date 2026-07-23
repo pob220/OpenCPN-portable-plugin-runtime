@@ -7,6 +7,8 @@
 #include <wx/statline.h>
 #include <wx/stattext.h>
 
+#include "runtime_engine.h"
+
 namespace ppm {
 namespace {
 
@@ -94,6 +96,20 @@ void ManagerDialog::SetStatus(const wxString& status) {
   status_->SetLabel(status);
   status_->Wrap(GetClientSize().GetWidth() - 24);
   Layout();
+}
+
+void ManagerDialog::SetPackages(
+    const std::vector<PackageSnapshot>& packages) {
+  packages_->DeleteAllItems();
+  for (const auto& package : packages) {
+    const long row = packages_->InsertItem(
+        packages_->GetItemCount(), wxString::FromUTF8(package.name));
+    packages_->SetItem(row, 1, wxString::FromUTF8(package.version));
+    packages_->SetItem(row, 2, wxString::FromUTF8(package.state));
+    packages_->SetItem(row, 3, "Wasmtime component");
+    packages_->SetItemData(row, static_cast<long>(row));
+  }
+  RefreshButtonState();
 }
 
 void ManagerDialog::OnClose(wxCloseEvent& event) {

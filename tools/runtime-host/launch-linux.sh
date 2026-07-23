@@ -21,5 +21,6 @@ export XDG_CACHE_HOME="${runtime_root}/xdg-cache"
 export XDG_DATA_DIRS="${config_root}/share:${runtime_root}/app/share:/usr/local/share:/usr/share"
 export OPENCPN_PLUGIN_DIRS="${config_root}/plugins/lib"
 export OCPN_PORTABLE_PLUGIN_ROOT="${config_root}/portable-runtime"
+export OCPN_PPM_DEVELOPER_MODE="${OCPN_PPM_DEVELOPER_MODE:-1}"
 
 exec "${application}" -c "${config_root}" "$@"

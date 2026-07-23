@@ -7,6 +7,7 @@
 
 #include "action_registry.h"
 #include "ocpn_plugin.h"
+#include "runtime_engine.h"
 
 namespace ppm {
 
@@ -31,15 +32,26 @@ class PortablePluginManagerPi final : public opencpn_plugin_121 {
   wxString GetLongDescription() override;
   void OnToolbarToolCallback(int id) override;
   void ShowPreferencesDialog(wxWindow* parent) override;
+  void SetPositionFixEx(PlugIn_Position_Fix_Ex& fix) override;
+  bool RenderOverlayMultiCanvas(wxDC& dc, PlugIn_ViewPort* viewport,
+                                int canvas_index, int priority) override;
+  bool RenderGLOverlayMultiCanvas(wxGLContext* context,
+                                  PlugIn_ViewPort* viewport,
+                                  int canvas_index, int priority) override;
 
  private:
   bool RegisterManagerAction();
+  int RegisterPortableAction(const RuntimeAction& action,
+                             std::uint32_t* host_action_id);
   void RemoveAllActions();
   void ShowManager(wxWindow* parent);
+  void OnEngineStateChanged();
+  void RefreshManager();
 
   ActionRegistry actions_;
   wxBitmap plugin_bitmap_;
   wxString storage_root_;
+  std::unique_ptr<RuntimeEngine> runtime_engine_;
   std::unique_ptr<ManagerDialog> manager_dialog_;
   bool initialized_ = false;
 };

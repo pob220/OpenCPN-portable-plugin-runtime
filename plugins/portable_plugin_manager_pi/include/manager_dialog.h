@@ -3,6 +3,8 @@
 
 #include <wx/dialog.h>
 
+#include <vector>
+
 class wxButton;
 class wxListCtrl;
 class wxListEvent;
@@ -10,12 +12,15 @@ class wxStaticText;
 
 namespace ppm {
 
+struct PackageSnapshot;
+
 class ManagerDialog final : public wxDialog {
  public:
   explicit ManagerDialog(wxWindow* parent);
 
   void SetRuntimeSummary(const wxString& summary);
   void SetStatus(const wxString& status);
+  void SetPackages(const std::vector<PackageSnapshot>& packages);
 
  private:
   void OnClose(wxCloseEvent& event);
