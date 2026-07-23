@@ -2,6 +2,11 @@
 
 #include <wx/filename.h>
 #include <wx/log.h>
+#include <wx/msgdlg.h>
+#include <wx/utils.h>
+
+#include <algorithm>
+#include <utility>
 
 #if defined(__WXOSX__)
 #include <OpenGL/gl.h>
@@ -22,43 +27,44 @@
 namespace {
 
 const char* const kManagerXpm[] = {
-    "32 32 5 1",
+    "32 32 6 1",
     "  c None",
     ". c #19324A",
-    "+ c #2F80ED",
-    "@ c #A7D5FF",
-    "# c #FFFFFF",
+    "+ c #126F89",
+    "@ c #FFF7DF",
+    "# c #E45B3C",
+    "$ c #FFFFFF",
     "                                ",
-    "          ............          ",
-    "       ....++++++++++....       ",
+    "           ..........           ",
+    "        ...++++++++++...        ",
     "      ..++++++++++++++++..      ",
-    "     ..+++++@@@@@@@@+++++..     ",
-    "    ..++++@@@@@@@@@@@@++++..    ",
-    "    .++++@@@########@@@++++.    ",
-    "   ..+++@@############@@+++..   ",
-    "   .+++@@###........###@@+++.   ",
-    "  ..+++@###..++++++..###@+++..  ",
-    "  .+++@@##..++++++++..##@@+++.  ",
-    "  .+++@##..+++@@@@+++..##@+++.  ",
-    "  .++@@##.+++@@##@@+++.##@@++.  ",
-    " ..++@@#..++@@####@@++..#@@++.. ",
-    " .+++@##.+++@##..##@+++.##@+++. ",
-    " .+++@##.+++@#.++.#@+++.##@+++. ",
-    " .+++@##.+++@#.++.#@+++.##@+++. ",
-    " .+++@##.+++@##..##@+++.##@+++. ",
-    " ..++@@#..++@@####@@++..#@@++.. ",
-    "  .++@@##.+++@@##@@+++.##@@++.  ",
-    "  .+++@##..+++@@@@+++..##@+++.  ",
-    "  .+++@@##..++++++++..##@@+++.  ",
-    "  ..+++@###..++++++..###@+++..  ",
-    "   .+++@@###........###@@+++.   ",
-    "   ..+++@@############@@+++..   ",
-    "    .++++@@@########@@@++++.    ",
-    "    ..++++@@@@@@@@@@@@++++..    ",
-    "     ..+++++@@@@@@@@+++++..     ",
-    "      ..++++++++++++++++..      ",
-    "       ....++++++++++....       ",
-    "          ............          ",
+    "     .++++++++++++++++++++.     ",
+    "    .++++++@@++++@@++++++++.    ",
+    "   .+++++++@@++++@@+++++++++.   ",
+    "  .++++++++@@++++@@++++++++++.  ",
+    "  .++++++++@@++++@@++++++++++.  ",
+    " .+++++++++@@++++@@+++++++++++. ",
+    " .+++++..................+++++. ",
+    " .++++.@@@@@@@@@@@@@@@@@@.++++. ",
+    ".+++++.@@@@@@@@@@@@@@@@@@.+++++.",
+    ".+++++.@@@@@###@@###@@@@@.+++++.",
+    ".+++++.@@@@##@@@@@@##@@@@.+++++.",
+    ".+++++.@@@@@##@@@@##@@@@@.+++++.",
+    ".+++++.@@@@@@##@@##@@@@@@.+++++.",
+    ".+++++.@@@@@@@@@@@@@@@@@@.+++++.",
+    ".++++++.@@@@@@@@@@@@@@@@.++++++.",
+    ".+++++++.@@@@@@@@@@@@@@.+++++++.",
+    " .++++++..@@@@@@@@@@@@..++++++. ",
+    " .++++++++..@@@@@@@@..++++++++. ",
+    " .++++++++++........++++++++++. ",
+    "  .++++++++++++@@++++++++++++.  ",
+    "  .++++++++++++@@++++++++++++.  ",
+    "   .+++++++++++@@+++++++++++.   ",
+    "    .++++++++++@@++++++++++.    ",
+    "     .+++++++++@@@@@++++++.     ",
+    "      ..++++++++++@@@@@@..      ",
+    "        ...++++++++++...        ",
+    "           ..........           ",
     "                                "};
 
 const ppm::ActionKey kManagerAction{"org.opencpn.portable-plugin-manager",
@@ -74,6 +80,17 @@ wxString ResolveStorageRoot() {
   }
   return *GetpPrivateApplicationDataLocation() + wxFILE_SEP_PATH +
          "portable-plugin-manager";
+}
+
+wxString ResolveManagerIcon() {
+  const wxString separator = wxFileName::GetPathSeparator();
+  const wxString installed =
+      *GetpSharedDataLocation() + "plugins" + separator +
+      "portable_plugin_manager_pi" + separator + "manager.svg";
+  if (wxFileName::FileExists(installed)) return installed;
+  const wxString source =
+      wxString::FromUTF8(PPM_SOURCE_DATA_DIR) + separator + "manager.svg";
+  return wxFileName::FileExists(source) ? source : wxString();
 }
 
 }  // namespace
@@ -102,22 +119,29 @@ int PortablePluginManagerPi::Init() {
   }
   initialized_ = true;
   storage_root_ = ResolveStorageRoot();
-  wxLogMessage("PPM event=init api=1.21 version=0.1.0");
+  wxLogMessage("PPM event=init api=1.21 version=0.2.0");
   wxLogMessage("PPM event=storage-root path=%s", storage_root_);
   if (!RegisterManagerAction()) {
     wxLogError("PPM event=manager-action-registration-failed");
   }
+  wxString developer;
+  developer_mode_ =
+      wxGetEnv("OCPN_PPM_DEVELOPER_MODE", &developer) && developer == "1";
+  package_store_ =
+      std::make_unique<PackageStore>(storage_root_.ToStdString());
+  package_store_->SetDeveloperMode(developer_mode_);
   runtime_engine_ = std::make_unique<RuntimeEngine>(
       storage_root_.ToStdString(),
       [this](const RuntimeAction& action, std::uint32_t* host_action_id) {
         return RegisterPortableAction(action, host_action_id);
       },
+      [this](const std::string& package_id) {
+        RemovePackageActions(package_id);
+      },
       [this]() { OnEngineStateChanged(); });
-  wxString developer;
-  const bool developer_mode =
-      wxGetEnv("OCPN_PPM_DEVELOPER_MODE", &developer) && developer == "1";
-  if (!runtime_engine_->LoadInstalled(developer_mode)) {
-    wxLogError("PPM event=runtime-engine-load-failed");
+  if (!runtime_engine_->LoadInstalled(developer_mode_)) {
+    wxLogWarning(
+        "PPM event=runtime-engine-load-completed-with-package-failures");
   }
   return WANTS_TOOLBAR_CALLBACK | INSTALLS_TOOLBAR_TOOL | WANTS_CONFIG |
          WANTS_NMEA_EVENTS | WANTS_OVERLAY_CALLBACK |
@@ -135,6 +159,7 @@ bool PortablePluginManagerPi::DeInit() {
     runtime_engine_->Shutdown();
     runtime_engine_.reset();
   }
+  package_store_.reset();
   RemoveAllActions();
   initialized_ = false;
   wxLogMessage("PPM event=deinit remaining-actions=%zu", actions_.Size());
@@ -152,10 +177,19 @@ wxString PortablePluginManagerPi::GetLongDescription() {
 }
 
 bool PortablePluginManagerPi::RegisterManagerAction() {
-  const int tool_id = InsertPlugInTool(
-      "Portable Plugin Manager", &plugin_bitmap_, &plugin_bitmap_,
-      wxITEM_NORMAL, "Portable Plugin Manager",
-      "Install and manage portable runtime plugins", nullptr, -1, 0, this);
+  const wxString icon = ResolveManagerIcon();
+  const int tool_id =
+      icon.empty()
+          ? InsertPlugInTool(
+                "Portable Plugin Manager", &plugin_bitmap_, &plugin_bitmap_,
+                wxITEM_NORMAL, "Portable Plugin Manager",
+                "Install and manage portable runtime plugins", nullptr, -1, 0,
+                this)
+          : InsertPlugInToolSVG(
+                "Portable Plugin Manager", icon, icon, icon, wxITEM_NORMAL,
+                "Portable Plugin Manager",
+                "Install and manage portable runtime plugins", nullptr, -1, 0,
+                this);
   if (!actions_.Add(kManagerAction, tool_id)) {
     if (tool_id >= 0) RemovePlugInTool(tool_id);
     return false;
@@ -201,6 +235,15 @@ void PortablePluginManagerPi::RemoveAllActions() {
   }
 }
 
+void PortablePluginManagerPi::RemovePackageActions(
+    const std::string& package_id) {
+  for (const auto& action : actions_.RemovePackage(package_id)) {
+    RemovePlugInTool(action.tool_id);
+    wxLogMessage("PPM event=action-removed package=%s action=%s tool=%d",
+                 action.key.package_id, action.key.action_id, action.tool_id);
+  }
+}
+
 void PortablePluginManagerPi::OnToolbarToolCallback(int id) {
   const auto action = actions_.FindByToolId(id);
   if (!action || !action->dispatchable) {
@@ -221,7 +264,21 @@ void PortablePluginManagerPi::ShowPreferencesDialog(wxWindow* parent) {
 
 void PortablePluginManagerPi::ShowManager(wxWindow* parent) {
   if (!manager_dialog_) {
-    manager_dialog_ = std::make_unique<ManagerDialog>(parent);
+    ManagerCallbacks callbacks;
+    callbacks.install =
+        [this](const std::string& path) { InstallPackage(path); };
+    callbacks.enable =
+        [this](const std::string& id) { EnablePackage(id); };
+    callbacks.disable =
+        [this](const std::string& id) { DisablePackage(id); };
+    callbacks.unload =
+        [this](const std::string& id) { UnloadPackage(id); };
+    callbacks.remove =
+        [this](const std::string& id) { RemovePackage(id); };
+    callbacks.rollback =
+        [this](const std::string& id) { RollbackPackage(id); };
+    manager_dialog_ =
+        std::make_unique<ManagerDialog>(parent, std::move(callbacks));
     manager_dialog_->SetRuntimeSummary(
         "Host plugin loaded in stock OpenCPN.\nPackage store: " +
         storage_root_);
@@ -230,6 +287,231 @@ void PortablePluginManagerPi::ShowManager(wxWindow* parent) {
   manager_dialog_->Show();
   manager_dialog_->Raise();
   wxLogMessage("PPM event=manager-shown");
+}
+
+void PortablePluginManagerPi::SetManagerStatus(const wxString& status) {
+  if (manager_dialog_) manager_dialog_->SetStatus(status);
+  wxLogMessage("PPM event=manager-operation status=%s", status);
+}
+
+bool PortablePluginManagerPi::RestorePreviousPackage(
+    const std::string& package_id, bool enable_after_restore,
+    wxString* diagnostic) {
+  const StoreResult rollback = package_store_->Rollback(package_id);
+  if (!rollback.okay) {
+    if (diagnostic)
+      *diagnostic = "Rollback failed: " +
+                    wxString::FromUTF8(rollback.message);
+    return false;
+  }
+  std::string runtime_diagnostic;
+  if (!runtime_engine_->RefreshPackage(package_id, developer_mode_,
+                                       &runtime_diagnostic)) {
+    if (diagnostic)
+      *diagnostic = "Previous package was restored on disk but could not be "
+                    "loaded: " +
+                    wxString::FromUTF8(runtime_diagnostic);
+    return false;
+  }
+  if (enable_after_restore) {
+    if (!runtime_engine_->Enable(package_id, &runtime_diagnostic) ||
+        !package_store_->SetEnabled(package_id, true).okay) {
+      if (diagnostic)
+        *diagnostic = "Previous package was restored but could not be "
+                      "re-enabled: " +
+                      wxString::FromUTF8(runtime_diagnostic);
+      return false;
+    }
+  }
+  return true;
+}
+
+void PortablePluginManagerPi::InstallPackage(
+    const std::string& archive_path) {
+  if (!package_store_ || !runtime_engine_) return;
+  wxBusyCursor busy;
+  SetManagerStatus("Verifying package signature, manifest and contents…");
+  const StoreResult inspected = package_store_->Inspect(archive_path);
+  if (!inspected.okay) {
+    SetManagerStatus("Package rejected: " +
+                     wxString::FromUTF8(inspected.message));
+    return;
+  }
+  const auto installed = package_store_->Installed();
+  const bool replacing =
+      std::any_of(installed.begin(), installed.end(), [&](const auto& package) {
+        return package.id == inspected.package_id;
+      });
+  if (replacing &&
+      wxMessageBox(
+          "A version of " + wxString::FromUTF8(inspected.package_id) +
+              " is already installed.\n\nVerify and install this package as "
+              "an update? The current version will be retained for rollback.",
+          "Update portable package",
+          wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION, manager_dialog_.get()) !=
+          wxYES) {
+    SetManagerStatus("Update cancelled; no files were changed.");
+    return;
+  }
+
+  const bool was_enabled =
+      replacing && runtime_engine_->IsEnabled(inspected.package_id);
+  if (replacing) {
+    package_store_->SetEnabled(inspected.package_id, false);
+    std::string ignored;
+    runtime_engine_->Unload(inspected.package_id, &ignored);
+  }
+  const StoreResult result =
+      package_store_->Install(archive_path, replacing);
+  if (!result.okay) {
+    if (replacing) {
+      std::string refresh_diagnostic;
+      runtime_engine_->RefreshPackage(inspected.package_id, developer_mode_,
+                                      &refresh_diagnostic);
+      if (was_enabled &&
+          runtime_engine_->Enable(inspected.package_id, &refresh_diagnostic)) {
+        package_store_->SetEnabled(inspected.package_id, true);
+      }
+    }
+    SetManagerStatus("Installation failed without replacing the current "
+                     "package: " +
+                     wxString::FromUTF8(result.message));
+    return;
+  }
+
+  std::string runtime_diagnostic;
+  if (!runtime_engine_->RefreshPackage(result.package_id, developer_mode_,
+                                       &runtime_diagnostic)) {
+    wxString recovery;
+    if (replacing) {
+      RestorePreviousPackage(result.package_id, was_enabled, &recovery);
+    } else {
+      package_store_->Remove(result.package_id);
+      runtime_engine_->RefreshPackage(result.package_id, developer_mode_,
+                                      &runtime_diagnostic);
+    }
+    SetManagerStatus(
+        "The package archive was valid, but its runtime could not be loaded: " +
+        wxString::FromUTF8(runtime_diagnostic) +
+        (recovery.empty() ? wxString() : "\n" + recovery));
+    return;
+  }
+
+  if (was_enabled) {
+    if (!runtime_engine_->Enable(result.package_id, &runtime_diagnostic)) {
+      wxString recovery;
+      RestorePreviousPackage(result.package_id, true, &recovery);
+      SetManagerStatus("Updated runtime failed to enable; the previous "
+                       "version was restored. " +
+                       wxString::FromUTF8(runtime_diagnostic) +
+                       (recovery.empty() ? wxString() : "\n" + recovery));
+      return;
+    }
+    const StoreResult persisted =
+        package_store_->SetEnabled(result.package_id, true);
+    if (!persisted.okay) {
+      runtime_engine_->Disable(result.package_id, &runtime_diagnostic);
+      SetManagerStatus("Package updated but was left disabled because its "
+                       "state could not be saved: " +
+                       wxString::FromUTF8(persisted.message));
+      return;
+    }
+  }
+  RefreshManager();
+  SetManagerStatus(
+      wxString::FromUTF8(result.message) +
+      (was_enabled ? " and re-enabled." : ". It is disabled by default."));
+}
+
+void PortablePluginManagerPi::EnablePackage(const std::string& package_id) {
+  std::string diagnostic;
+  if (!runtime_engine_->Enable(package_id, &diagnostic)) {
+    package_store_->SetEnabled(package_id, false);
+    SetManagerStatus("Could not enable " + wxString::FromUTF8(package_id) +
+                     ": " + wxString::FromUTF8(diagnostic));
+    return;
+  }
+  const StoreResult persisted = package_store_->SetEnabled(package_id, true);
+  if (!persisted.okay) {
+    runtime_engine_->Disable(package_id, &diagnostic);
+    SetManagerStatus("The package started, but was stopped because its "
+                     "enabled state could not be saved: " +
+                     wxString::FromUTF8(persisted.message));
+    return;
+  }
+  RefreshManager();
+  SetManagerStatus(wxString::FromUTF8(package_id) + " enabled.");
+}
+
+void PortablePluginManagerPi::DisablePackage(const std::string& package_id) {
+  const StoreResult persisted = package_store_->SetEnabled(package_id, false);
+  if (!persisted.okay) {
+    SetManagerStatus("Could not safely disable package: " +
+                     wxString::FromUTF8(persisted.message));
+    return;
+  }
+  std::string diagnostic;
+  const bool clean = runtime_engine_->Disable(package_id, &diagnostic);
+  RefreshManager();
+  SetManagerStatus(
+      wxString::FromUTF8(package_id) +
+      (clean ? " disabled; its runtime remains resident for quick restart."
+             : " was forcibly stopped after its disable callback failed: " +
+                   wxString::FromUTF8(diagnostic)));
+}
+
+void PortablePluginManagerPi::UnloadPackage(const std::string& package_id) {
+  const StoreResult persisted = package_store_->SetEnabled(package_id, false);
+  if (!persisted.okay) {
+    SetManagerStatus("Could not safely unload package: " +
+                     wxString::FromUTF8(persisted.message));
+    return;
+  }
+  std::string diagnostic;
+  const bool clean = runtime_engine_->Unload(package_id, &diagnostic);
+  RefreshManager();
+  SetManagerStatus(
+      wxString::FromUTF8(package_id) +
+      (clean ? " unloaded; its Wasmtime memory has been released."
+             : " was forcibly unloaded after an error: " +
+                   wxString::FromUTF8(diagnostic)));
+}
+
+void PortablePluginManagerPi::RemovePackage(const std::string& package_id) {
+  package_store_->SetEnabled(package_id, false);
+  std::string ignored;
+  runtime_engine_->Unload(package_id, &ignored);
+  const StoreResult removed = package_store_->Remove(package_id);
+  std::string refresh_diagnostic;
+  runtime_engine_->RefreshPackage(package_id, developer_mode_,
+                                  &refresh_diagnostic);
+  RefreshManager();
+  SetManagerStatus(
+      removed.okay
+          ? wxString::FromUTF8(package_id) +
+                " removed to recoverable storage; private data was retained."
+          : "Removal failed: " + wxString::FromUTF8(removed.message));
+}
+
+void PortablePluginManagerPi::RollbackPackage(
+    const std::string& package_id) {
+  package_store_->SetEnabled(package_id, false);
+  std::string ignored;
+  runtime_engine_->Unload(package_id, &ignored);
+  const StoreResult rolled_back = package_store_->Rollback(package_id);
+  std::string runtime_diagnostic;
+  const bool loaded =
+      rolled_back.okay &&
+      runtime_engine_->RefreshPackage(package_id, developer_mode_,
+                                      &runtime_diagnostic);
+  RefreshManager();
+  SetManagerStatus(
+      loaded ? wxString::FromUTF8(package_id) +
+                   " rolled back and left disabled for review."
+             : "Rollback failed: " +
+                   wxString::FromUTF8(rolled_back.okay
+                                          ? runtime_diagnostic
+                                          : rolled_back.message));
 }
 
 void PortablePluginManagerPi::SetPositionFixEx(PlugIn_Position_Fix_Ex& fix) {
@@ -285,6 +567,12 @@ bool PortablePluginManagerPi::RenderGLOverlayMultiCanvas(
 }
 
 void PortablePluginManagerPi::OnEngineStateChanged() {
+  if (package_store_ && runtime_engine_) {
+    for (const auto& package : runtime_engine_->Packages()) {
+      if (package.state == "Failed")
+        package_store_->SetEnabled(package.id, false);
+    }
+  }
   RefreshManager();
   RequestRefresh(GetOCPNCanvasWindow());
 }
@@ -293,9 +581,21 @@ void PortablePluginManagerPi::RefreshManager() {
   if (manager_dialog_ && runtime_engine_) {
     const auto packages = runtime_engine_->Packages();
     manager_dialog_->SetPackages(packages);
-    manager_dialog_->SetStatus(
-        wxString::Format("%zu installed package%s.", packages.size(),
-                         packages.size() == 1 ? "" : "s"));
+    const auto failures =
+        std::count_if(packages.begin(), packages.end(), [](const auto& value) {
+          return value.state == "Failed";
+        });
+    manager_dialog_->SetStatus(failures == 0
+                                   ? wxString::Format(
+                                         "%zu installed package%s.",
+                                         packages.size(),
+                                         packages.size() == 1 ? "" : "s")
+                                   : wxString::Format(
+                                         "%zu installed package%s; %zu "
+                                         "requires attention.",
+                                         packages.size(),
+                                         packages.size() == 1 ? "" : "s",
+                                         failures));
   }
 }
 

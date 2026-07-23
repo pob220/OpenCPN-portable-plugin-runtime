@@ -29,6 +29,21 @@ bool ActionRegistry::Remove(const ActionKey& key) {
   return true;
 }
 
+std::vector<Action> ActionRegistry::RemovePackage(
+    const std::string& package_id) {
+  std::vector<Action> removed;
+  for (auto item = by_key_.begin(); item != by_key_.end();) {
+    if (item->first.package_id != package_id) {
+      ++item;
+      continue;
+    }
+    removed.push_back(item->second);
+    by_tool_id_.erase(item->second.tool_id);
+    item = by_key_.erase(item);
+  }
+  return removed;
+}
+
 std::optional<Action> ActionRegistry::FindByToolId(int tool_id) const {
   const auto id_item = by_tool_id_.find(tool_id);
   if (id_item == by_tool_id_.end()) return std::nullopt;

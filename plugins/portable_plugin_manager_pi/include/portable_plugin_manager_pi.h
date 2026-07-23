@@ -7,6 +7,7 @@
 
 #include "action_registry.h"
 #include "ocpn_plugin.h"
+#include "package_store.h"
 #include "runtime_engine.h"
 
 namespace ppm {
@@ -23,7 +24,7 @@ class PortablePluginManagerPi final : public opencpn_plugin_121 {
   int GetAPIVersionMajor() override { return 1; }
   int GetAPIVersionMinor() override { return 21; }
   int GetPlugInVersionMajor() override { return 0; }
-  int GetPlugInVersionMinor() override { return 1; }
+  int GetPlugInVersionMinor() override { return 2; }
   int GetPlugInVersionPatch() override { return 0; }
   int GetToolbarToolCount() override { return 1; }
   wxBitmap* GetPlugInBitmap() override { return &plugin_bitmap_; }
@@ -43,7 +44,18 @@ class PortablePluginManagerPi final : public opencpn_plugin_121 {
   bool RegisterManagerAction();
   int RegisterPortableAction(const RuntimeAction& action,
                              std::uint32_t* host_action_id);
+  void RemovePackageActions(const std::string& package_id);
   void RemoveAllActions();
+  void InstallPackage(const std::string& archive_path);
+  void EnablePackage(const std::string& package_id);
+  void DisablePackage(const std::string& package_id);
+  void UnloadPackage(const std::string& package_id);
+  void RemovePackage(const std::string& package_id);
+  void RollbackPackage(const std::string& package_id);
+  void SetManagerStatus(const wxString& status);
+  bool RestorePreviousPackage(const std::string& package_id,
+                              bool enable_after_restore,
+                              wxString* diagnostic);
   void ShowManager(wxWindow* parent);
   void OnEngineStateChanged();
   void RefreshManager();
@@ -51,8 +63,10 @@ class PortablePluginManagerPi final : public opencpn_plugin_121 {
   ActionRegistry actions_;
   wxBitmap plugin_bitmap_;
   wxString storage_root_;
+  std::unique_ptr<PackageStore> package_store_;
   std::unique_ptr<RuntimeEngine> runtime_engine_;
   std::unique_ptr<ManagerDialog> manager_dialog_;
+  bool developer_mode_ = false;
   bool initialized_ = false;
 };
 

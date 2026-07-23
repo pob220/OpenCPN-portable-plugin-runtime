@@ -100,6 +100,14 @@ std::string ReadSmallFile(const fs::path& path, std::size_t limit,
   return result;
 }
 
+bool PersistedEnabled(const fs::path& storage_root,
+                      const std::string& package_id) {
+  std::ifstream input(storage_root / "state" /
+                      (package_id + ".enabled"));
+  char value = '\0';
+  return input.get(value) && value == '1';
+}
+
 }  // namespace
 
 class RuntimeEngine::Impl {
@@ -110,30 +118,46 @@ class RuntimeEngine::Impl {
     std::string name;
     std::string version;
     fs::path package_root;
+    fs::path component_path;
     fs::path private_root;
     std::set<std::string> permissions;
     ocpn_portable_runtime* runtime = nullptr;
     mutable std::mutex runtime_mutex;
     bool enabled = false;
     bool failed = false;
+    bool loadable = false;
     std::string diagnostic;
+    std::vector<RuntimeAction> registered_actions;
     std::map<std::string, OverlayScene> scenes;
   };
 
   Impl(std::string storage_root, RegisterAction register_action,
-       StateChanged state_changed)
+       RemoveActions remove_actions, StateChanged state_changed)
       : storage_root(std::move(storage_root)),
         register_action(std::move(register_action)),
+        remove_actions(std::move(remove_actions)),
         state_changed(std::move(state_changed)) {}
 
   ~Impl() { Shutdown(); }
 
   bool LoadInstalled(bool developer_mode);
+  bool RefreshPackage(const std::string& package_id, bool developer_mode,
+                      std::string* diagnostic);
+  bool Enable(const std::string& package_id, std::string* diagnostic);
+  bool Disable(const std::string& package_id, std::string* diagnostic);
+  bool Unload(const std::string& package_id, std::string* diagnostic);
+  bool IsEnabled(const std::string& package_id) const;
   void Shutdown();
   bool HandleAction(const std::string& package_id,
                     const std::string& action_id);
   void Fail(Instance& instance, const std::string& operation,
             const std::string& diagnostic);
+  Instance* Find(const std::string& package_id);
+  const Instance* Find(const std::string& package_id) const;
+  bool LoadRoot(const fs::path& root, bool developer_mode, bool activate,
+                std::string* diagnostic);
+  bool Start(Instance& instance, std::string* diagnostic);
+  bool Stop(Instance& instance, bool destroy, std::string* diagnostic);
   bool Permitted(const Instance& instance,
                  const std::string& permission) const {
     return instance.permissions.count(permission) != 0;
@@ -197,6 +221,7 @@ class RuntimeEngine::Impl {
 
   fs::path storage_root;
   RegisterAction register_action;
+  RemoveActions remove_actions;
   StateChanged state_changed;
   std::vector<std::unique_ptr<Instance>> instances;
   bool stopped = false;
@@ -253,7 +278,10 @@ std::int32_t RuntimeEngine::Impl::RegisterRuntimeAction(
     std::error_code error;
     if (!fs::is_regular_file(action.icon_path, error)) return -4;
   }
-  return instance->owner->register_action(action, host_action_id);
+  const std::int32_t result =
+      instance->owner->register_action(action, host_action_id);
+  if (result == 0) instance->registered_actions.push_back(std::move(action));
+  return result;
 }
 
 std::int32_t RuntimeEngine::Impl::GetVesselPosition(
@@ -430,109 +458,44 @@ std::int32_t RuntimeEngine::Impl::StoragePrivateRead(
   return 0;
 }
 
-bool RuntimeEngine::Impl::LoadInstalled(bool developer_mode) {
-  if (stopped) return false;
-  const fs::path packages_root = storage_root / "packages";
-  std::error_code filesystem_error;
-  fs::create_directories(packages_root, filesystem_error);
-  fs::create_directories(storage_root / "data", filesystem_error);
-  if (filesystem_error) {
-    wxLogError("PPM runtime store is unavailable: %s",
-               filesystem_error.message());
+RuntimeEngine::Impl::Instance* RuntimeEngine::Impl::Find(
+    const std::string& package_id) {
+  const auto item =
+      std::find_if(instances.begin(), instances.end(), [&](const auto& value) {
+        return value->id == package_id;
+      });
+  return item == instances.end() ? nullptr : item->get();
+}
+
+const RuntimeEngine::Impl::Instance* RuntimeEngine::Impl::Find(
+    const std::string& package_id) const {
+  const auto item =
+      std::find_if(instances.begin(), instances.end(), [&](const auto& value) {
+        return value->id == package_id;
+      });
+  return item == instances.end() ? nullptr : item->get();
+}
+
+bool RuntimeEngine::Impl::Start(Instance& instance,
+                                std::string* diagnostic) {
+  if (stopped) {
+    if (diagnostic) *diagnostic = "runtime engine is shutting down";
     return false;
   }
-
-  const std::set<std::string> known_permissions = {
-      "ui.commands",          "navigation.position.read",
-      "navigation.objects.read", "settings.read-write",
-      "overlay.submit",       "jobs.compute",
-      "environment.datasets", "storage.user-selected",
-      "network.providers",    "helpers.environment.decode",
-      "helpers.environment.generate", "charts.coverage",
-      "network.http",         "storage.private",
-      "credentials.provider", "weather-routing.compute",
-      "environment.consume",  "navigation.routes.write"};
-
-  std::vector<fs::path> roots;
-  for (const auto& item : fs::directory_iterator(packages_root)) {
-    if (item.is_directory()) roots.push_back(item.path());
+  if (!instance.loadable) {
+    if (diagnostic)
+      *diagnostic = instance.diagnostic.empty()
+                        ? "package failed static validation"
+                        : instance.diagnostic;
+    return false;
   }
-  std::sort(roots.begin(), roots.end());
-  for (const auto& root : roots) {
-    const fs::path manifest_path = root / "manifest.json";
-    wxFileInputStream input(wxString::FromUTF8(manifest_path.string()));
-    wxJSONValue manifest;
-    wxJSONReader reader;
-    if (!input.IsOk() || reader.Parse(input, &manifest) != 0 ||
-        !manifest.IsObject()) {
-      wxLogError("PPM invalid installed manifest: %s",
-                 manifest_path.string());
-      continue;
-    }
-    const wxString id = manifest["id"].AsString();
-    const wxString name = manifest["name"].AsString();
-    const wxString version = manifest["version"].AsString();
-    const wxString component = manifest["component"].AsString();
-    const bool development = manifest["development"].AsBool();
-    const bool typed =
-        manifest["format_version"].IsInt() &&
-        manifest["format_version"].AsInt() == 1 && manifest["id"].IsString() &&
-        manifest["name"].IsString() && manifest["version"].IsString() &&
-        manifest["component"].IsString() && manifest["runtime"].IsString() &&
-        manifest["portable_api"].IsString() &&
-        manifest["permissions"].IsArray() &&
-        manifest["development"].IsBool();
-    if (!typed || !IsPackageId(id) || name.empty() ||
-        !IsSemanticVersion(version) || !SafeRelativePath(component) ||
-        manifest["runtime"].AsString() != ">=0.1.0 <0.2.0" ||
-        manifest["portable_api"].AsString() != ">=0.1.0 <0.2.0") {
-      wxLogError("PPM incompatible installed package at %s", root.string());
-      continue;
-    }
-    if (development && !developer_mode) {
-      wxLogWarning("PPM skipped development package %s", id);
-      continue;
-    }
-    auto instance = std::make_unique<Instance>();
-    instance->owner = this;
-    instance->id = id.ToStdString();
-    instance->name = name.ToStdString();
-    instance->version = version.ToStdString();
-    instance->package_root = root;
-    instance->private_root = storage_root / "data" / instance->id;
-    fs::create_directories(instance->private_root, filesystem_error);
-    if (filesystem_error) {
-      instance->diagnostic = filesystem_error.message();
-      instances.push_back(std::move(instance));
-      continue;
-    }
-    bool permission_error = false;
-    wxJSONValue requested = manifest["permissions"];
-    for (int index = 0; index < requested.Size(); ++index) {
-      if (!requested[index].IsString()) {
-        permission_error = true;
-        break;
-      }
-      const std::string permission = requested[index].AsString().ToStdString();
-      if (known_permissions.count(permission) == 0) {
-        permission_error = true;
-        instance->diagnostic = "unknown permission: " + permission;
-        break;
-      }
-      instance->permissions.insert(permission);
-    }
-    const fs::path component_path =
-        (root / component.ToStdString()).lexically_normal();
-    if (permission_error || !fs::is_regular_file(component_path)) {
-      if (instance->diagnostic.empty())
-        instance->diagnostic = "component or permissions are invalid";
-      instances.push_back(std::move(instance));
-      continue;
-    }
-
+  std::lock_guard<std::mutex> lock(instance.runtime_mutex);
+  std::array<char, kErrorCapacity> error{};
+  if (!instance.runtime) {
+    instance.registered_actions.clear();
     ocpn_portable_host_callbacks callbacks{};
     callbacks.abi_version = OCPN_PORTABLE_HOST_ABI_VERSION;
-    callbacks.user_data = instance.get();
+    callbacks.user_data = &instance;
     callbacks.log = Log;
     callbacks.register_action = RegisterRuntimeAction;
     callbacks.get_vessel_position = GetVesselPosition;
@@ -550,32 +513,290 @@ bool RuntimeEngine::Impl::LoadInstalled(bool developer_mode) {
     callbacks.charts_query_segments = ChartsQuerySegments;
     callbacks.network_get_to_private = NetworkGetToPrivate;
     callbacks.storage_private_read = StoragePrivateRead;
-    std::array<char, kErrorCapacity> error{};
-    instance->runtime = ocpn_portable_runtime_create(
-        component_path.c_str(), &callbacks, error.data(), error.size());
-    if (!instance->runtime ||
+    instance.runtime = ocpn_portable_runtime_create(
+        instance.component_path.c_str(), &callbacks, error.data(), error.size());
+    if (!instance.runtime ||
         ocpn_portable_runtime_initialize(
-            instance->runtime, instance->id.data(), instance->id.size(),
-            instance->name.data(), instance->name.size(),
-            instance->version.data(), instance->version.size(), error.data(),
-            error.size()) != 0 ||
-        ocpn_portable_runtime_enable(instance->runtime, error.data(),
-                                     error.size()) != 0) {
-      instance->diagnostic = error.data();
-      if (instance->runtime) {
-        ocpn_portable_runtime_destroy(instance->runtime);
-        instance->runtime = nullptr;
-      }
-      instances.push_back(std::move(instance));
-      continue;
+            instance.runtime, instance.id.data(), instance.id.size(),
+            instance.name.data(), instance.name.size(), instance.version.data(),
+            instance.version.size(), error.data(), error.size()) != 0) {
+      remove_actions(instance.id);
+      if (instance.runtime)
+        ocpn_portable_runtime_destroy(instance.runtime);
+      instance.runtime = nullptr;
+      instance.registered_actions.clear();
+      instance.failed = true;
+      instance.diagnostic =
+          error[0] ? error.data() : "runtime initialization failed";
+      if (diagnostic) *diagnostic = instance.diagnostic;
+      return false;
     }
-    instance->enabled = true;
-    wxLogMessage("PPM package-enabled id=%s version=%s", instance->id,
-                 instance->version);
+  } else {
+    for (const auto& action : instance.registered_actions) {
+      std::uint32_t ignored = 0;
+      if (register_action(action, &ignored) != 0) {
+        remove_actions(instance.id);
+        instance.diagnostic = "could not restore package toolbar actions";
+        if (diagnostic) *diagnostic = instance.diagnostic;
+        return false;
+      }
+    }
+  }
+  if (ocpn_portable_runtime_enable(instance.runtime, error.data(),
+                                   error.size()) != 0) {
+    remove_actions(instance.id);
+    ocpn_portable_runtime_destroy(instance.runtime);
+    instance.runtime = nullptr;
+    instance.registered_actions.clear();
+    instance.failed = true;
+    instance.diagnostic =
+        error[0] ? error.data() : "runtime enable failed";
+    if (diagnostic) *diagnostic = instance.diagnostic;
+    return false;
+  }
+  instance.enabled = true;
+  instance.failed = false;
+  instance.diagnostic.clear();
+  wxLogMessage("PPM package-enabled id=%s version=%s", instance.id,
+               instance.version);
+  return true;
+}
+
+bool RuntimeEngine::Impl::Stop(Instance& instance, bool destroy,
+                               std::string* diagnostic) {
+  std::lock_guard<std::mutex> lock(instance.runtime_mutex);
+  bool okay = true;
+  std::array<char, kErrorCapacity> error{};
+  if (instance.runtime && instance.enabled &&
+      ocpn_portable_runtime_disable(instance.runtime, error.data(),
+                                    error.size()) != 0) {
+    okay = false;
+    instance.diagnostic =
+        error[0] ? error.data() : "runtime disable failed";
+    wxLogWarning("PPM package-disable-failed id=%s diagnostic=%s",
+                 instance.id, instance.diagnostic);
+    destroy = true;
+  }
+  instance.enabled = false;
+  instance.scenes.clear();
+  remove_actions(instance.id);
+  if (destroy && instance.runtime) {
+    ocpn_portable_runtime_destroy(instance.runtime);
+    instance.runtime = nullptr;
+    instance.registered_actions.clear();
+  }
+  if (okay && !instance.failed) instance.diagnostic.clear();
+  if (!okay && diagnostic) *diagnostic = instance.diagnostic;
+  return okay;
+}
+
+bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
+                                   bool activate,
+                                   std::string* diagnostic) {
+  const fs::path manifest_path = root / "manifest.json";
+  wxFileInputStream input(wxString::FromUTF8(manifest_path.string()));
+  wxJSONValue manifest;
+  wxJSONReader reader;
+  if (!input.IsOk() || reader.Parse(input, &manifest) != 0 ||
+      !manifest.IsObject()) {
+    if (diagnostic) *diagnostic = "invalid installed manifest";
+    wxLogError("PPM invalid installed manifest: %s", manifest_path.string());
+    return false;
+  }
+  const wxString id = manifest["id"].AsString();
+  const wxString name = manifest["name"].AsString();
+  const wxString version = manifest["version"].AsString();
+  const wxString component = manifest["component"].AsString();
+  const bool development = manifest["development"].AsBool();
+  const bool typed =
+      manifest["format_version"].IsInt() &&
+      manifest["format_version"].AsInt() == 1 && manifest["id"].IsString() &&
+      manifest["name"].IsString() && manifest["version"].IsString() &&
+      manifest["component"].IsString() && manifest["runtime"].IsString() &&
+      manifest["portable_api"].IsString() &&
+      manifest["permissions"].IsArray() &&
+      manifest["development"].IsBool();
+  if (!typed || !IsPackageId(id) || name.empty() ||
+      !IsSemanticVersion(version) || !SafeRelativePath(component) ||
+      manifest["runtime"].AsString() != ">=0.1.0 <0.2.0" ||
+      manifest["portable_api"].AsString() != ">=0.1.0 <0.2.0" ||
+      root.filename() != id.ToStdString()) {
+    if (diagnostic) *diagnostic = "incompatible installed package";
+    wxLogError("PPM incompatible installed package at %s", root.string());
+    return false;
+  }
+
+  auto instance = std::make_unique<Instance>();
+  instance->owner = this;
+  instance->id = id.ToStdString();
+  instance->name = name.ToStdString();
+  instance->version = version.ToStdString();
+  instance->package_root = root;
+  instance->component_path =
+      (root / component.ToStdString()).lexically_normal();
+  instance->private_root = storage_root / "data" / instance->id;
+  if (development && !developer_mode) {
+    instance->failed = true;
+    instance->diagnostic =
+        "Development package blocked because developer mode is off";
+    if (diagnostic) *diagnostic = instance->diagnostic;
     instances.push_back(std::move(instance));
+    return false;
+  }
+
+  static const std::set<std::string> known_permissions = {
+      "ui.commands",
+      "navigation.position.read",
+      "navigation.objects.read",
+      "settings.read-write",
+      "overlay.submit",
+      "jobs.compute",
+      "environment.datasets",
+      "storage.user-selected",
+      "network.providers",
+      "helpers.environment.decode",
+      "helpers.environment.generate",
+      "charts.coverage",
+      "network.http",
+      "storage.private",
+      "credentials.provider",
+      "weather-routing.compute",
+      "environment.consume",
+      "navigation.routes.write"};
+  wxJSONValue requested = manifest["permissions"];
+  for (int index = 0; index < requested.Size(); ++index) {
+    if (!requested[index].IsString()) {
+      instance->failed = true;
+      instance->diagnostic = "manifest permission is not a string";
+      break;
+    }
+    const std::string permission = requested[index].AsString().ToStdString();
+    if (known_permissions.count(permission) == 0) {
+      instance->failed = true;
+      instance->diagnostic = "unknown permission: " + permission;
+      break;
+    }
+    instance->permissions.insert(permission);
+  }
+  std::error_code filesystem_error;
+  fs::create_directories(instance->private_root, filesystem_error);
+  if (filesystem_error) {
+    instance->failed = true;
+    instance->diagnostic = filesystem_error.message();
+  } else if (!fs::is_regular_file(instance->component_path)) {
+    instance->failed = true;
+    instance->diagnostic = "declared component is missing";
+  }
+  Instance* loaded = instance.get();
+  if (!instance->failed) instance->loadable = true;
+  instances.push_back(std::move(instance));
+  if (loaded->failed) {
+    if (diagnostic) *diagnostic = loaded->diagnostic;
+    return false;
+  }
+  if (activate && !Start(*loaded, diagnostic)) return false;
+  return true;
+}
+
+bool RuntimeEngine::Impl::LoadInstalled(bool developer_mode) {
+  if (stopped) return false;
+  const fs::path packages_root = storage_root / "packages";
+  std::error_code filesystem_error;
+  fs::create_directories(packages_root, filesystem_error);
+  fs::create_directories(storage_root / "data", filesystem_error);
+  if (filesystem_error) {
+    wxLogError("PPM runtime store is unavailable: %s",
+               filesystem_error.message());
+    return false;
+  }
+  std::vector<fs::path> roots;
+  for (const auto& item :
+       fs::directory_iterator(packages_root, filesystem_error)) {
+    if (item.is_directory()) roots.push_back(item.path());
+  }
+  if (filesystem_error) {
+    wxLogError("PPM package scan failed: %s", filesystem_error.message());
+    return false;
+  }
+  std::sort(roots.begin(), roots.end());
+  bool okay = true;
+  for (const auto& root : roots) {
+    std::string diagnostic;
+    const bool activate =
+        PersistedEnabled(storage_root, root.filename().string());
+    if (!LoadRoot(root, developer_mode, activate, &diagnostic)) okay = false;
   }
   state_changed();
-  return true;
+  return okay;
+}
+
+bool RuntimeEngine::Impl::RefreshPackage(const std::string& package_id,
+                                         bool developer_mode,
+                                         std::string* diagnostic) {
+  if (stopped || !IsSafeName(package_id)) {
+    if (diagnostic) *diagnostic = "invalid package or stopped runtime";
+    return false;
+  }
+  for (auto item = instances.begin(); item != instances.end(); ++item) {
+    if ((*item)->id != package_id) continue;
+    std::string ignored;
+    Stop(**item, true, &ignored);
+    instances.erase(item);
+    break;
+  }
+  const fs::path root = storage_root / "packages" / package_id;
+  std::error_code error;
+  if (!fs::exists(root, error)) {
+    state_changed();
+    return !error;
+  }
+  const bool result =
+      LoadRoot(root, developer_mode,
+               PersistedEnabled(storage_root, package_id), diagnostic);
+  state_changed();
+  return result;
+}
+
+bool RuntimeEngine::Impl::Enable(const std::string& package_id,
+                                 std::string* diagnostic) {
+  Instance* instance = Find(package_id);
+  if (!instance) {
+    if (diagnostic) *diagnostic = "package is not loaded";
+    return false;
+  }
+  if (instance->enabled) return true;
+  const bool result = Start(*instance, diagnostic);
+  state_changed();
+  return result;
+}
+
+bool RuntimeEngine::Impl::Disable(const std::string& package_id,
+                                  std::string* diagnostic) {
+  Instance* instance = Find(package_id);
+  if (!instance) {
+    if (diagnostic) *diagnostic = "package is not loaded";
+    return false;
+  }
+  const bool result = Stop(*instance, false, diagnostic);
+  state_changed();
+  return result;
+}
+
+bool RuntimeEngine::Impl::Unload(const std::string& package_id,
+                                 std::string* diagnostic) {
+  Instance* instance = Find(package_id);
+  if (!instance) {
+    if (diagnostic) *diagnostic = "package is not loaded";
+    return false;
+  }
+  const bool result = Stop(*instance, true, diagnostic);
+  state_changed();
+  return result;
+}
+
+bool RuntimeEngine::Impl::IsEnabled(const std::string& package_id) const {
+  const Instance* instance = Find(package_id);
+  return instance && instance->enabled && !instance->failed;
 }
 
 void RuntimeEngine::Impl::Fail(Instance& instance,
@@ -585,6 +806,12 @@ void RuntimeEngine::Impl::Fail(Instance& instance,
   instance.enabled = false;
   instance.diagnostic = operation + ": " + diagnostic;
   instance.scenes.clear();
+  remove_actions(instance.id);
+  if (instance.runtime) {
+    ocpn_portable_runtime_destroy(instance.runtime);
+    instance.runtime = nullptr;
+  }
+  instance.registered_actions.clear();
   wxLogError("PPM package-failed id=%s diagnostic=%s", instance.id,
              instance.diagnostic);
   state_changed();
@@ -617,27 +844,18 @@ void RuntimeEngine::Impl::Shutdown() {
   if (stopped) return;
   stopped = true;
   for (auto& instance : instances) {
-    std::lock_guard<std::mutex> lock(instance->runtime_mutex);
-    if (!instance->runtime) continue;
-    std::array<char, kErrorCapacity> error{};
-    if (instance->enabled &&
-        ocpn_portable_runtime_disable(instance->runtime, error.data(),
-                                      error.size()) != 0) {
-      wxLogWarning("PPM package-disable-failed id=%s diagnostic=%s",
-                   instance->id, error.data());
-    }
-    ocpn_portable_runtime_destroy(instance->runtime);
-    instance->runtime = nullptr;
-    instance->enabled = false;
-    instance->scenes.clear();
+    std::string ignored;
+    Stop(*instance, true, &ignored);
   }
   state_changed();
 }
 
 RuntimeEngine::RuntimeEngine(std::string storage_root,
                              RegisterAction register_action,
+                             RemoveActions remove_actions,
                              StateChanged state_changed)
     : impl_(std::make_unique<Impl>(storage_root, std::move(register_action),
+                                  std::move(remove_actions),
                                   std::move(state_changed))),
       storage_root_(std::move(storage_root)) {}
 
@@ -645,6 +863,31 @@ RuntimeEngine::~RuntimeEngine() = default;
 
 bool RuntimeEngine::LoadInstalled(bool developer_mode) {
   return impl_->LoadInstalled(developer_mode);
+}
+
+bool RuntimeEngine::RefreshPackage(const std::string& package_id,
+                                   bool developer_mode,
+                                   std::string* diagnostic) {
+  return impl_->RefreshPackage(package_id, developer_mode, diagnostic);
+}
+
+bool RuntimeEngine::Enable(const std::string& package_id,
+                           std::string* diagnostic) {
+  return impl_->Enable(package_id, diagnostic);
+}
+
+bool RuntimeEngine::Disable(const std::string& package_id,
+                            std::string* diagnostic) {
+  return impl_->Disable(package_id, diagnostic);
+}
+
+bool RuntimeEngine::Unload(const std::string& package_id,
+                           std::string* diagnostic) {
+  return impl_->Unload(package_id, diagnostic);
+}
+
+bool RuntimeEngine::IsEnabled(const std::string& package_id) const {
+  return impl_->IsEnabled(package_id);
 }
 
 void RuntimeEngine::Shutdown() { impl_->Shutdown(); }
@@ -672,10 +915,11 @@ std::vector<PackageSnapshot> RuntimeEngine::Packages() const {
   result.reserve(impl_->instances.size());
   for (const auto& instance : impl_->instances) {
     result.push_back(
-        {instance->id, instance->name, instance->version,
+         {instance->id, instance->name, instance->version,
          instance->failed ? "Failed"
          : instance->enabled ? "Enabled"
-                             : "Disabled",
+         : instance->runtime ? "Disabled"
+                             : "Unloaded",
          instance->diagnostic});
   }
   return result;

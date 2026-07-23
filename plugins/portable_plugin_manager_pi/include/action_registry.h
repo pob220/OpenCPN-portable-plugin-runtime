@@ -28,6 +28,7 @@ class ActionRegistry {
  public:
   bool Add(const ActionKey& key, int tool_id);
   bool Remove(const ActionKey& key);
+  std::vector<Action> RemovePackage(const std::string& package_id);
   std::optional<Action> FindByToolId(int tool_id) const;
   Action* Find(const ActionKey& key);
   const Action* Find(const ActionKey& key) const;

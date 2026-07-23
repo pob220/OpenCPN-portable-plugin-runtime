@@ -47,16 +47,23 @@ class RuntimeEngine {
  public:
   using RegisterAction =
       std::function<int(const RuntimeAction&, std::uint32_t*)>;
+  using RemoveActions = std::function<void(const std::string&)>;
   using StateChanged = std::function<void()>;
 
   RuntimeEngine(std::string storage_root, RegisterAction register_action,
-                StateChanged state_changed);
+                RemoveActions remove_actions, StateChanged state_changed);
   ~RuntimeEngine();
 
   RuntimeEngine(const RuntimeEngine&) = delete;
   RuntimeEngine& operator=(const RuntimeEngine&) = delete;
 
   bool LoadInstalled(bool developer_mode);
+  bool RefreshPackage(const std::string& package_id, bool developer_mode,
+                      std::string* diagnostic);
+  bool Enable(const std::string& package_id, std::string* diagnostic);
+  bool Disable(const std::string& package_id, std::string* diagnostic);
+  bool Unload(const std::string& package_id, std::string* diagnostic);
+  bool IsEnabled(const std::string& package_id) const;
   void Shutdown();
   bool HandleAction(const std::string& package_id,
                     const std::string& action_id);

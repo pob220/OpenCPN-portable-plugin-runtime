@@ -42,8 +42,16 @@ int main() {
   CHECK(registry.Add(igrib, 220));
   CHECK(registry.Size() == 3);
 
+  CHECK(registry.Add({"org.opencpn.routing", "settings"}, 221));
+  const auto package_actions = registry.RemovePackage("org.opencpn.routing");
+  CHECK(package_actions.size() == 2);
+  CHECK(!registry.FindByToolId(102));
+  CHECK(!registry.FindByToolId(221));
+  CHECK(registry.Size() == 2);
+  CHECK(registry.RemovePackage("org.opencpn.missing").empty());
+
   const auto removed = registry.Clear();
-  CHECK(removed.size() == 3);
+  CHECK(removed.size() == 2);
   CHECK(registry.Size() == 0);
   CHECK(!registry.FindByToolId(100));
   return 0;

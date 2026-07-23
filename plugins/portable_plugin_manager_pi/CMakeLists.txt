@@ -23,6 +23,8 @@ endif()
 find_package(wxWidgets REQUIRED COMPONENTS base core gl)
 include(${wxWidgets_USE_FILE})
 find_package(Threads REQUIRED)
+find_package(LibArchive REQUIRED)
+find_package(OpenSSL REQUIRED)
 find_program(PPM_CARGO_EXECUTABLE cargo REQUIRED)
 
 set(PPM_RUNTIME_SOURCE_DIR "${OPENCPN_SOURCE_DIR}/portable-runtime" CACHE PATH
@@ -61,6 +63,7 @@ add_subdirectory("${OPENCPN_SOURCE_DIR}/libs/wxJSON"
 add_library(portable_plugin_manager_pi MODULE
   src/action_registry.cpp
   src/manager_dialog.cpp
+  src/package_store.cpp
   src/portable_plugin_manager_pi.cpp
   src/runtime_engine.cpp
 )
@@ -85,6 +88,8 @@ endif()
 target_link_libraries(portable_plugin_manager_pi PRIVATE
   ${wxWidgets_LIBRARIES}
   ocpn::wxjson
+  LibArchive::LibArchive
+  OpenSSL::Crypto
   ppm_runtime_bridge
   Threads::Threads
   ${CMAKE_DL_LIBS})
@@ -113,4 +118,76 @@ if(BUILD_TESTING)
       -Wall -Wextra -Wpedantic)
   endif()
   add_test(NAME ppm_action_registry COMMAND ppm_action_registry_test)
+
+  add_executable(ppm_package_store_test
+    src/package_store.cpp
+    tests/package_store_test.cpp
+  )
+  target_include_directories(ppm_package_store_test PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include"
+    "${OPENCPN_SOURCE_DIR}/libs/wxJSON/include")
+  target_link_libraries(ppm_package_store_test PRIVATE
+    ${wxWidgets_LIBRARIES}
+    ocpn::wxjson
+    LibArchive::LibArchive
+    OpenSSL::Crypto)
+  if(MSVC)
+    target_compile_options(ppm_package_store_test PRIVATE /W4)
+  else()
+    target_compile_options(ppm_package_store_test PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
+  add_test(NAME ppm_package_store COMMAND ppm_package_store_test)
+
+  set(PPM_TEST_IGRIB_TARGET_DIR
+      "${CMAKE_CURRENT_BINARY_DIR}/ppm-test-igrib-target")
+  set(PPM_TEST_IGRIB_WASM
+      "${PPM_TEST_IGRIB_TARGET_DIR}/wasm32-wasip2/release/igrib_portable_component.wasm")
+  file(GLOB_RECURSE PPM_TEST_IGRIB_SOURCES CONFIGURE_DEPENDS
+    "${OPENCPN_SOURCE_DIR}/portable-plugins/igrib/component/src/*.rs")
+  add_custom_command(
+    OUTPUT "${PPM_TEST_IGRIB_WASM}"
+    COMMAND ${CMAKE_COMMAND} -E env
+            "CARGO_TARGET_DIR=${PPM_TEST_IGRIB_TARGET_DIR}"
+            "${PPM_CARGO_EXECUTABLE}" build --locked --offline --release
+            --target wasm32-wasip2
+            --manifest-path
+            "${OPENCPN_SOURCE_DIR}/portable-plugins/igrib/component/Cargo.toml"
+    DEPENDS ${PPM_TEST_IGRIB_SOURCES}
+            "${OPENCPN_SOURCE_DIR}/portable-plugins/igrib/component/Cargo.toml"
+            "${OPENCPN_SOURCE_DIR}/portable-plugins/igrib/component/Cargo.lock"
+            "${OPENCPN_SOURCE_DIR}/portable-runtime/wit/opencpn-portable.wit"
+    COMMENT "Building the portable lifecycle test component"
+    VERBATIM)
+  add_custom_target(ppm_test_igrib_component
+                    DEPENDS "${PPM_TEST_IGRIB_WASM}")
+
+  add_executable(ppm_runtime_engine_test
+    src/runtime_engine.cpp
+    tests/runtime_engine_test.cpp
+  )
+  add_dependencies(ppm_runtime_engine_test ppm_test_igrib_component)
+  target_include_directories(ppm_runtime_engine_test PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include"
+    "${OPENCPN_SOURCE_DIR}/include"
+    "${OPENCPN_SOURCE_DIR}/libs/wxJSON/include"
+    "${PPM_RUNTIME_SOURCE_DIR}/bridge/include")
+  target_compile_definitions(ppm_runtime_engine_test PRIVATE
+    PPM_TEST_IGRIB_WASM="${PPM_TEST_IGRIB_WASM}")
+  target_link_libraries(ppm_runtime_engine_test PRIVATE
+    ${wxWidgets_LIBRARIES}
+    ocpn::wxjson
+    ppm_runtime_bridge
+    Threads::Threads
+    ${CMAKE_DL_LIBS})
+  if(UNIX AND NOT APPLE)
+    target_link_libraries(ppm_runtime_engine_test PRIVATE m)
+  endif()
+  if(MSVC)
+    target_compile_options(ppm_runtime_engine_test PRIVATE /W4)
+  else()
+    target_compile_options(ppm_runtime_engine_test PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
+  add_test(NAME ppm_runtime_engine COMMAND ppm_runtime_engine_test)
 endif()
