@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=RuntimeHost OpenCPN
+Comment=Stock OpenCPN 5.14 with the Portable Plugin Manager
+Exec=/home/paul/src/OpenCPN-runtime-host-plugin/tools/runtime-host/launch-linux.sh
+Icon=/home/paul/RuntimeHost-OpenCPN/app/share/opencpn/opencpn.png
+Terminal=false
+Categories=Utility;Navigation;
+StartupNotify=true
+StartupWMClass=opencpn
