@@ -327,6 +327,123 @@ int main() {
     CHECK(actions.empty());
   }
 
+  const fs::path dependency_root =
+      fs::temp_directory_path() /
+      fs::path("ppm runtime services " + std::to_string(stamp));
+  const fs::path provider_root =
+      dependency_root / "packages" / "org.opencpn.igrib";
+  const fs::path consumer_root =
+      dependency_root / "packages" / "org.opencpn.iweather-routing";
+  fs::create_directories(provider_root / "component", error);
+  CHECK(!error);
+  fs::create_directories(provider_root / "ui", error);
+  CHECK(!error);
+  fs::copy_file(PPM_TEST_IGRIB_WASM,
+                provider_root / "component" / "igrib.wasm",
+                fs::copy_options::overwrite_existing, error);
+  CHECK(!error);
+  fs::copy_file(PPM_TEST_IGRIB_UI,
+                provider_root / "ui" / "igrib-viewer.ui.json",
+                fs::copy_options::overwrite_existing, error);
+  CHECK(!error);
+  CHECK(Write(provider_root / "resources" / "igrib.svg", "<svg/>"));
+  CHECK(Write(provider_root / "resources" / "fault-test.svg", "<svg/>"));
+  CHECK(Write(provider_root / "resources" / "http-download.svg", "<svg/>"));
+  CHECK(Write(
+      provider_root / "manifest.json",
+      "{"
+      "\"format_version\":1,"
+      "\"id\":\"org.opencpn.igrib\","
+      "\"name\":\"iGRIB\","
+      "\"version\":\"0.1.0\","
+      "\"component\":\"component/igrib.wasm\","
+      "\"runtime\":\">=0.1.0 <0.2.0\","
+      "\"portable_api\":\">=0.1.0 <0.2.0\","
+      "\"surfaces\":{\"environment.viewer\":"
+      "\"ui/igrib-viewer.ui.json\"},"
+      "\"provides\":[{\"interface\":"
+      "\"org.opencpn.environment.provider\",\"version\":\"0.1.0\"}],"
+      "\"permissions\":["
+      "\"ui.commands\",\"navigation.position.read\","
+      "\"navigation.objects.read\",\"settings.read-write\","
+      "\"overlay.submit\",\"jobs.compute\",\"environment.datasets\","
+      "\"storage.user-selected\",\"network.providers\","
+      "\"helpers.environment.decode\","
+      "\"helpers.environment.generate\",\"charts.coverage\","
+      "\"network.http\",\"storage.private\",\"credentials.provider\"],"
+      "\"development\":true"
+      "}"));
+  fs::create_directories(consumer_root / "component", error);
+  CHECK(!error);
+  fs::create_directories(consumer_root / "ui", error);
+  CHECK(!error);
+  fs::copy_file(PPM_TEST_IWEATHER_WASM,
+                consumer_root / "component" / "iweather-routing.wasm",
+                fs::copy_options::overwrite_existing, error);
+  CHECK(!error);
+  fs::copy_file(PPM_TEST_IWEATHER_UI,
+                consumer_root / "ui" / "iweather-routing.ui.json",
+                fs::copy_options::overwrite_existing, error);
+  CHECK(!error);
+  CHECK(Write(consumer_root / "resources" / "iweather-routing.svg",
+              "<svg/>"));
+  CHECK(Write(
+      consumer_root / "manifest.json",
+      "{"
+      "\"format_version\":1,"
+      "\"id\":\"org.opencpn.iweather-routing\","
+      "\"name\":\"iWeatherRouting\","
+      "\"version\":\"0.1.0\","
+      "\"component\":\"component/iweather-routing.wasm\","
+      "\"runtime\":\">=0.1.0 <0.2.0\","
+      "\"portable_api\":\">=0.1.0 <0.2.0\","
+      "\"surfaces\":{\"routing.workbench\":"
+      "\"ui/iweather-routing.ui.json\"},"
+      "\"requires\":[{\"interface\":"
+      "\"org.opencpn.environment.provider\","
+      "\"range\":\">=0.1.0 <0.2.0\"}],"
+      "\"permissions\":["
+      "\"ui.commands\",\"navigation.position.read\","
+      "\"navigation.objects.read\",\"weather-routing.compute\","
+      "\"environment.consume\",\"charts.coverage\","
+      "\"storage.user-selected\",\"navigation.routes.write\"],"
+      "\"development\":true"
+      "}"));
+  actions.clear();
+  {
+    ppm::RuntimeEngine services(dependency_root.string(), register_action,
+                                remove_actions, []() {});
+    CHECK(services.LoadInstalled(true));
+    const auto service_packages = services.Packages();
+    CHECK(service_packages.size() == 2);
+    const auto* provider =
+        Snapshot(service_packages, "org.opencpn.igrib");
+    const auto* consumer =
+        Snapshot(service_packages, "org.opencpn.iweather-routing");
+    CHECK(provider && provider->provided_service_count == 1);
+    CHECK(consumer && consumer->required_service_count == 1);
+    std::string diagnostic;
+    CHECK(services.SetGrantedPermissions(
+        "org.opencpn.iweather-routing",
+        services.RequestedPermissions("org.opencpn.iweather-routing"),
+        &diagnostic));
+    CHECK(!services.Enable("org.opencpn.iweather-routing", &diagnostic));
+    CHECK(diagnostic.find("no enabled compatible provider") !=
+          std::string::npos);
+    CHECK(services.SetGrantedPermissions(
+        "org.opencpn.igrib",
+        services.RequestedPermissions("org.opencpn.igrib"), &diagnostic));
+    CHECK(services.Enable("org.opencpn.igrib", &diagnostic));
+    CHECK(services.Enable("org.opencpn.iweather-routing", &diagnostic));
+    CHECK(!services.Disable("org.opencpn.igrib", &diagnostic));
+    CHECK(diagnostic.find("disable the dependent package first") !=
+          std::string::npos);
+    CHECK(services.Disable("org.opencpn.iweather-routing", &diagnostic));
+    CHECK(services.Disable("org.opencpn.igrib", &diagnostic));
+    services.Shutdown();
+  }
+
   fs::remove_all(test_root, error);
+  fs::remove_all(dependency_root, error);
   return 0;
 }

@@ -35,6 +35,8 @@ struct PackageSnapshot {
   std::uint64_t disable_count = 0;
   std::size_t surface_count = 0;
   std::size_t job_count = 0;
+  std::size_t provided_service_count = 0;
+  std::size_t required_service_count = 0;
 };
 
 struct OverlayPoint {

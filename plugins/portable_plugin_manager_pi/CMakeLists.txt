@@ -176,6 +176,19 @@ if(BUILD_TESTING)
   endif()
   add_test(NAME ppm_serial_executor COMMAND ppm_serial_executor_test)
 
+  add_executable(ppm_service_version_test
+    tests/service_version_test.cpp
+  )
+  target_include_directories(ppm_service_version_test PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include")
+  if(MSVC)
+    target_compile_options(ppm_service_version_test PRIVATE /W4)
+  else()
+    target_compile_options(ppm_service_version_test PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
+  add_test(NAME ppm_service_version COMMAND ppm_service_version_test)
+
   add_executable(ppm_package_store_test
     src/package_store.cpp
     tests/package_store_test.cpp
@@ -253,6 +266,29 @@ if(BUILD_TESTING)
   add_custom_target(ppm_test_igrib_component
                     DEPENDS "${PPM_TEST_IGRIB_WASM}")
 
+  set(PPM_TEST_IWEATHER_TARGET_DIR
+      "${CMAKE_CURRENT_BINARY_DIR}/ppm-test-iweather-target")
+  set(PPM_TEST_IWEATHER_WASM
+      "${PPM_TEST_IWEATHER_TARGET_DIR}/wasm32-wasip2/release/iweather_routing_portable_component.wasm")
+  file(GLOB_RECURSE PPM_TEST_IWEATHER_SOURCES CONFIGURE_DEPENDS
+    "${OPENCPN_SOURCE_DIR}/portable-plugins/iweather-routing/component/src/*.rs")
+  add_custom_command(
+    OUTPUT "${PPM_TEST_IWEATHER_WASM}"
+    COMMAND ${CMAKE_COMMAND} -E env
+            "CARGO_TARGET_DIR=${PPM_TEST_IWEATHER_TARGET_DIR}"
+            "${PPM_CARGO_EXECUTABLE}" build --locked --offline --release
+            --target wasm32-wasip2
+            --manifest-path
+            "${OPENCPN_SOURCE_DIR}/portable-plugins/iweather-routing/component/Cargo.toml"
+    DEPENDS ${PPM_TEST_IWEATHER_SOURCES}
+            "${OPENCPN_SOURCE_DIR}/portable-plugins/iweather-routing/component/Cargo.toml"
+            "${OPENCPN_SOURCE_DIR}/portable-plugins/iweather-routing/component/Cargo.lock"
+            "${OPENCPN_SOURCE_DIR}/portable-runtime/wit/opencpn-portable.wit"
+    COMMENT "Building the iWeatherRouting lifecycle test component"
+    VERBATIM)
+  add_custom_target(ppm_test_iweather_component
+                    DEPENDS "${PPM_TEST_IWEATHER_WASM}")
+
   set(PPM_TEST_IPOLARS_TARGET_DIR
       "${CMAKE_CURRENT_BINARY_DIR}/ppm-test-ipolars-target")
   set(PPM_TEST_IPOLARS_WASM
@@ -284,7 +320,8 @@ if(BUILD_TESTING)
     src/serial_executor.cpp
     tests/runtime_engine_test.cpp
   )
-  add_dependencies(ppm_runtime_engine_test ppm_test_igrib_component)
+  add_dependencies(ppm_runtime_engine_test ppm_test_igrib_component
+                   ppm_test_iweather_component)
   target_include_directories(ppm_runtime_engine_test PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/include"
     "${OPENCPN_SOURCE_DIR}/include"
@@ -292,7 +329,9 @@ if(BUILD_TESTING)
     "${PPM_RUNTIME_SOURCE_DIR}/bridge/include")
   target_compile_definitions(ppm_runtime_engine_test PRIVATE
     PPM_TEST_IGRIB_WASM="${PPM_TEST_IGRIB_WASM}"
-    PPM_TEST_IGRIB_UI="${OPENCPN_SOURCE_DIR}/portable-plugins/igrib/package/igrib-viewer.ui.json")
+    PPM_TEST_IGRIB_UI="${OPENCPN_SOURCE_DIR}/portable-plugins/igrib/package/igrib-viewer.ui.json"
+    PPM_TEST_IWEATHER_WASM="${PPM_TEST_IWEATHER_WASM}"
+    PPM_TEST_IWEATHER_UI="${OPENCPN_SOURCE_DIR}/portable-plugins/iweather-routing/package/iweather-routing.ui.json")
   target_link_libraries(ppm_runtime_engine_test PRIVATE
     ${wxWidgets_LIBRARIES}
     ocpn::wxjson

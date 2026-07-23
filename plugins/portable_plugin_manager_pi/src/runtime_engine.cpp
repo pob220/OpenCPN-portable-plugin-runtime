@@ -34,6 +34,7 @@
 #include "declarative_ui.h"
 #include "job_scheduler.h"
 #include "permission_store.h"
+#include "service_version.h"
 #include "serial_executor.h"
 
 namespace ppm {
@@ -135,6 +136,8 @@ class RuntimeEngine::Impl {
     fs::path private_root;
     std::set<std::string> requested_permissions;
     std::set<std::string> permissions;
+    std::map<std::string, std::string> provided_services;
+    std::map<std::string, std::string> required_services;
     ocpn_portable_runtime* runtime = nullptr;
     mutable std::mutex runtime_mutex;
     mutable std::mutex state_mutex;
@@ -205,6 +208,23 @@ class RuntimeEngine::Impl {
   bool Permitted(const Instance& instance,
                  const std::string& permission) const {
     return instance.permissions.count(permission) != 0;
+  }
+  const Instance* CompatibleProvider(const Instance& consumer,
+                                     const std::string& interface) const {
+    const auto requirement = consumer.required_services.find(interface);
+    if (requirement == consumer.required_services.end()) return nullptr;
+    for (const auto& candidate : instances) {
+      if (candidate.get() == &consumer || !candidate->enabled ||
+          candidate->failed) {
+        continue;
+      }
+      const auto provided = candidate->provided_services.find(interface);
+      if (provided != candidate->provided_services.end() &&
+          ServiceVersionSatisfies(provided->second, requirement->second)) {
+        return candidate.get();
+      }
+    }
+    return nullptr;
   }
   void Publish(std::function<void()> task) {
     if (ui_dispatch)
@@ -866,6 +886,14 @@ bool RuntimeEngine::Impl::Start(Instance& instance,
     instance.diagnostic = "permission approval is required";
     return false;
   }
+  for (const auto& [interface, range] : instance.required_services) {
+    if (!CompatibleProvider(instance, interface)) {
+      instance.diagnostic = "no enabled compatible provider for service " +
+                            interface + " (" + range + ")";
+      if (diagnostic) *diagnostic = instance.diagnostic;
+      return false;
+    }
+  }
   std::lock_guard<std::mutex> lock(instance.runtime_mutex);
   std::array<char, kErrorCapacity> error{};
   if (!instance.runtime) {
@@ -945,6 +973,29 @@ bool RuntimeEngine::Impl::Start(Instance& instance,
 
 bool RuntimeEngine::Impl::Stop(Instance& instance, bool destroy,
                                std::string* diagnostic) {
+  if (!stopped && instance.enabled) {
+    for (const auto& [interface, version] : instance.provided_services) {
+      for (const auto& candidate : instances) {
+        if (candidate.get() == &instance || !candidate->enabled ||
+            candidate->failed) {
+          continue;
+        }
+        const auto requirement = candidate->required_services.find(interface);
+        if (requirement != candidate->required_services.end() &&
+            ServiceVersionSatisfies(version, requirement->second)) {
+          const std::string message =
+              "service " + interface + " is in use by enabled package " +
+              candidate->id + "; disable the dependent package first";
+          {
+            std::lock_guard<std::mutex> state_lock(instance.state_mutex);
+            instance.diagnostic = message;
+          }
+          if (diagnostic) *diagnostic = message;
+          return false;
+        }
+      }
+    }
+  }
   const bool was_enabled = instance.enabled.exchange(false);
   instance.executor.AdvanceGeneration();
   jobs.CancelOwner(instance.id);
@@ -1071,6 +1122,46 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
       break;
     }
     instance->requested_permissions.insert(permission);
+  }
+  const std::set<std::string> known_services = {
+      "org.opencpn.environment.provider"};
+  auto read_services =
+      [&](const char* member, const char* version_member,
+          std::map<std::string, std::string>* services) {
+        if (!manifest.HasMember(member)) return true;
+        const wxJSONValue declared = manifest[member];
+        if (!declared.IsArray() || declared.Size() > 32) return false;
+        for (int index = 0; index < declared.Size(); ++index) {
+          const wxJSONValue service = declared.ItemAt(index);
+          const wxJSONValue interface_value = service.ItemAt("interface");
+          const wxJSONValue version_value = service.ItemAt(version_member);
+          if (!service.IsObject() || !interface_value.IsString() ||
+              !version_value.IsString()) {
+            return false;
+          }
+          const std::string interface =
+              interface_value.AsString().ToStdString();
+          const std::string version =
+              version_value.AsString().ToStdString();
+          ServiceVersion parsed;
+          const bool valid_version =
+              std::string(version_member) == "version"
+                  ? ParseServiceVersion(version, &parsed)
+                  : IsServiceVersionRange(version);
+          if (known_services.count(interface) == 0 || !valid_version ||
+              !services->emplace(interface, version).second) {
+            return false;
+          }
+        }
+        return true;
+      };
+  if (!instance->failed &&
+      (!read_services("provides", "version",
+                      &instance->provided_services) ||
+       !read_services("requires", "range", &instance->required_services))) {
+    instance->failed = true;
+    instance->diagnostic =
+        "manifest typed service metadata is invalid or unsupported";
   }
   if (!instance->failed && manifest.HasMember("surfaces")) {
     const wxJSONValue declared_surfaces = manifest["surfaces"];
@@ -1591,6 +1682,10 @@ std::vector<PackageSnapshot> RuntimeEngine::Packages() const {
          instance->enable_count.load(),
          instance->disable_count.load()});
     result.back().surface_count = instance->surfaces.size();
+    result.back().provided_service_count =
+        instance->provided_services.size();
+    result.back().required_service_count =
+        instance->required_services.size();
     result.back().job_count = static_cast<std::size_t>(std::count_if(
         jobs.begin(), jobs.end(),
         [&](const auto& job) { return job.owner == instance->id; }));
