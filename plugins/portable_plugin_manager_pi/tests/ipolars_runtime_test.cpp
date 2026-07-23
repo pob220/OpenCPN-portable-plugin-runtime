@@ -1,4 +1,5 @@
 #include "runtime_engine.h"
+#include "portable_polar.h"
 
 #include <chrono>
 #include <filesystem>
@@ -6,6 +7,7 @@
 #include <iostream>
 #include <set>
 #include <string>
+#include <vector>
 
 #include <wx/init.h>
 
@@ -35,6 +37,15 @@ std::string Read(const fs::path& path) {
   return {std::istreambuf_iterator<char>(input),
           std::istreambuf_iterator<char>()};
 }
+
+std::string JoinTabs(const std::vector<std::string>& fields) {
+  std::string result;
+  for (std::size_t index = 0; index < fields.size(); ++index) {
+    if (index != 0) result += '\t';
+    result += fields[index];
+  }
+  return result;
+}
 }  // namespace
 
 extern "C" bool PlugIn_GSHHS_CrossesLand(double, double, double, double) {
@@ -63,17 +74,9 @@ int main() {
                 fs::copy_options::overwrite_existing, error);
   CHECK(!error);
   CHECK(Write(package / "resources" / "ipolars.svg", "<svg/>"));
-  CHECK(Write(
-      package / "manifest.json",
-      "{\"format_version\":1,\"id\":\"org.opencpn.ipolars\","
-      "\"name\":\"iPolars\",\"version\":\"0.1.2\","
-      "\"component\":\"component/ipolars.wasm\","
-      "\"runtime\":\">=0.1.0 <0.2.0\","
-      "\"portable_api\":\">=0.1.0 <0.2.0\","
-      "\"surfaces\":{\"polars.editor\":\"ui/ipolars.ui.json\"},"
-      "\"permissions\":[\"ui.commands\",\"settings.read-write\","
-      "\"storage.user-selected\",\"navigation.nmea.read\"],"
-      "\"development\":true}"));
+  fs::copy_file(PPM_TEST_IPOLARS_MANIFEST, package / "manifest.json",
+                fs::copy_options::overwrite_existing, error);
+  CHECK(!error);
 
   std::set<std::string> actions;
   std::string last_state;
@@ -112,6 +115,34 @@ int main() {
   CHECK(opened == 1);
   CHECK(opened_valid);
 
+  const fs::path polar_pi_matrix = root / "polar-pi-matrix.pol";
+  CHECK(Write(
+      polar_pi_matrix,
+      "TWA\\TWS;0;6;12;60\n"
+      "0;0;0;0;0\n40;0;3.1;4.2;0\n90;0;4.8;6.5;0\n"
+      "180;0;3.8;5.7;0\n"));
+  std::string polar_pi_grant;
+  CHECK(engine.RegisterUserFileGrant(id, polar_pi_matrix.string(), false,
+                                     &polar_pi_grant, &diagnostic));
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor", "open",
+                                  "\"" + polar_pi_grant + "\""));
+  CHECK(engine.WaitForIdle(id, std::chrono::seconds(2)));
+  CHECK(last_error.empty());
+  CHECK(last_state.find("4 angles × 2 wind speeds") != std::string::npos);
+
+  const fs::path expedition = root / "expedition.pol";
+  CHECK(Write(expedition,
+              "6 40 3.1 90 4.8 180 3.8\n"
+              "12 40 4.2 90 6.5 180 5.7\n"));
+  std::string expedition_grant;
+  CHECK(engine.RegisterUserFileGrant(id, expedition.string(), false,
+                                     &expedition_grant, &diagnostic));
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor", "open",
+                                  "\"" + expedition_grant + "\""));
+  CHECK(engine.WaitForIdle(id, std::chrono::seconds(2)));
+  CHECK(last_error.empty());
+  CHECK(last_state.find("3 angles × 2 wind speeds") != std::string::npos);
+
   const fs::path input = root / "source.pol";
   CHECK(Write(input,
               "Test boat\nTWA/TWS\t6\t12\n40\t3.1\t4.2\n90\t4.8\t6.5\n"
@@ -125,6 +156,8 @@ int main() {
   CHECK(engine.WaitForIdle(id, std::chrono::seconds(2)));
   CHECK(last_error.empty());
   CHECK(last_state.find("3 angles × 2 wind speeds") != std::string::npos);
+  CHECK(last_state.find("\"polar-plot\":{\"columns\":[\"TWA / TWS\"") !=
+        std::string::npos);
 
   CHECK(engine.HandleSurfaceEvent(
       id, "polars.editor", "polar-grid",
@@ -139,6 +172,93 @@ int main() {
   CHECK(engine.WaitForIdle(id, std::chrono::seconds(2)));
   CHECK(last_error.empty());
   CHECK(Read(output).find("90\t5.25\t6.5") != std::string::npos);
+  PortablePolarSet iweather_polar;
+  CHECK(LoadPortablePolarSet(output, &iweather_polar, &diagnostic));
+  CHECK(iweather_polar.grids.size() == 1);
+  CHECK(iweather_polar.grids[0].true_wind_speeds_knots.size() == 2);
+
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor", "new-polar", "null"));
+  CHECK(engine.WaitForIdle(id, std::chrono::seconds(2)));
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor",
+                                  "measurement-wind-speed", "\"12\""));
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor",
+                                  "measurement-wind-angle", "\"90\""));
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor", "measurement-stw",
+                                  "\"5.7\""));
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor", "add-measurement",
+                                  "null"));
+  CHECK(engine.WaitForIdle(id, std::chrono::seconds(2)));
+  CHECK(last_error.empty());
+  CHECK(last_state.find("Added manual observation 1") != std::string::npos);
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor",
+                                  "measurement-apparent", "true"));
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor",
+                                  "measurement-wind-speed", "\"14\""));
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor",
+                                  "measurement-wind-angle", "\"70\""));
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor", "measurement-stw",
+                                  "\"6.1\""));
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor", "add-measurement",
+                                  "null"));
+  CHECK(engine.WaitForIdle(id, std::chrono::seconds(2)));
+  CHECK(last_error.empty());
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor",
+                                  "generate-from-measurements", "null"));
+  CHECK(engine.WaitForIdle(id, std::chrono::seconds(2)));
+  CHECK(last_error.empty());
+  CHECK(last_state.find("Generated a measured polar from 2 manual") !=
+        std::string::npos);
+
+  const fs::path second_polar = root / "second.pol";
+  CHECK(Write(second_polar,
+              "Second sail\nTWA/TWS\t6\t12\n40\t3.0\t4.0\n90\t4.5\t6.0\n"
+              "180\t3.5\t5.4\n"));
+  const fs::path boat = root / "boat.xml";
+  CHECK(Write(
+      boat,
+      "<?xml version=\"1.0\"?>\n"
+      "<OpenCPNWeatherRoutingBoat version=\"1.10\" Name=\"Test boat\">\n"
+      "  <Polar FileName=\"source.pol\" CrossOverPercentage=\"0\"/>\n"
+      "</OpenCPNWeatherRoutingBoat>\n"));
+  std::string boat_grant;
+  CHECK(engine.RegisterUserFileGrant(id, boat.string(), false, &boat_grant,
+                                     &diagnostic));
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor", "open",
+                                  "\"" + boat_grant + "\""));
+  CHECK(engine.WaitForIdle(id, std::chrono::seconds(2)));
+  CHECK(last_error.empty());
+  CHECK(last_state.find("OpenCPN Weather Routing boat XML") !=
+        std::string::npos);
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor", "boat-grid",
+                                  "{\"row\":0,\"column\":0}"));
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor", "boat-name",
+                                  "\"Cruising test boat\""));
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor", "new-polar-file",
+                                  "\"second.pol\""));
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor", "new-crossover",
+                                  "\"12.5\""));
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor",
+                                  "add-polar-reference", "null"));
+  CHECK(engine.WaitForIdle(id, std::chrono::seconds(2)));
+  CHECK(last_error.empty());
+  CHECK(last_state.find("second.pol") != std::string::npos);
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor", "move-polar-up",
+                                  "null"));
+  CHECK(engine.WaitForIdle(id, std::chrono::seconds(2)));
+  CHECK(last_error.empty());
+  const fs::path saved_boat = root / "saved-boat.xml";
+  std::string saved_boat_grant;
+  CHECK(engine.RegisterUserFileGrant(id, saved_boat.string(), true,
+                                     &saved_boat_grant, &diagnostic));
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor", "save-as",
+                                  "\"" + saved_boat_grant + "\""));
+  CHECK(engine.WaitForIdle(id, std::chrono::seconds(2)));
+  CHECK(last_error.empty());
+  CHECK(Read(saved_boat).find("Name=\"Cruising test boat\"") !=
+        std::string::npos);
+  PortablePolarSet iweather_boat;
+  CHECK(LoadPortablePolarSet(saved_boat, &iweather_boat, &diagnostic));
+  CHECK(iweather_boat.grids.size() == 2);
 
   CHECK(engine.HandleSurfaceEvent(id, "polars.editor", "capture", "true"));
   CHECK(engine.WaitForIdle(id, std::chrono::seconds(2)));
@@ -191,6 +311,32 @@ int main() {
   CHECK(last_error.empty());
   CHECK(last_state.find("2 accepted, 3 rejected") != std::string::npos);
   CHECK(last_state.find("5.6") != std::string::npos);
+
+  std::vector<std::string> logbook_fields(41);
+  logbook_fields[7] = "S";
+  logbook_fields[15] = "5.8 kn";
+  logbook_fields[19] = "90 T";
+  logbook_fields[20] = "12 kn";
+  const fs::path logbook = root / "logbook-konni.tsv";
+  CHECK(Write(logbook, JoinTabs(logbook_fields) + "\n"));
+  std::string logbook_grant;
+  CHECK(engine.RegisterUserFileGrant(id, logbook.string(), false,
+                                     &logbook_grant, &diagnostic));
+  std::string multi_vdr_grant;
+  CHECK(engine.RegisterUserFileGrant(id, vdr.string(), false,
+                                     &multi_vdr_grant, &diagnostic));
+  CHECK(engine.HandleSurfaceEvent(
+      id, "polars.editor", "import-logbooks",
+      "[\"" + multi_vdr_grant + "\",\"" + logbook_grant + "\"]"));
+  CHECK(engine.WaitForIdle(id, std::chrono::seconds(2)));
+  CHECK(last_error.empty());
+  CHECK(last_state.find(
+            "Imported 2 logbook file(s) (NMEA/VDR, LogbookKonni)") !=
+        std::string::npos);
+  CHECK(last_state.find(
+            "2 complete STW/wind observations accepted, 2 rows or sentences "
+            "rejected") != std::string::npos);
+  CHECK(last_state.find("\"sample-count\":\"2\"") != std::string::npos);
 
   last_error.clear();
   CHECK(engine.HandleSurfaceEvent(id, "polars.editor", "save-as",

@@ -20,12 +20,16 @@ cmake -S "${source_root}" -B "${stock_build}" \
 cmake --build "${stock_build}" --parallel "${jobs}"
 cmake --install "${stock_build}"
 
+"${script_dir}/package-reference-plugins.sh"
+readonly development_trust="${runtime_root}/build-reference-packages/packages/development-trust.pem"
+
 cmake -S "${source_root}/plugins/portable_plugin_manager_pi" \
   -B "${plugin_build}" \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DOPENCPN_SOURCE_DIR="${source_root}" \
   -DPPM_PLUGIN_LIBRARY_DIR="${config_root}/plugins/lib" \
-  -DPPM_PLUGIN_DATA_DIR="${config_root}/share/opencpn/plugins/portable_plugin_manager_pi"
+  -DPPM_PLUGIN_DATA_DIR="${config_root}/share/opencpn/plugins/portable_plugin_manager_pi" \
+  -DPPM_DEVELOPMENT_TRUST_KEY="${development_trust}"
 cmake --build "${plugin_build}" --parallel "${jobs}"
 ctest --test-dir "${plugin_build}" --output-on-failure
 cmake --install "${plugin_build}"
@@ -35,6 +39,7 @@ python3 "${script_dir}/configure-profile.py" \
 mkdir -p "${config_root}/portable-runtime" \
   "${runtime_root}/xdg-config" "${runtime_root}/xdg-data" \
   "${runtime_root}/xdg-cache"
+"${script_dir}/install-reference-packages.sh"
 
 printf 'Runtime-host stock build and isolated installation are ready at %s\n' \
   "${runtime_root}"

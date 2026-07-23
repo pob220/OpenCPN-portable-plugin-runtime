@@ -1,4 +1,4 @@
-#include "portable_weather_routing_host.h"
+#include "weather_routing_host.h"
 
 #include <algorithm>
 #include <atomic>
@@ -20,6 +20,7 @@
 #include <wx/datetime.h>
 #include <wx/dialog.h>
 #include <wx/filedlg.h>
+#include <wx/fileconf.h>
 #include <wx/filepicker.h>
 #include <wx/filename.h>
 #include <wx/frame.h>
@@ -42,19 +43,59 @@
 #include <wx/wfstream.h>
 #include <wx/txtstrm.h>
 
-#include "ocpn_portable_runtime.h"
-#include "ocpndc.h"
-#include "navutil.h"
+#include "ocpn_plugin.h"
 #include "portable_departure_time.h"
 #include "portable_polar.h"
 #include "portable_ui_menu.h"
-#include "time_textbox.h"
-#include "viewport.h"
+
+#if defined(__WXOSX__)
+#include <OpenGL/gl.h>
+#else
+#include <GL/gl.h>
+#endif
 
 namespace {
-constexpr size_t kMaximumRoutePoints = 20000;
-constexpr size_t kMaximumInspectionPoints = 200000;
-constexpr size_t kMaximumInspectionLines = 10000;
+constexpr size_t kMaximumRoutePoints = 20'000;
+
+class TimeCtrl final : public wxTextCtrl {
+public:
+  TimeCtrl(wxWindow* parent, wxWindowID id,
+           const wxDateTime& value = wxDefaultDateTime,
+           const wxPoint& position = wxDefaultPosition,
+           const wxSize& size = wxDefaultSize)
+      : wxTextCtrl(parent, id,
+                   value.IsValid() ? value.Format("%H:%M") : "00:00",
+                   position, size, wxTE_PROCESS_ENTER) {
+    Bind(wxEVT_KILL_FOCUS, [this](wxFocusEvent& event) {
+      const wxDateTime parsed = ParsedValue();
+      if (parsed.IsValid()) ChangeValue(parsed.Format("%H:%M"));
+      event.Skip();
+    });
+  }
+
+  void SetValue(const wxDateTime& value) {
+    ChangeValue(value.IsValid() ? value.Format("%H:%M") : "00:00");
+  }
+
+  bool GetTime(int* hour, int* minute, int* second) const {
+    const wxDateTime parsed = ParsedValue();
+    if (!parsed.IsValid() || !hour || !minute || !second) return false;
+    *hour = parsed.GetHour();
+    *minute = parsed.GetMinute();
+    *second = parsed.GetSecond();
+    return true;
+  }
+
+  wxDateTime ParsedValue() const {
+    wxDateTime result;
+    wxString::const_iterator end;
+    const wxString value = GetValue();
+    if (!result.ParseTime(value, &end) || end != value.end())
+      return wxInvalidDateTime;
+    return result;
+  }
+};
+
 enum PositionSource {
   kVesselPosition = 0,
   kOpenCpnWaypoint = 1,
@@ -263,96 +304,42 @@ struct DepartureResult {
   bool success = false;
 };
 
-bool CalculateRouteLeg(ocpn_portable_runtime* runtime,
+bool CalculateRouteLeg(
+                       const PortableWeatherRoutingHost::CalculateRoute&
+                           calculate_route,
                        ocpn_portable_route_request* request,
                        const PortablePolarSet& performance,
                        RoutingOutcome* outcome, wxString* failure) {
-  if (!runtime || !request || !outcome) {
+  if (!calculate_route || !request || !outcome) {
     if (failure) *failure = "Invalid portable route calculation request";
     return false;
   }
-  std::vector<ocpn_portable_polar_grid> polar_views;
-  polar_views.reserve(performance.grids.size());
+  ppm::RoutingRequest portable_request;
+  portable_request.parameters = *request;
+  portable_request.parameters.polars = nullptr;
+  portable_request.parameters.polar_count = 0;
+  portable_request.polars.reserve(performance.grids.size());
   for (const auto& grid : performance.grids) {
-    polar_views.push_back({grid.identity.data(), grid.identity.size(),
-                           grid.true_wind_speeds_knots.data(),
-                           grid.true_wind_speeds_knots.size(),
-                           grid.true_wind_angles_degrees.data(),
-                           grid.true_wind_angles_degrees.size(),
-                           grid.boat_speeds_knots.data(),
-                           grid.boat_speeds_knots.size()});
+    portable_request.polars.push_back(
+        {grid.identity, grid.true_wind_speeds_knots,
+         grid.true_wind_angles_degrees, grid.boat_speeds_knots});
   }
-  request->polars = polar_views.data();
-  request->polar_count = polar_views.size();
-  std::vector<ocpn_portable_route_point> points(kMaximumRoutePoints);
-  std::vector<ocpn_portable_route_point> isochrone_points(
-      kMaximumInspectionPoints);
-  std::vector<ocpn_portable_route_line> isochrone_lines(
-      kMaximumInspectionLines);
-  std::vector<ocpn_portable_route_point> trace_points(kMaximumInspectionPoints);
-  std::vector<ocpn_portable_route_line> trace_lines(kMaximumInspectionLines);
-  std::vector<ocpn_portable_route_environment_point> route_environment(
-      kMaximumRoutePoints);
-  std::vector<char> diagnostic(4096);
-  char error[4096] = {};
-  ocpn_portable_route_result result{};
-  result.points = points.data();
-  result.point_capacity = points.size();
-  result.isochrone_points = isochrone_points.data();
-  result.isochrone_point_capacity = isochrone_points.size();
-  result.isochrones = isochrone_lines.data();
-  result.isochrone_capacity = isochrone_lines.size();
-  result.trace_points = trace_points.data();
-  result.trace_point_capacity = trace_points.size();
-  result.traces = trace_lines.data();
-  result.trace_capacity = trace_lines.size();
-  result.route_environment = route_environment.data();
-  result.route_environment_capacity = route_environment.size();
-  result.diagnostic = diagnostic.data();
-  result.diagnostic_capacity = diagnostic.size();
-  if (ocpn_portable_runtime_calculate_route(runtime, request, &result, error,
-                                             sizeof(error)) != 0) {
+  ppm::RoutingOutcome result;
+  std::string error;
+  if (!calculate_route(std::move(portable_request), &result, &error)) {
     if (failure) *failure = wxString::FromUTF8(error);
     return false;
   }
-  if (result.point_count > points.size() ||
-      result.route_environment_count > route_environment.size() ||
-      result.isochrone_count > isochrone_lines.size() ||
-      result.trace_count > trace_lines.size()) {
-    if (failure) *failure = "Portable route exceeded a host result limit";
-    return false;
-  }
-  points.resize(result.point_count);
-  route_environment.resize(result.route_environment_count);
-  auto copy_inspection =
-      [](const std::vector<ocpn_portable_route_point>& source_points,
-         const std::vector<ocpn_portable_route_line>& source_lines,
-         size_t line_count) {
-        std::vector<RoutingOutcome::InspectionLine> copied;
-        copied.reserve(line_count);
-        for (size_t index = 0; index < line_count; ++index) {
-          const auto& span = source_lines[index];
-          if (span.point_offset > source_points.size() ||
-              span.point_count > source_points.size() - span.point_offset)
-            continue;
-          copied.push_back(
-              {span.unix_time,
-               std::vector<ocpn_portable_route_point>(
-                   source_points.begin() + span.point_offset,
-                   source_points.begin() + span.point_offset +
-                       span.point_count)});
-        }
-        return copied;
-      };
-  outcome->points = std::move(points);
-  outcome->route_environment = std::move(route_environment);
-  outcome->isochrones =
-      copy_inspection(isochrone_points, isochrone_lines,
-                      result.isochrone_count);
-  outcome->traces =
-      copy_inspection(trace_points, trace_lines, result.trace_count);
-  outcome->diagnostic =
-      wxString::FromUTF8(diagnostic.data(), result.diagnostic_len);
+  outcome->points = std::move(result.points);
+  outcome->route_environment = std::move(result.route_environment);
+  outcome->isochrones.reserve(result.isochrones.size());
+  for (auto& line : result.isochrones)
+    outcome->isochrones.push_back(
+        {line.unix_time, std::move(line.points)});
+  outcome->traces.reserve(result.traces.size());
+  for (auto& line : result.traces)
+    outcome->traces.push_back({line.unix_time, std::move(line.points)});
+  outcome->diagnostic = wxString::FromUTF8(result.diagnostic);
   outcome->distance_nautical_miles = result.distance_nautical_miles;
   outcome->duration_seconds = result.duration_seconds;
   outcome->states_examined = result.states_examined;
@@ -538,7 +525,7 @@ bool InterpolateRoutePosition(
 }
 
 wxPoint SampleRouteFraction(const std::vector<ocpn_portable_route_point>& route,
-                            double fraction, ViewPort& projection) {
+                            double fraction, PlugIn_ViewPort* viewport) {
   if (route.empty()) return wxPoint();
   const double scaled =
       fraction * static_cast<double>(route.size() > 1 ? route.size() - 1 : 0);
@@ -553,10 +540,18 @@ wxPoint SampleRouteFraction(const std::vector<ocpn_portable_route_point>& route,
   const double longitude =
       std::fmod(route[lower].longitude + longitude_delta * part + 540.0, 360.0) -
       180.0;
-  return projection.GetPixFromLL(latitude, longitude);
+  wxPoint result;
+  GetCanvasPixLL(viewport, &result, latitude, longitude);
+  return result;
 }
 
-void DrawRouteWindBarb(ocpnDC& dc, const wxPoint& origin, double east_knots,
+wxPoint Project(PlugIn_ViewPort* viewport, double latitude, double longitude) {
+  wxPoint result;
+  GetCanvasPixLL(viewport, &result, latitude, longitude);
+  return result;
+}
+
+void DrawRouteWindBarb(wxDC& dc, const wxPoint& origin, double east_knots,
                        double north_knots, const wxColour& colour) {
   const double speed = std::hypot(east_knots, north_knots);
   if (!std::isfinite(speed) || speed < 0.1) return;
@@ -622,8 +617,8 @@ void DrawRouteWindBarb(ocpnDC& dc, const wxPoint& origin, double east_knots,
 
 class PortableWeatherRoutingHost::Impl {
 public:
-  Impl(wxWindow* parent_value, ocpn_portable_runtime* runtime_value,
-       std::shared_ptr<std::mutex> runtime_mutex_value,
+  Impl(wxWindow* parent_value, wxFileConfig* config_value,
+       CalculateRoute route_calculator, std::function<void()> route_canceller,
        wxString package_root_value, wxString plugin_id_value,
        wxString surface_resource_value, std::function<wxString()> summary,
        std::function<std::vector<PortableNavigationPosition>()> waypoints,
@@ -640,8 +635,9 @@ public:
            environment_preflight,
        double latitude, double longitude)
       : parent(parent_value),
-        runtime(runtime_value),
-        runtime_mutex(std::move(runtime_mutex_value)),
+        config(config_value),
+        calculate_route(std::move(route_calculator)),
+        cancel_routes(std::move(route_canceller)),
         package_root(std::move(package_root_value)),
         plugin_id(std::move(plugin_id_value)),
         surface_resource(std::move(surface_resource_value)),
@@ -657,7 +653,8 @@ public:
         initial_longitude(longitude) {}
   ~Impl() { Shutdown(); }
   bool Show(wxString* error);
-  bool Render(ocpnDC& dc, const ViewPort& viewport);
+  bool Render(wxDC& dc, PlugIn_ViewPort* viewport);
+  bool RenderGL(PlugIn_ViewPort* viewport);
   void ReportProgress(unsigned percent, const wxString& message);
   bool Cancelled() const { return cancelled.load(); }
   void Shutdown();
@@ -698,8 +695,9 @@ private:
   }
 
   wxWindow* parent = nullptr;
-  ocpn_portable_runtime* runtime = nullptr;
-  std::shared_ptr<std::mutex> runtime_mutex;
+  wxFileConfig* config = nullptr;
+  CalculateRoute calculate_route;
+  std::function<void()> cancel_routes;
   wxString package_root;
   wxString plugin_id;
   wxString surface_resource;
@@ -1038,7 +1036,7 @@ bool PortableWeatherRoutingHost::Impl::GetDepartureUnixTime(
     if (error) *error = "Departure controls are unavailable";
     return false;
   }
-  const wxDateTime clock = departure_time->GetValue();
+  const wxDateTime clock = departure_time->ParsedValue();
   if (!clock.IsValid()) {
     if (error) *error = "Enter the departure time as HH:MM";
     return false;
@@ -1289,7 +1287,7 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateSafetyPanel(wxNotebook* book) {
   min_wind_angle->SetValue(40);
   max_wind_angle = new wxSpinCtrl(panel, wxID_ANY);
   max_wind_angle->SetRange(0, 180);
-  max_wind_angle->SetValue(160);
+  max_wind_angle->SetValue(180);
   limit_true_wind = new wxCheckBox(panel, wxID_ANY, Label("maximum-true-wind"));
   limit_true_wind->SetValue(true);
   max_true_wind = new wxTextCtrl(panel, wxID_ANY, "50");
@@ -1643,17 +1641,17 @@ void PortableWeatherRoutingHost::Impl::LoadSettings() {
   show_route_wind->SetValue(true);
   route_to_cursor->SetValue(false);
   boat_at_grib_time->SetValue(true);
-  if (!pConfig) {
+  if (!config) {
     vessel_performance_file->SetPath(bundled_polar);
     LoadVesselPerformance(bundled_polar, false);
     UpdateDepartureSummary();
     UpdateTimeColumnLabels();
     return;
   }
-  const wxString old_path = pConfig->GetPath();
-  pConfig->SetPath("/PortablePlugins/" + plugin_id + "/Routing");
+  const wxString old_path = config->GetPath();
+  config->SetPath("/PortablePlugins/" + plugin_id + "/Routing");
   const wxString performance_path =
-      pConfig->Read("vesselPerformancePath", bundled_polar);
+      config->Read("vesselPerformancePath", bundled_polar);
   vessel_performance_file->SetPath(performance_path);
   LoadVesselPerformance(performance_path, false);
   int64_t initial_departure = 0;
@@ -1662,7 +1660,7 @@ void PortableWeatherRoutingHost::Impl::LoadSettings() {
       GetDepartureUnixTime(&initial_departure, &departure_error);
   PortableDepartureZone configured_zone;
   const wxString configured_zone_setting =
-      pConfig->Read("departureTimeZone", "UTC");
+      config->Read("departureTimeZone", "UTC");
   if (ParsePortableDepartureZoneSetting(configured_zone_setting,
                                         &configured_zone)) {
     auto configured = std::find(departure_time_zones.begin(),
@@ -1683,77 +1681,77 @@ void PortableWeatherRoutingHost::Impl::LoadSettings() {
                                          configured)));
   }
   if (have_initial_departure) SetDepartureUnixTime(initial_departure);
-  avoid_land->SetValue(pConfig->ReadBool("avoidUnsafeCharts", true));
-  use_opencpn_route->SetValue(pConfig->ReadBool("useOpenCpnRoute", false));
-  configured_route_id = pConfig->Read("openCpnRouteId", wxEmptyString);
-  min_wind_angle->SetValue(pConfig->ReadLong("minimumTrueWindAngle", 40));
-  max_wind_angle->SetValue(pConfig->ReadLong("maximumTrueWindAngle", 160));
-  limit_true_wind->SetValue(pConfig->ReadBool("limitTrueWind", true));
-  max_true_wind->SetValue(pConfig->Read("maximumTrueWind", "50"));
-  limit_apparent_wind->SetValue(pConfig->ReadBool("limitApparentWind", true));
-  max_apparent_wind->SetValue(pConfig->Read("maximumApparentWind", "50"));
-  limit_waves->SetValue(pConfig->ReadBool("limitWaves", true));
-  max_wave->SetValue(pConfig->Read("maximumWave", "8.0"));
+  avoid_land->SetValue(config->ReadBool("avoidUnsafeCharts", true));
+  use_opencpn_route->SetValue(config->ReadBool("useOpenCpnRoute", false));
+  configured_route_id = config->Read("openCpnRouteId", wxEmptyString);
+  min_wind_angle->SetValue(config->ReadLong("minimumTrueWindAngle", 40));
+  max_wind_angle->SetValue(config->ReadLong("maximumTrueWindAngle", 180));
+  limit_true_wind->SetValue(config->ReadBool("limitTrueWind", true));
+  max_true_wind->SetValue(config->Read("maximumTrueWind", "50"));
+  limit_apparent_wind->SetValue(config->ReadBool("limitApparentWind", true));
+  max_apparent_wind->SetValue(config->Read("maximumApparentWind", "50"));
+  limit_waves->SetValue(config->ReadBool("limitWaves", true));
+  max_wave->SetValue(config->Read("maximumWave", "8.0"));
   limit_opposing_wind_current->SetValue(
-      pConfig->ReadBool("limitOpposingWindCurrent", false));
+      config->ReadBool("limitOpposingWindCurrent", false));
   max_opposing_wind_current->SetValue(
-      pConfig->Read("maximumOpposingWindCurrent", "0.0"));
-  land_safety_margin->SetValue(pConfig->Read("landSafetyMarginNm", "0.4"));
-  use_currents->SetValue(pConfig->ReadBool("useCurrents", true));
+      config->Read("maximumOpposingWindCurrent", "0.0"));
+  land_safety_margin->SetValue(config->Read("landSafetyMarginNm", "0.4"));
+  use_currents->SetValue(config->ReadBool("useCurrents", true));
   require_current_data->SetValue(
-      pConfig->ReadBool("requireCurrentData", false));
-  use_waves->SetValue(pConfig->ReadBool("useWaves", true));
-  require_wave_data->SetValue(pConfig->ReadBool("requireWaveData", true));
-  maximum_latitude->SetValue(pConfig->ReadLong("maximumLatitude", 89));
-  upwind_efficiency->SetValue(pConfig->ReadLong("upwindEfficiency", 100));
-  downwind_efficiency->SetValue(pConfig->ReadLong("downwindEfficiency", 100));
-  tack_penalty->SetValue(pConfig->ReadLong("tackPenaltySeconds", 300));
-  gybe_penalty->SetValue(pConfig->ReadLong("gybePenaltySeconds", 300));
+      config->ReadBool("requireCurrentData", false));
+  use_waves->SetValue(config->ReadBool("useWaves", true));
+  require_wave_data->SetValue(config->ReadBool("requireWaveData", true));
+  maximum_latitude->SetValue(config->ReadLong("maximumLatitude", 89));
+  upwind_efficiency->SetValue(config->ReadLong("upwindEfficiency", 100));
+  downwind_efficiency->SetValue(config->ReadLong("downwindEfficiency", 100));
+  tack_penalty->SetValue(config->ReadLong("tackPenaltySeconds", 300));
+  gybe_penalty->SetValue(config->ReadLong("gybePenaltySeconds", 300));
   allow_motor_sailing->SetValue(
-      pConfig->ReadBool("allowMotorSailing", false));
-  allow_motor->SetValue(pConfig->ReadBool("allowMotor", false));
-  motor_threshold->SetValue(pConfig->Read("motorThresholdKnots", "3.0"));
-  motor_speed->SetValue(pConfig->Read("motorSpeedKnots", "5.5"));
+      config->ReadBool("allowMotorSailing", false));
+  allow_motor->SetValue(config->ReadBool("allowMotor", false));
+  motor_threshold->SetValue(config->Read("motorThresholdKnots", "3.0"));
+  motor_speed->SetValue(config->Read("motorSpeedKnots", "5.5"));
   motor_sailing_boost->SetValue(
-      pConfig->Read("motorSailingBoostKnots", "1.5"));
+      config->Read("motorSailingBoostKnots", "1.5"));
   motor_hysteresis->SetValue(
-      pConfig->Read("motorCrossoverHysteresisKnots", "0.2"));
+      config->Read("motorCrossoverHysteresisKnots", "0.2"));
   minimum_motor_run->SetValue(
-      pConfig->ReadLong("minimumMotorRunSeconds", 1800));
+      config->ReadLong("minimumMotorRunSeconds", 1800));
   mode_change_penalty->SetValue(
-      pConfig->ReadLong("modeChangePenaltySeconds", 120));
+      config->ReadLong("modeChangePenaltySeconds", 120));
   limit_motor_hours->SetValue(
-      pConfig->ReadBool("limitMotorHours", false));
+      config->ReadBool("limitMotorHours", false));
   maximum_motor_hours->SetValue(
-      pConfig->Read("maximumMotorHours", "24.0"));
+      config->Read("maximumMotorHours", "24.0"));
   fuel_consumption->SetValue(
-      pConfig->Read("fuelConsumptionLitresPerHour", "2.5"));
-  limit_fuel->SetValue(pConfig->ReadBool("limitFuel", false));
-  maximum_fuel->SetValue(pConfig->Read("maximumFuelLitres", "100.0"));
-  time_step->SetValue(pConfig->ReadLong("timeStepSeconds", 3600));
-  heading_step->SetValue(pConfig->ReadLong("headingStepDegrees", 15));
-  adaptive_headings->SetValue(pConfig->ReadBool("adaptiveHeadings", true));
+      config->Read("fuelConsumptionLitresPerHour", "2.5"));
+  limit_fuel->SetValue(config->ReadBool("limitFuel", false));
+  maximum_fuel->SetValue(config->Read("maximumFuelLitres", "100.0"));
+  time_step->SetValue(config->ReadLong("timeStepSeconds", 3600));
+  heading_step->SetValue(config->ReadLong("headingStepDegrees", 15));
+  adaptive_headings->SetValue(config->ReadBool("adaptiveHeadings", true));
   refined_heading_step->SetValue(
-      pConfig->ReadLong("refinedHeadingStepDegrees", 5));
-  spatial_cell->SetValue(pConfig->Read("spatialCellNm", "3.0"));
-  labels_per_cell->SetValue(pConfig->ReadLong("labelsPerCell", 2));
+      config->ReadLong("refinedHeadingStepDegrees", 5));
+  spatial_cell->SetValue(config->Read("spatialCellNm", "3.0"));
+  labels_per_cell->SetValue(config->ReadLong("labelsPerCell", 2));
   maximum_search_angle->SetValue(
-      pConfig->ReadLong("maximumSearchAngleDegrees", 120));
+      config->ReadLong("maximumSearchAngleDegrees", 120));
   destination_tolerance->SetValue(
-      pConfig->Read("destinationToleranceNm", "1.0"));
-  max_hours->SetValue(pConfig->ReadLong("maximumHours", 120));
-  max_states->SetValue(pConfig->ReadLong("maximumStates", 80000));
-  compare_departures->SetValue(pConfig->ReadBool("compareDepartures", false));
-  departure_window->SetValue(pConfig->ReadLong("departureWindowHours", 6));
-  departure_spacing->SetValue(pConfig->ReadLong("departureSpacingHours", 1));
-  departure_workers->SetValue(pConfig->ReadLong("departureWorkers", 4));
-  show_isochrones->SetValue(pConfig->ReadBool("showIsochrones", true));
+      config->Read("destinationToleranceNm", "1.0"));
+  max_hours->SetValue(config->ReadLong("maximumHours", 120));
+  max_states->SetValue(config->ReadLong("maximumStates", 80000));
+  compare_departures->SetValue(config->ReadBool("compareDepartures", false));
+  departure_window->SetValue(config->ReadLong("departureWindowHours", 6));
+  departure_spacing->SetValue(config->ReadLong("departureSpacingHours", 1));
+  departure_workers->SetValue(config->ReadLong("departureWorkers", 4));
+  show_isochrones->SetValue(config->ReadBool("showIsochrones", true));
   show_stability_corridor->SetValue(
-      pConfig->ReadBool("showStabilityCorridor", true));
-  show_route_wind->SetValue(pConfig->ReadBool("showRouteWind", true));
-  route_to_cursor->SetValue(pConfig->ReadBool("routeToCursor", false));
-  boat_at_grib_time->SetValue(pConfig->ReadBool("boatAtGribTime", true));
-  pConfig->SetPath(old_path);
+      config->ReadBool("showStabilityCorridor", true));
+  show_route_wind->SetValue(config->ReadBool("showRouteWind", true));
+  route_to_cursor->SetValue(config->ReadBool("routeToCursor", false));
+  boat_at_grib_time->SetValue(config->ReadBool("boatAtGribTime", true));
+  config->SetPath(old_path);
 
   require_current_data->Enable(use_currents->GetValue());
   require_wave_data->Enable(use_waves->GetValue());
@@ -1788,97 +1786,97 @@ void PortableWeatherRoutingHost::Impl::LoadSettings() {
 }
 
 void PortableWeatherRoutingHost::Impl::SaveSettings() {
-  if (!pConfig) return;
-  const wxString old_path = pConfig->GetPath();
-  pConfig->SetPath("/PortablePlugins/" + plugin_id + "/Routing");
-  pConfig->Write("settingsSchema", 6L);
+  if (!config) return;
+  const wxString old_path = config->GetPath();
+  config->SetPath("/PortablePlugins/" + plugin_id + "/Routing");
+  config->Write("settingsSchema", 6L);
   if (vessel_performance_file)
-    pConfig->Write("vesselPerformancePath", vessel_performance_file->GetPath());
-  pConfig->Write("departureTimeZone",
+    config->Write("vesselPerformancePath", vessel_performance_file->GetPath());
+  config->Write("departureTimeZone",
                  PortableDepartureZoneSetting(SelectedDepartureZone()));
-  pConfig->Write("avoidUnsafeCharts", avoid_land->GetValue());
-  pConfig->Write("useOpenCpnRoute", use_opencpn_route->GetValue());
+  config->Write("avoidUnsafeCharts", avoid_land->GetValue());
+  config->Write("useOpenCpnRoute", use_opencpn_route->GetValue());
   if (route_choice && route_choice->GetSelection() != wxNOT_FOUND &&
       static_cast<size_t>(route_choice->GetSelection()) <
           navigation_routes.size())
-    pConfig->Write("openCpnRouteId",
+    config->Write("openCpnRouteId",
                    navigation_routes[route_choice->GetSelection()].id);
-  pConfig->Write("minimumTrueWindAngle",
+  config->Write("minimumTrueWindAngle",
                  static_cast<long>(min_wind_angle->GetValue()));
-  pConfig->Write("maximumTrueWindAngle",
+  config->Write("maximumTrueWindAngle",
                  static_cast<long>(max_wind_angle->GetValue()));
-  pConfig->Write("limitTrueWind", limit_true_wind->GetValue());
-  pConfig->Write("maximumTrueWind", max_true_wind->GetValue());
-  pConfig->Write("limitApparentWind", limit_apparent_wind->GetValue());
-  pConfig->Write("maximumApparentWind", max_apparent_wind->GetValue());
-  pConfig->Write("limitWaves", limit_waves->GetValue());
-  pConfig->Write("maximumWave", max_wave->GetValue());
-  pConfig->Write("limitOpposingWindCurrent",
+  config->Write("limitTrueWind", limit_true_wind->GetValue());
+  config->Write("maximumTrueWind", max_true_wind->GetValue());
+  config->Write("limitApparentWind", limit_apparent_wind->GetValue());
+  config->Write("maximumApparentWind", max_apparent_wind->GetValue());
+  config->Write("limitWaves", limit_waves->GetValue());
+  config->Write("maximumWave", max_wave->GetValue());
+  config->Write("limitOpposingWindCurrent",
                  limit_opposing_wind_current->GetValue());
-  pConfig->Write("maximumOpposingWindCurrent",
+  config->Write("maximumOpposingWindCurrent",
                  max_opposing_wind_current->GetValue());
-  pConfig->Write("landSafetyMarginNm", land_safety_margin->GetValue());
-  pConfig->Write("useCurrents", use_currents->GetValue());
-  pConfig->Write("requireCurrentData", require_current_data->GetValue());
-  pConfig->Write("useWaves", use_waves->GetValue());
-  pConfig->Write("requireWaveData", require_wave_data->GetValue());
-  pConfig->Write("maximumLatitude",
+  config->Write("landSafetyMarginNm", land_safety_margin->GetValue());
+  config->Write("useCurrents", use_currents->GetValue());
+  config->Write("requireCurrentData", require_current_data->GetValue());
+  config->Write("useWaves", use_waves->GetValue());
+  config->Write("requireWaveData", require_wave_data->GetValue());
+  config->Write("maximumLatitude",
                  static_cast<long>(maximum_latitude->GetValue()));
-  pConfig->Write("upwindEfficiency",
+  config->Write("upwindEfficiency",
                  static_cast<long>(upwind_efficiency->GetValue()));
-  pConfig->Write("downwindEfficiency",
+  config->Write("downwindEfficiency",
                  static_cast<long>(downwind_efficiency->GetValue()));
-  pConfig->Write("tackPenaltySeconds",
+  config->Write("tackPenaltySeconds",
                  static_cast<long>(tack_penalty->GetValue()));
-  pConfig->Write("gybePenaltySeconds",
+  config->Write("gybePenaltySeconds",
                  static_cast<long>(gybe_penalty->GetValue()));
-  pConfig->Write("allowMotorSailing", allow_motor_sailing->GetValue());
-  pConfig->Write("allowMotor", allow_motor->GetValue());
-  pConfig->Write("motorThresholdKnots", motor_threshold->GetValue());
-  pConfig->Write("motorSpeedKnots", motor_speed->GetValue());
-  pConfig->Write("motorSailingBoostKnots",
+  config->Write("allowMotorSailing", allow_motor_sailing->GetValue());
+  config->Write("allowMotor", allow_motor->GetValue());
+  config->Write("motorThresholdKnots", motor_threshold->GetValue());
+  config->Write("motorSpeedKnots", motor_speed->GetValue());
+  config->Write("motorSailingBoostKnots",
                  motor_sailing_boost->GetValue());
-  pConfig->Write("motorCrossoverHysteresisKnots",
+  config->Write("motorCrossoverHysteresisKnots",
                  motor_hysteresis->GetValue());
-  pConfig->Write("minimumMotorRunSeconds",
+  config->Write("minimumMotorRunSeconds",
                  static_cast<long>(minimum_motor_run->GetValue()));
-  pConfig->Write("modeChangePenaltySeconds",
+  config->Write("modeChangePenaltySeconds",
                  static_cast<long>(mode_change_penalty->GetValue()));
-  pConfig->Write("limitMotorHours", limit_motor_hours->GetValue());
-  pConfig->Write("maximumMotorHours", maximum_motor_hours->GetValue());
-  pConfig->Write("fuelConsumptionLitresPerHour",
+  config->Write("limitMotorHours", limit_motor_hours->GetValue());
+  config->Write("maximumMotorHours", maximum_motor_hours->GetValue());
+  config->Write("fuelConsumptionLitresPerHour",
                  fuel_consumption->GetValue());
-  pConfig->Write("limitFuel", limit_fuel->GetValue());
-  pConfig->Write("maximumFuelLitres", maximum_fuel->GetValue());
-  pConfig->Write("timeStepSeconds", static_cast<long>(time_step->GetValue()));
-  pConfig->Write("headingStepDegrees",
+  config->Write("limitFuel", limit_fuel->GetValue());
+  config->Write("maximumFuelLitres", maximum_fuel->GetValue());
+  config->Write("timeStepSeconds", static_cast<long>(time_step->GetValue()));
+  config->Write("headingStepDegrees",
                  static_cast<long>(heading_step->GetValue()));
-  pConfig->Write("adaptiveHeadings", adaptive_headings->GetValue());
-  pConfig->Write("refinedHeadingStepDegrees",
+  config->Write("adaptiveHeadings", adaptive_headings->GetValue());
+  config->Write("refinedHeadingStepDegrees",
                  static_cast<long>(refined_heading_step->GetValue()));
-  pConfig->Write("spatialCellNm", spatial_cell->GetValue());
-  pConfig->Write("labelsPerCell",
+  config->Write("spatialCellNm", spatial_cell->GetValue());
+  config->Write("labelsPerCell",
                  static_cast<long>(labels_per_cell->GetValue()));
-  pConfig->Write("maximumSearchAngleDegrees",
+  config->Write("maximumSearchAngleDegrees",
                  static_cast<long>(maximum_search_angle->GetValue()));
-  pConfig->Write("destinationToleranceNm", destination_tolerance->GetValue());
-  pConfig->Write("maximumHours", static_cast<long>(max_hours->GetValue()));
-  pConfig->Write("maximumStates", static_cast<long>(max_states->GetValue()));
-  pConfig->Write("compareDepartures", compare_departures->GetValue());
-  pConfig->Write("departureWindowHours",
+  config->Write("destinationToleranceNm", destination_tolerance->GetValue());
+  config->Write("maximumHours", static_cast<long>(max_hours->GetValue()));
+  config->Write("maximumStates", static_cast<long>(max_states->GetValue()));
+  config->Write("compareDepartures", compare_departures->GetValue());
+  config->Write("departureWindowHours",
                  static_cast<long>(departure_window->GetValue()));
-  pConfig->Write("departureSpacingHours",
+  config->Write("departureSpacingHours",
                  static_cast<long>(departure_spacing->GetValue()));
-  pConfig->Write("departureWorkers",
+  config->Write("departureWorkers",
                  static_cast<long>(departure_workers->GetValue()));
-  pConfig->Write("showIsochrones", show_isochrones->GetValue());
-  pConfig->Write("showStabilityCorridor",
+  config->Write("showIsochrones", show_isochrones->GetValue());
+  config->Write("showStabilityCorridor",
                  show_stability_corridor->GetValue());
-  pConfig->Write("showRouteWind", show_route_wind->GetValue());
-  pConfig->Write("routeToCursor", route_to_cursor->GetValue());
-  pConfig->Write("boatAtGribTime", boat_at_grib_time->GetValue());
-  pConfig->SetPath(old_path);
-  pConfig->Flush();
+  config->Write("showRouteWind", show_route_wind->GetValue());
+  config->Write("routeToCursor", route_to_cursor->GetValue());
+  config->Write("boatAtGribTime", boat_at_grib_time->GetValue());
+  config->SetPath(old_path);
+  config->Flush();
 }
 
 void PortableWeatherRoutingHost::Impl::CreateEditor() {
@@ -1906,6 +1904,7 @@ void PortableWeatherRoutingHost::Impl::CreateEditor() {
   calculate->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { Start(); });
   cancel->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
     cancelled.store(true);
+    if (cancel_routes) cancel_routes();
     if (status) status->SetLabel("Cancelling…");
   });
   close->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
@@ -2032,6 +2031,7 @@ void PortableWeatherRoutingHost::Impl::DispatchSurfaceAction(
     Start();
   } else if (action == "stop-routing") {
     cancelled.store(true);
+    if (cancel_routes) cancel_routes();
     if (status) status->SetLabel("Cancelling…");
   } else if (action == "export-gpx") {
     ExportGpx();
@@ -2191,7 +2191,10 @@ void PortableWeatherRoutingHost::Impl::CreateFrame() {
   if (manager_export) manager_export->Enable(false);
   frame->Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent& event) {
     SaveSettings();
-    if (worker.joinable()) cancelled.store(true);
+    if (worker.joinable()) {
+      cancelled.store(true);
+      if (cancel_routes) cancel_routes();
+    }
     if (editor) editor->Hide();
     frame->Hide();
     event.Veto();
@@ -2200,7 +2203,7 @@ void PortableWeatherRoutingHost::Impl::CreateFrame() {
 }
 
 bool PortableWeatherRoutingHost::Impl::Show(wxString* error) {
-  if (stopped.load() || !runtime) {
+  if (stopped.load() || !calculate_route) {
     if (error) *error = "routing host is unavailable";
     return false;
   }
@@ -2515,21 +2518,6 @@ void PortableWeatherRoutingHost::Impl::Start() {
           auto candidate_request = request;
           candidate_request.departure_unix_time +=
               static_cast<int64_t>(run) * departure_step_seconds;
-          char error[4096] = {};
-          ocpn_portable_runtime* replica = nullptr;
-          {
-            // The compiled Component is shared, while each calculation gets
-            // an independent Store. The primary Store is never re-entered.
-            std::lock_guard<std::mutex> lock(*runtime_mutex);
-            replica = ocpn_portable_runtime_clone_compute(runtime, error,
-                                                          sizeof(error));
-          }
-          if (!replica) {
-            departure_result.error = "Could not create Wasm compute replica: " +
-                                     wxString::FromUTF8(error);
-            departures_completed.fetch_add(1);
-            continue;
-          }
           RoutingOutcome passage;
           passage.departure_unix_time = candidate_request.departure_unix_time;
           const int64_t passage_deadline =
@@ -2597,7 +2585,7 @@ void PortableWeatherRoutingHost::Impl::Start() {
                   passage.estimated_fuel_litres;
             }
             RoutingOutcome leg;
-            ok = CalculateRouteLeg(replica, &candidate_request,
+            ok = CalculateRouteLeg(calculate_route, &candidate_request,
                                    *selected_performance, &leg, &leg_error) &&
                  AppendRouteLeg(&passage, std::move(leg), leg_index,
                                 &leg_error);
@@ -2608,7 +2596,6 @@ void PortableWeatherRoutingHost::Impl::Start() {
                                            routing_gates[leg_index + 1].name,
                                            leg_error);
           }
-          ocpn_portable_runtime_destroy(replica);
           if (!ok) {
             departure_result.error = leg_error;
             departures_completed.fetch_add(1);
@@ -2889,6 +2876,7 @@ void PortableWeatherRoutingHost::Impl::SelectDepartureResult(size_t index) {
       route_schedule->SetColumnWidth(column, wxLIST_AUTOSIZE_USEHEADER);
   }
   if (parent) parent->Refresh();
+  RequestRefresh(GetOCPNCanvasWindow());
 }
 
 void PortableWeatherRoutingHost::Impl::ReportProgress(unsigned percent,
@@ -2910,10 +2898,9 @@ void PortableWeatherRoutingHost::Impl::ReportProgress(unsigned percent,
   });
 }
 
-bool PortableWeatherRoutingHost::Impl::Render(ocpnDC& dc,
-                                              const ViewPort& viewport) {
-  if (route.size() < 2) return false;
-  ViewPort projection = viewport;
+bool PortableWeatherRoutingHost::Impl::Render(wxDC& dc,
+                                              PlugIn_ViewPort* viewport) {
+  if (!viewport || route.size() < 2) return false;
   if (show_stability_corridor && show_stability_corridor->GetValue() &&
       !alternative_routes.empty()) {
     dc.SetPen(*wxTRANSPARENT_PEN);
@@ -2926,11 +2913,11 @@ bool PortableWeatherRoutingHost::Impl::Render(ocpnDC& dc,
       for (size_t index = 0; index < kCorridorSamples; ++index)
         corridor.push_back(SampleRouteFraction(
             route, static_cast<double>(index) / (kCorridorSamples - 1),
-            projection));
+            viewport));
       for (size_t index = kCorridorSamples; index-- > 0;)
         corridor.push_back(SampleRouteFraction(
             alternative, static_cast<double>(index) / (kCorridorSamples - 1),
-            projection));
+            viewport));
       dc.DrawPolygon(static_cast<int>(corridor.size()), corridor.data());
     }
   }
@@ -2941,8 +2928,7 @@ bool PortableWeatherRoutingHost::Impl::Render(ocpnDC& dc,
       std::vector<wxPoint> line;
       line.reserve(contour.points.size());
       for (const auto& point : contour.points)
-        line.push_back(
-            projection.GetPixFromLL(point.latitude, point.longitude));
+        line.push_back(Project(viewport, point.latitude, point.longitude));
       dc.DrawLines(static_cast<int>(line.size()), line.data());
     }
   }
@@ -2953,13 +2939,13 @@ bool PortableWeatherRoutingHost::Impl::Render(ocpnDC& dc,
     comparison.reserve(alternative.size());
     for (const auto& point : alternative)
       comparison.push_back(
-          projection.GetPixFromLL(point.latitude, point.longitude));
+          Project(viewport, point.latitude, point.longitude));
     dc.DrawLines(static_cast<int>(comparison.size()), comparison.data());
   }
   std::vector<wxPoint> points;
   points.reserve(route.size());
   for (const auto& point : route)
-    points.push_back(projection.GetPixFromLL(point.latitude, point.longitude));
+    points.push_back(Project(viewport, point.latitude, point.longitude));
   dc.SetPen(wxPen(wxColour(255, 255, 255, 220), 7));
   dc.DrawLines(static_cast<int>(points.size()), points.data());
   dc.SetPen(wxPen(wxColour(235, 45, 175), 4));
@@ -2969,8 +2955,8 @@ bool PortableWeatherRoutingHost::Impl::Render(ocpnDC& dc,
     wxPoint previous(std::numeric_limits<int>::min(),
                      std::numeric_limits<int>::min());
     for (const auto& environment : route_environment) {
-      const wxPoint origin = projection.GetPixFromLL(environment.latitude,
-                                                     environment.longitude);
+      const wxPoint origin =
+          Project(viewport, environment.latitude, environment.longitude);
       const long dx = static_cast<long>(origin.x) - previous.x;
       const long dy = static_cast<long>(origin.y) - previous.y;
       if (previous.x != std::numeric_limits<int>::min() &&
@@ -2986,14 +2972,14 @@ bool PortableWeatherRoutingHost::Impl::Render(ocpnDC& dc,
     PortableNavigationPosition cursor;
     if (cursor_position(&cursor)) {
       const wxPoint cursor_pixel =
-          projection.GetPixFromLL(cursor.latitude, cursor.longitude);
+          Project(viewport, cursor.latitude, cursor.longitude);
       const RoutingOutcome::InspectionLine* closest = nullptr;
       long closest_squared = 32L * 32L;
       for (const auto& trace : traces) {
         if (trace.points.size() < 2) continue;
         const auto& endpoint = trace.points.back();
         const wxPoint pixel =
-            projection.GetPixFromLL(endpoint.latitude, endpoint.longitude);
+            Project(viewport, endpoint.latitude, endpoint.longitude);
         const long dx = pixel.x - cursor_pixel.x;
         const long dy = pixel.y - cursor_pixel.y;
         const long squared = dx * dx + dy * dy;
@@ -3007,7 +2993,7 @@ bool PortableWeatherRoutingHost::Impl::Render(ocpnDC& dc,
         inspection.reserve(closest->points.size());
         for (const auto& point : closest->points)
           inspection.push_back(
-              projection.GetPixFromLL(point.latitude, point.longitude));
+              Project(viewport, point.latitude, point.longitude));
         dc.SetPen(
             wxPen(wxColour(255, 255, 255, 220), 6, wxPENSTYLE_SHORT_DASH));
         dc.DrawLines(static_cast<int>(inspection.size()), inspection.data());
@@ -3028,7 +3014,7 @@ bool PortableWeatherRoutingHost::Impl::Render(ocpnDC& dc,
         InterpolateRoutePosition(route, display_time, &boat_latitude,
                                  &boat_longitude)) {
       const wxPoint boat =
-          projection.GetPixFromLL(boat_latitude, boat_longitude);
+          Project(viewport, boat_latitude, boat_longitude);
       dc.SetPen(wxPen(wxColour(255, 255, 255), 3));
       dc.SetBrush(wxBrush(wxColour(235, 45, 175)));
       dc.DrawCircle(boat, 8);
@@ -3036,6 +3022,134 @@ bool PortableWeatherRoutingHost::Impl::Render(ocpnDC& dc,
       dc.DrawCircle(boat, 4);
     }
   }
+  return true;
+}
+
+bool PortableWeatherRoutingHost::Impl::RenderGL(PlugIn_ViewPort* viewport) {
+  if (!viewport || route.size() < 2) return false;
+  auto vertex = [viewport](double latitude, double longitude) {
+    const wxPoint pixel = Project(viewport, latitude, longitude);
+    glVertex2i(pixel.x, pixel.y);
+  };
+  auto line = [&vertex](const std::vector<ocpn_portable_route_point>& points,
+                        GLubyte red, GLubyte green, GLubyte blue,
+                        GLubyte alpha, GLfloat width) {
+    if (points.size() < 2) return;
+    glColor4ub(red, green, blue, alpha);
+    glLineWidth(width);
+    glBegin(GL_LINE_STRIP);
+    for (const auto& point : points)
+      vertex(point.latitude, point.longitude);
+    glEnd();
+  };
+
+  glPushAttrib(GL_COLOR_BUFFER_BIT | GL_ENABLE_BIT | GL_LINE_BIT |
+               GL_CURRENT_BIT);
+  glDisable(GL_TEXTURE_2D);
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+  if (show_stability_corridor && show_stability_corridor->GetValue()) {
+    glColor4ub(220, 80, 190, 45);
+    constexpr std::size_t kSamples = 48;
+    for (const auto& alternative : alternative_routes) {
+      if (alternative.size() < 2) continue;
+      glBegin(GL_TRIANGLE_STRIP);
+      for (std::size_t index = 0; index < kSamples; ++index) {
+        const double fraction =
+            static_cast<double>(index) / static_cast<double>(kSamples - 1);
+        const wxPoint primary = SampleRouteFraction(route, fraction, viewport);
+        const wxPoint comparison =
+            SampleRouteFraction(alternative, fraction, viewport);
+        glVertex2i(primary.x, primary.y);
+        glVertex2i(comparison.x, comparison.y);
+      }
+      glEnd();
+    }
+  }
+  if (show_isochrones && show_isochrones->GetValue()) {
+    for (const auto& contour : isochrones)
+      line(contour.points, 225, 105, 195, 175, 2.0F);
+  }
+  for (const auto& alternative : alternative_routes)
+    line(alternative, 190, 120, 180, 210, 2.0F);
+  line(route, 255, 255, 255, 220, 7.0F);
+  line(route, 235, 45, 175, 255, 4.0F);
+
+  if (show_route_wind && show_route_wind->GetValue()) {
+    wxPoint previous(std::numeric_limits<int>::min(),
+                     std::numeric_limits<int>::min());
+    glColor4ub(185, 20, 155, 255);
+    glLineWidth(2.0F);
+    glBegin(GL_LINES);
+    for (const auto& environment : route_environment) {
+      const double speed =
+          std::hypot(environment.wind_u_knots, environment.wind_v_knots);
+      if (!std::isfinite(speed) || speed < 2.5) continue;
+      const wxPoint origin =
+          Project(viewport, environment.latitude, environment.longitude);
+      const long dx = static_cast<long>(origin.x) - previous.x;
+      const long dy = static_cast<long>(origin.y) - previous.y;
+      if (previous.x != std::numeric_limits<int>::min() &&
+          dx * dx + dy * dy < 45L * 45L)
+        continue;
+      const double staff_x = -environment.wind_u_knots / speed;
+      const double staff_y = environment.wind_v_knots / speed;
+      glVertex2i(origin.x, origin.y);
+      glVertex2i(origin.x + static_cast<int>(std::lround(staff_x * 24.0)),
+                 origin.y +
+                     static_cast<int>(std::lround(staff_y * 24.0)));
+      previous = origin;
+    }
+    glEnd();
+  }
+
+  if (route_to_cursor && route_to_cursor->GetValue() && cursor_position) {
+    PortableNavigationPosition cursor;
+    if (cursor_position(&cursor)) {
+      const wxPoint cursor_pixel =
+          Project(viewport, cursor.latitude, cursor.longitude);
+      const RoutingOutcome::InspectionLine* closest = nullptr;
+      long closest_squared = 32L * 32L;
+      for (const auto& trace : traces) {
+        if (trace.points.size() < 2) continue;
+        const auto& endpoint = trace.points.back();
+        const wxPoint pixel =
+            Project(viewport, endpoint.latitude, endpoint.longitude);
+        const long dx = pixel.x - cursor_pixel.x;
+        const long dy = pixel.y - cursor_pixel.y;
+        const long squared = dx * dx + dy * dy;
+        if (squared <= closest_squared) {
+          closest_squared = squared;
+          closest = &trace;
+        }
+      }
+      if (closest) line(closest->points, 135, 25, 150, 255, 3.0F);
+    }
+  }
+
+  if (boat_at_grib_time && boat_at_grib_time->GetValue() &&
+      displayed_environment_time) {
+    std::int64_t display_time = 0;
+    double latitude = 0.0;
+    double longitude = 0.0;
+    if (displayed_environment_time(&display_time) &&
+        InterpolateRoutePosition(route, display_time, &latitude, &longitude)) {
+      const wxPoint centre = Project(viewport, latitude, longitude);
+      glColor4ub(235, 45, 175, 255);
+      glBegin(GL_TRIANGLE_FAN);
+      glVertex2i(centre.x, centre.y);
+      for (int index = 0; index <= 20; ++index) {
+        const double angle =
+            static_cast<double>(index) * 2.0 * 3.14159265358979323846 / 20.0;
+        glVertex2i(
+            centre.x + static_cast<int>(std::lround(std::cos(angle) * 8)),
+            centre.y + static_cast<int>(std::lround(std::sin(angle) * 8)));
+      }
+      glEnd();
+    }
+  }
+  glPopAttrib();
   return true;
 }
 
@@ -3103,6 +3217,7 @@ void PortableWeatherRoutingHost::Impl::Shutdown() {
   if (stopped.exchange(true)) return;
   alive->store(false);
   cancelled.store(true);
+  if (cancel_routes) cancel_routes();
   environment_refresh_timer.Stop();
   if (worker.joinable()) worker.join();
   if (frame) {
@@ -3113,8 +3228,8 @@ void PortableWeatherRoutingHost::Impl::Shutdown() {
 }
 
 PortableWeatherRoutingHost::PortableWeatherRoutingHost(
-    wxWindow* parent, ocpn_portable_runtime* runtime,
-    std::shared_ptr<std::mutex> runtime_mutex, const wxString& package_root,
+    wxWindow* parent, wxFileConfig* config, CalculateRoute calculate_route,
+    std::function<void()> cancel_routes, const wxString& package_root,
     const wxString& plugin_id, const wxString& surface_resource,
     std::function<wxString()> summary,
     std::function<std::vector<PortableNavigationPosition>()> list_waypoints,
@@ -3131,8 +3246,8 @@ PortableWeatherRoutingHost::PortableWeatherRoutingHost(
         preflight_environment,
     double latitude, double longitude)
     : m_impl(std::make_unique<Impl>(
-          parent, runtime, std::move(runtime_mutex), package_root, plugin_id,
-          surface_resource,
+          parent, config, std::move(calculate_route), std::move(cancel_routes),
+          package_root, plugin_id, surface_resource,
           std::move(summary), std::move(list_waypoints),
           std::move(list_routes),
           std::move(create_route),
@@ -3143,8 +3258,12 @@ PortableWeatherRoutingHost::~PortableWeatherRoutingHost() = default;
 bool PortableWeatherRoutingHost::Show(wxString* error) {
   return m_impl->Show(error);
 }
-bool PortableWeatherRoutingHost::Render(ocpnDC& dc, const ViewPort& viewport) {
+bool PortableWeatherRoutingHost::Render(wxDC& dc,
+                                        PlugIn_ViewPort* viewport) {
   return m_impl->Render(dc, viewport);
+}
+bool PortableWeatherRoutingHost::RenderGL(PlugIn_ViewPort* viewport) {
+  return m_impl->RenderGL(viewport);
 }
 void PortableWeatherRoutingHost::ReportProgress(unsigned percent,
                                                 const wxString& message) {

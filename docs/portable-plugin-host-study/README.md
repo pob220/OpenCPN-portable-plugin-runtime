@@ -39,4 +39,6 @@ in `source-ledger.json` and `SOURCE-LEDGER.md`.
 - `STUDY-COMPLETION-AUDIT.md` — requirement-to-evidence completion audit;
 - `IMPLEMENTATION-WORKSPACE.md` — frozen baselines, isolated workspace,
   stock-core invariant and implementation stop point;
+- `IMPLEMENTATION-VALIDATION.md` — implemented lifecycle, three-package
+  acceptance evidence, measured resources and the explicit release stop point;
 - `SOURCE-LEDGER.md` / `source-ledger.json` — pinned evidence versions.

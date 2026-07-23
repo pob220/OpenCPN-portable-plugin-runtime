@@ -13,6 +13,11 @@
 #include "permission_store.h"
 #include "runtime_engine.h"
 
+class PortableWeatherRoutingHost;
+class PortableEnvironmentHost;
+struct PortableNavigationPosition;
+struct PortableNavigationRoute;
+
 namespace ppm {
 
 class ManagerDialog;
@@ -39,6 +44,7 @@ class PortablePluginManagerPi final : public opencpn_plugin_121 {
   void ShowPreferencesDialog(wxWindow* parent) override;
   void SetPositionFixEx(PlugIn_Position_Fix_Ex& fix) override;
   void SetNMEASentence(wxString& sentence) override;
+  void SetCursorLatLon(double latitude, double longitude) override;
   bool RenderOverlayMultiCanvas(wxDC& dc, PlugIn_ViewPort* viewport,
                                 int canvas_index, int priority) override;
   bool RenderGLOverlayMultiCanvas(wxGLContext* context,
@@ -75,6 +81,12 @@ class PortablePluginManagerPi final : public opencpn_plugin_121 {
   void ShowManager(wxWindow* parent);
   void OnEngineStateChanged();
   void RefreshManager();
+  std::vector<PortableNavigationPosition> ListWaypoints() const;
+  std::vector<PortableNavigationRoute> ListRoutes() const;
+  bool CreateOpenCpnRoute(
+      const wxString& name,
+      const std::vector<PortableNavigationPosition>& points,
+      wxString* diagnostic);
 
   ActionRegistry actions_;
   wxBitmap plugin_bitmap_;
@@ -84,7 +96,23 @@ class PortablePluginManagerPi final : public opencpn_plugin_121 {
   std::unique_ptr<RuntimeEngine> runtime_engine_;
   std::shared_ptr<std::atomic_bool> ui_callback_gate_;
   std::map<std::string, std::unique_ptr<SurfaceDialog>> surface_dialogs_;
+  std::unique_ptr<::PortableEnvironmentHost> environment_workbench_;
+  std::unique_ptr<::PortableWeatherRoutingHost> weather_routing_host_;
   std::unique_ptr<ManagerDialog> manager_dialog_;
+  double vessel_latitude_ = 0.0;
+  double vessel_longitude_ = 0.0;
+  double cursor_latitude_ = 0.0;
+  double cursor_longitude_ = 0.0;
+  bool vessel_position_valid_ = false;
+  bool cursor_position_valid_ = false;
+  double view_west_ = 0.0;
+  double view_south_ = 0.0;
+  double view_east_ = 0.0;
+  double view_north_ = 0.0;
+  bool view_bounds_valid_ = false;
+  bool developer_smoke_fixture_opened_ = false;
+  bool developer_software_overlay_logged_ = false;
+  bool developer_opengl_overlay_logged_ = false;
   bool developer_mode_ = false;
   bool initialized_ = false;
 };

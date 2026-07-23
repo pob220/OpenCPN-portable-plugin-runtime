@@ -390,21 +390,21 @@ if (OCPN_BUILD_TEST)
                          -Wall -Wextra -Wpedantic)
   target_include_directories(
     portable_service_version_test PRIVATE
-    "${CMAKE_SOURCE_DIR}/gui/include/gui"
+    "${CMAKE_SOURCE_DIR}/plugins/portable_plugin_manager_pi/include"
   )
   add_test(NAME portable_service_version COMMAND portable_service_version_test)
 
   add_executable(
     portable_polar_test
     tests/portable_polar_test.cpp
-    "${CMAKE_SOURCE_DIR}/gui/src/portable_polar.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/portable_plugin_manager_pi/src/portable_polar.cpp"
     "${CMAKE_SOURCE_DIR}/libs/pugixml/pugixml.cpp"
   )
   target_compile_features(portable_polar_test PRIVATE cxx_std_17)
   target_compile_options(portable_polar_test PRIVATE -Wall -Wextra -Wpedantic)
   target_include_directories(
     portable_polar_test PRIVATE
-    "${CMAKE_SOURCE_DIR}/gui/include/gui"
+    "${CMAKE_SOURCE_DIR}/plugins/portable_plugin_manager_pi/include"
     "${CMAKE_SOURCE_DIR}/libs/pugixml"
   )
   add_test(
@@ -415,7 +415,7 @@ if (OCPN_BUILD_TEST)
   add_executable(
     portable_ui_menu_test
     tests/portable_ui_menu_test.cpp
-    "${CMAKE_SOURCE_DIR}/gui/src/portable_ui_menu.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/portable_plugin_manager_pi/src/portable_ui_menu.cpp"
   )
   target_compile_features(portable_ui_menu_test PRIVATE cxx_std_17)
   if (MSVC)
@@ -425,7 +425,8 @@ if (OCPN_BUILD_TEST)
                            -Wall -Wextra -Wpedantic)
   endif ()
   target_include_directories(
-    portable_ui_menu_test PRIVATE "${CMAKE_SOURCE_DIR}/gui/include/gui"
+    portable_ui_menu_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/plugins/portable_plugin_manager_pi/include"
   )
   target_link_libraries(portable_ui_menu_test PRIVATE
                         ocpn::wxjson ${wxWidgets_LIBRARIES})
@@ -437,7 +438,7 @@ if (OCPN_BUILD_TEST)
   add_executable(
     portable_departure_time_test
     tests/portable_departure_time_test.cpp
-    "${CMAKE_SOURCE_DIR}/gui/src/portable_departure_time.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/portable_plugin_manager_pi/src/portable_departure_time.cpp"
   )
   target_compile_features(portable_departure_time_test PRIVATE cxx_std_17)
   if (MSVC)
@@ -448,7 +449,7 @@ if (OCPN_BUILD_TEST)
   endif ()
   target_include_directories(
     portable_departure_time_test PRIVATE
-    "${CMAKE_SOURCE_DIR}/gui/include/gui"
+    "${CMAKE_SOURCE_DIR}/plugins/portable_plugin_manager_pi/include"
   )
   target_link_libraries(portable_departure_time_test PRIVATE
                         ${wxWidgets_LIBRARIES})

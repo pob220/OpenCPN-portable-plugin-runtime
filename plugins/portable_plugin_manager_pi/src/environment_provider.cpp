@@ -4,6 +4,7 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <condition_variable>
 #include <cstdlib>
@@ -18,9 +19,11 @@
 #include <utility>
 
 #if defined(__linux__) || defined(__APPLE__)
+#include <fcntl.h>
 #include <signal.h>
 #include <spawn.h>
 #include <sys/wait.h>
+#include <unistd.h>
 extern char** environ;
 #endif
 
@@ -37,7 +40,10 @@ namespace fs = std::filesystem;
 constexpr std::uintmax_t kMaximumDatasetBytes = 1024ULL * 1024ULL * 1024ULL;
 constexpr std::uintmax_t kMaximumJsonBytes = 32ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kMaximumRequests = 100'000;
-constexpr std::size_t kMaximumDecodeTimes = 32;
+// Each requested instant is decoded as a complete spatial frame. Eight keeps
+// the helper comfortably below its 512 MiB address-space sandbox even for the
+// dense UKV/wave/current datasets used during 15-minute route validation.
+constexpr std::size_t kMaximumDecodeTimes = 8;
 constexpr std::size_t kFrameCacheBudget = 256U * 1024U * 1024U;
 
 bool IsFlatpak() {
@@ -108,10 +114,47 @@ bool RunProcess(const std::vector<std::string>& arguments,
   argv.reserve(encoded.size() + 1);
   for (auto& argument : encoded) argv.push_back(argument.data());
   argv.push_back(nullptr);
+  int stderr_pipe[2] = {-1, -1};
+  posix_spawn_file_actions_t file_actions;
+  bool file_actions_initialized = false;
+  bool capture_stderr = pipe(stderr_pipe) == 0;
+  if (capture_stderr) {
+    const int flags = fcntl(stderr_pipe[0], F_GETFL, 0);
+    capture_stderr = flags >= 0 &&
+                     fcntl(stderr_pipe[0], F_SETFL,
+                           flags | O_NONBLOCK) == 0 &&
+                     posix_spawn_file_actions_init(&file_actions) == 0;
+    file_actions_initialized = capture_stderr;
+  }
+  if (capture_stderr) {
+    capture_stderr =
+        posix_spawn_file_actions_adddup2(&file_actions, stderr_pipe[1],
+                                        STDERR_FILENO) == 0 &&
+        posix_spawn_file_actions_addclose(&file_actions, stderr_pipe[0]) == 0 &&
+        posix_spawn_file_actions_addclose(&file_actions, stderr_pipe[1]) == 0;
+  }
+  if (!capture_stderr) {
+    if (file_actions_initialized) {
+      posix_spawn_file_actions_destroy(&file_actions);
+      file_actions_initialized = false;
+    }
+    if (stderr_pipe[0] >= 0) close(stderr_pipe[0]);
+    if (stderr_pipe[1] >= 0) close(stderr_pipe[1]);
+    stderr_pipe[0] = stderr_pipe[1] = -1;
+  }
   pid_t child = -1;
-  const int spawn_error =
-      posix_spawn(&child, argv.front(), nullptr, nullptr, argv.data(), environ);
+  const int spawn_error = posix_spawn(
+      &child, argv.front(), capture_stderr ? &file_actions : nullptr, nullptr,
+      argv.data(), environ);
+  if (file_actions_initialized) {
+    posix_spawn_file_actions_destroy(&file_actions);
+  }
+  if (capture_stderr) {
+    close(stderr_pipe[1]);
+    stderr_pipe[1] = -1;
+  }
   if (spawn_error != 0) {
+    if (stderr_pipe[0] >= 0) close(stderr_pipe[0]);
     if (diagnostic) {
       *diagnostic = "could not start supervised decoder: " +
                     std::string(std::strerror(spawn_error));
@@ -123,8 +166,33 @@ bool RunProcess(const std::vector<std::string>& arguments,
   int status = 0;
   pid_t waited = -1;
   bool stopping = false;
+  std::string child_error;
+  auto drain_stderr = [&]() {
+    if (stderr_pipe[0] < 0) return;
+    std::array<char, 2048> buffer{};
+    for (;;) {
+      const ssize_t count =
+          read(stderr_pipe[0], buffer.data(), buffer.size());
+      if (count > 0) {
+        constexpr std::size_t kMaximumCapturedError = 8192;
+        const std::size_t available =
+            child_error.size() < kMaximumCapturedError
+                ? kMaximumCapturedError - child_error.size()
+                : 0;
+        child_error.append(buffer.data(),
+                           std::min<std::size_t>(available, count));
+      } else if (count == 0 ||
+                 (errno != EINTR && errno != EAGAIN &&
+                  errno != EWOULDBLOCK)) {
+        break;
+      }
+      if (count < 0 && errno == EINTR) continue;
+      if (count < 0) break;
+    }
+  };
   for (;;) {
     waited = waitpid(child, &status, WNOHANG);
+    drain_stderr();
     if (waited == child) break;
     if (waited < 0 && errno != EINTR) break;
     const bool timed_out = std::chrono::steady_clock::now() >= deadline;
@@ -153,6 +221,19 @@ bool RunProcess(const std::vector<std::string>& arguments,
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }
+  drain_stderr();
+  if (stderr_pipe[0] >= 0) close(stderr_pipe[0]);
+  child_error.erase(
+      std::remove_if(child_error.begin(), child_error.end(),
+                     [](unsigned char character) {
+                       return character != '\n' && character != '\t' &&
+                              (character < 0x20 || character == 0x7f);
+                     }),
+      child_error.end());
+  while (!child_error.empty() &&
+         std::isspace(static_cast<unsigned char>(child_error.back()))) {
+    child_error.pop_back();
+  }
   if (waited != child) {
     if (diagnostic) {
       *diagnostic = "could not wait for supervised decoder: " +
@@ -168,6 +249,7 @@ bool RunProcess(const std::vector<std::string>& arguments,
                               std::to_string(WTERMSIG(status))
                         : "contained decoder exited with status " +
                               std::to_string(WEXITSTATUS(status));
+      if (!child_error.empty()) *diagnostic += ": " + child_error;
     }
     return false;
   }
@@ -619,7 +701,21 @@ public:
                           std::to_string(offset) + ".bin");
       const auto command = DecoderCommand(snapshot->source, snapshot->index,
                                           output, times, false, diagnostic);
-      if (command.empty() || !RunProcess(command, cancelled, diagnostic)) {
+      if (command.empty()) {
+        fs::remove(output, error);
+        return false;
+      }
+      if (!RunProcess(command, cancelled, diagnostic)) {
+        const std::string process_diagnostic =
+            diagnostic ? *diagnostic : std::string();
+        wxJSONValue failure;
+        std::string decoder_diagnostic;
+        ReadJson(output, &failure, &decoder_diagnostic);
+        if (diagnostic && !decoder_diagnostic.empty()) {
+          *diagnostic = process_diagnostic;
+          if (!diagnostic->empty()) *diagnostic += ": ";
+          *diagnostic += decoder_diagnostic;
+        }
         fs::remove(output, error);
         return false;
       }

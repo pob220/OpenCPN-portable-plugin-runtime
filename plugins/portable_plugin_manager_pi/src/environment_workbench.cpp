@@ -2,7 +2,7 @@
  * Generic host-owned environmental service implementation.
  ***************************************************************************/
 
-#include "portable_environment_host.h"
+#include "environment_workbench.h"
 
 #include <algorithm>
 #include <array>
@@ -75,15 +75,8 @@ extern char** environ;
 #include <wx/utils.h>
 #include <wx/wfstream.h>
 
-#include "model/base_platform.h"
-#include "chcanv.h"
-#include "navutil.h"
-#include "ocpn_portable_runtime.h"
-#include "ocpndc.h"
+#include "ocpn_plugin.h"
 #include "picosha2.h"
-#include "shapefile_basemap.h"
-#include "top_frame.h"
-#include "viewport.h"
 
 namespace {
 
@@ -1424,8 +1417,11 @@ public:
 
   Impl(wxWindow* parent_value, wxString plugin_id_value,
        wxString package_root_value, wxString surface_resource_value,
-       bool credential_access_value, ocpn_portable_runtime* runtime_value,
-       std::shared_ptr<std::mutex> runtime_mutex_value,
+       bool credential_access_value,
+       PortableEnvironmentHost::SurfaceEvent surface_event_value,
+       PortableEnvironmentHost::DatasetOpened dataset_opened_value,
+       PortableEnvironmentHost::ViewBounds view_bounds_value,
+       PortableEnvironmentHost::RefreshCanvas refresh_canvas_value,
        std::function<std::vector<PortableEnvironmentPosition>()>
            list_waypoints_value,
        std::function<bool(PortableEnvironmentPosition*)> vessel_position_value)
@@ -1434,8 +1430,10 @@ public:
         package_root(std::move(package_root_value)),
         surface_resource(std::move(surface_resource_value)),
         credential_access(credential_access_value),
-        runtime(runtime_value),
-        runtime_mutex(std::move(runtime_mutex_value)),
+        surface_event(std::move(surface_event_value)),
+        dataset_opened(std::move(dataset_opened_value)),
+        view_bounds(std::move(view_bounds_value)),
+        refresh_canvas(std::move(refresh_canvas_value)),
         list_waypoints(std::move(list_waypoints_value)),
         vessel_position(std::move(vessel_position_value)),
         progress_timer(this, kProgressTimerId),
@@ -1450,7 +1448,8 @@ public:
   ~Impl() override { Shutdown(); }
 
   bool Show(wxString* error);
-  bool Render(ocpnDC& dc, const ViewPort& viewport);
+  bool OpenDataset(const std::vector<wxString>& paths, wxString* error);
+  bool Render(wxDC& dc, PlugIn_ViewPort* viewport);
   bool SampleBatch(const std::vector<PortableEnvironmentRequest>& requests,
                    std::vector<PortableEnvironmentSample>* results,
                    wxString* error) const;
@@ -1551,8 +1550,10 @@ private:
   wxString package_root;
   wxString surface_resource;
   bool credential_access = false;
-  ocpn_portable_runtime* runtime = nullptr;
-  std::shared_ptr<std::mutex> runtime_mutex;
+  PortableEnvironmentHost::SurfaceEvent surface_event;
+  PortableEnvironmentHost::DatasetOpened dataset_opened;
+  PortableEnvironmentHost::ViewBounds view_bounds;
+  PortableEnvironmentHost::RefreshCanvas refresh_canvas;
   std::function<std::vector<PortableEnvironmentPosition>()> list_waypoints;
   std::function<bool(PortableEnvironmentPosition*)> vessel_position;
   wxJSONValue surface_definition;
@@ -2058,7 +2059,7 @@ void PortableEnvironmentHost::Impl::CreateFrame() {
       if (!NotifySurfaceEvent("display-settings", DisplayStateJson(), &ignored))
         wxLogWarning("Portable environmental controller rejected state: %s",
                      ignored);
-      if (top_frame::Get()) top_frame::Get()->RefreshAllCanvas(false);
+      if (refresh_canvas) refresh_canvas();
     });
   time_slider->Bind(wxEVT_SLIDER, [this](wxCommandEvent&) {
     const int value = time_slider->GetValue();
@@ -2068,8 +2069,8 @@ void PortableEnvironmentHost::Impl::CreateFrame() {
     const int selected = time_slider ? time_slider->GetValue() : wxNOT_FOUND;
     if (selected != wxNOT_FOUND && !process)
       StartSliderFrame(selected);
-    else if (top_frame::Get())
-      top_frame::Get()->RefreshAllCanvas(false);
+    else if (refresh_canvas)
+      refresh_canvas();
   });
   if (controller_state == "{}" || controller_state.empty()) {
     wxString migration_error;
@@ -2082,6 +2083,8 @@ void PortableEnvironmentHost::Impl::CreateFrame() {
 }
 
 void PortableEnvironmentHost::Impl::LoadSettings() {
+  wxFileConfig* pConfig = GetOCPNConfigObject();
+  if (!pConfig) return;
   const wxString old_path = pConfig->GetPath();
   pConfig->SetPath("/PortablePlugins/" + plugin_id + "/Display");
   const long display_settings_schema =
@@ -2207,6 +2210,8 @@ void PortableEnvironmentHost::Impl::LoadSettings() {
 }
 
 void PortableEnvironmentHost::Impl::SaveSettings() {
+  wxFileConfig* pConfig = GetOCPNConfigObject();
+  if (!pConfig) return;
   const wxString old_path = pConfig->GetPath();
   pConfig->SetPath("/PortablePlugins/" + plugin_id + "/Display");
   pConfig->Write("windBarbs", wind_barbs);
@@ -2417,36 +2422,11 @@ bool PortableEnvironmentHost::Impl::ApplyDisplayStateJson(
 bool PortableEnvironmentHost::Impl::NotifySurfaceEvent(
     const wxString& control_id, const wxString& value_json, wxString* error,
     wxString* accepted_state) const {
-  if (!runtime || !runtime_mutex) {
+  if (!surface_event) {
     if (error) *error = "portable component controller is unavailable";
     return false;
   }
-  wxJSONValue definition = surface_definition;
-  const wxString surface_id = definition["surface_id"].AsString();
-  const auto encoded_surface = surface_id.ToUTF8();
-  const auto encoded_control = control_id.ToUTF8();
-  const auto encoded_value = value_json.ToUTF8();
-  if (!encoded_surface.data() || !encoded_control.data() ||
-      !encoded_value.data()) {
-    if (error) *error = "portable surface event is not valid UTF-8";
-    return false;
-  }
-  std::vector<char> state(64U * 1024U);
-  size_t state_length = 0;
-  char callback_error[4096] = {};
-  std::lock_guard<std::mutex> lock(*runtime_mutex);
-  const int result = ocpn_portable_runtime_on_surface_event(
-      runtime, encoded_surface.data(), std::strlen(encoded_surface.data()),
-      encoded_control.data(), std::strlen(encoded_control.data()),
-      encoded_value.data(), std::strlen(encoded_value.data()), state.data(),
-      state.size(), &state_length, callback_error, sizeof(callback_error));
-  if (result != 0) {
-    if (error) *error = wxString::FromUTF8(callback_error);
-    return false;
-  }
-  if (accepted_state)
-    *accepted_state = wxString::FromUTF8(state.data(), state_length);
-  return true;
+  return surface_event(control_id, value_json, error, accepted_state);
 }
 
 void PortableEnvironmentHost::Impl::ShowSettings() {
@@ -2819,7 +2799,7 @@ void PortableEnvironmentHost::Impl::ShowSettings() {
     wxLogWarning(
         "Portable environmental controller rejected display settings: %s",
         controller_error);
-  if (top_frame::Get()) top_frame::Get()->RefreshAllCanvas(false);
+  if (refresh_canvas) refresh_canvas();
 }
 
 bool PortableEnvironmentHost::Impl::Show(wxString* error) {
@@ -2842,7 +2822,12 @@ bool PortableEnvironmentHost::Impl::Show(wxString* error) {
     return false;
   }
   if (!HelperSupervisionAvailable(error)) return false;
-  private_directory = g_BasePlatform->GetPrivateDataDir() + wxFILE_SEP_PATH +
+  const wxString* private_root = GetpPrivateApplicationDataLocation();
+  if (!private_root) {
+    *error = "OpenCPN did not provide a private data directory";
+    return false;
+  }
+  private_directory = *private_root + wxFILE_SEP_PATH +
                       "portable-plugin-data" + wxFILE_SEP_PATH + plugin_id;
   if (!wxDirExists(private_directory) &&
       !wxFileName::Mkdir(private_directory, 0700, wxPATH_MKDIR_FULL)) {
@@ -2865,6 +2850,24 @@ void PortableEnvironmentHost::Impl::OpenFile() {
   wxArrayString paths;
   dialog.GetPaths(paths);
   if (paths.empty()) return;
+  std::vector<wxString> selected(paths.begin(), paths.end());
+  wxString error;
+  if (!OpenDataset(selected, &error))
+    wxMessageBox(error, surface_title, wxOK | wxICON_ERROR, frame);
+}
+
+bool PortableEnvironmentHost::Impl::OpenDataset(
+    const std::vector<wxString>& paths, wxString* error) {
+  if (paths.empty() || paths.size() > 16) {
+    if (error) *error = "select between one and sixteen GRIB files";
+    return false;
+  }
+  for (const auto& path : paths) {
+    if (!wxFileExists(path)) {
+      if (error) *error = "selected GRIB file is unavailable: " + path;
+      return false;
+    }
+  }
   last_grib_directory = wxFileName(paths[0]).GetPath();
   SaveSettings();
   wxString display_name;
@@ -2873,12 +2876,12 @@ void PortableEnvironmentHost::Impl::OpenFile() {
     display_name += wxFileName(paths[index]).GetFullName();
   }
   wxString staged_path;
-  wxString error;
-  if (!StageDataset(paths, display_name, &staged_path, &error)) {
-    wxMessageBox(error, surface_title, wxOK | wxICON_ERROR, frame);
-    return;
-  }
+  wxArrayString selected_paths;
+  for (const auto& path : paths) selected_paths.Add(path);
+  if (!StageDataset(selected_paths, display_name, &staged_path, error))
+    return false;
   StartInspect(staged_path, display_name);
+  return true;
 }
 
 bool PortableEnvironmentHost::Impl::StageDataset(const wxArrayString& paths,
@@ -3794,7 +3797,7 @@ void PortableEnvironmentHost::Impl::UpdateAnimationTimer() {
 }
 
 void PortableEnvironmentHost::Impl::OnAnimationTimer(wxTimerEvent&) {
-  if (top_frame::Get()) top_frame::Get()->RefreshAllCanvas(false);
+  if (refresh_canvas) refresh_canvas();
 }
 
 void PortableEnvironmentHost::Impl::Cancel() {
@@ -4004,6 +4007,12 @@ void PortableEnvironmentHost::Impl::HandleInspect(wxJSONValue& value) {
           &controller_error))
     wxLogWarning("Portable environmental controller rejected dataset: %s",
                  controller_error);
+  if (dataset_opened) dataset_opened(selected_file);
+  wxLogMessage(
+      "PPM iGRIB workbench dataset-ready messages=%d forecast-times=%zu "
+      "source=%s",
+      value["messageCount"].AsInt(), decoded_times.size(),
+      selected_display_name);
   if (!decoded_times.empty()) StartFrame(0);
 }
 
@@ -4088,7 +4097,7 @@ void PortableEnvironmentHost::Impl::ApplyDisplayedFrame(
           cached ? " (cached)" : "") +
       source_note);
   UpdateCursorStatus();
-  if (top_frame::Get()) top_frame::Get()->RefreshAllCanvas(false);
+  if (refresh_canvas) refresh_canvas();
 }
 
 void PortableEnvironmentHost::Impl::HandlePrefetchFrame(wxJSONValue& value) {
@@ -4255,7 +4264,11 @@ bool PortableEnvironmentHost::Impl::IsMarinePoint(double latitude,
   std::lock_guard<std::mutex> lock(land_mask_mutex);
   const auto cached = land_mask_cache.find(key);
   if (cached != land_mask_cache.end()) return !cached->second;
-  const bool land = shapefileBasemapIsLand(latitude, longitude);
+  // The public plugin API exposes a conservative coastline crossing query,
+  // not OpenCPN's private shapefile point classifier.  A very short segment
+  // provides a bounded public-API land observation for display filtering.
+  const bool land = PlugIn_GSHHS_CrossesLand(
+      latitude, longitude, std::min(90.0, latitude + 1e-5), longitude);
   land_mask_cache.emplace(key, land);
   return !land;
 }
@@ -4715,11 +4728,9 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
     double preset_east = selected.east;
     double preset_north = selected.north;
     if (selected.kind == "current-view") {
-      auto* canvas = top_frame::Get()
-                         ? dynamic_cast<ChartCanvas*>(
-                               top_frame::Get()->GetAbstractFocusCanvas())
-                         : nullptr;
-      if (!canvas || !canvas->GetVP().GetBBox().GetValid()) {
+      if (!view_bounds ||
+          !view_bounds(&preset_west, &preset_south, &preset_east,
+                       &preset_north)) {
         wxMessageBox(
             "The current chart area is not available yet. Pan or zoom the "
             "chart, then try again.",
@@ -4728,11 +4739,6 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
         area_preset->SetSelection(0);
         return;
       }
-      const auto& bbox = canvas->GetVP().GetBBox();
-      preset_west = bbox.GetMinLon();
-      preset_south = bbox.GetMinLat();
-      preset_east = bbox.GetMaxLon();
-      preset_north = bbox.GetMaxLat();
       if (!(preset_west < preset_east && preset_south < preset_north) ||
           preset_west <= -180.0 || preset_east >= 180.0) {
         wxMessageBox(
@@ -5289,8 +5295,9 @@ void PortableEnvironmentHost::Impl::UpdateCursorStatus() {
   if (frame) frame->Layout();
 }
 
-bool PortableEnvironmentHost::Impl::Render(ocpnDC& dc,
-                                           const ViewPort& viewport) {
+bool PortableEnvironmentHost::Impl::Render(wxDC& dc,
+                                           PlugIn_ViewPort* viewport) {
+  if (!viewport) return false;
   DecodedFramePtr frame_snapshot;
   {
     std::lock_guard<std::mutex> lock(field_mutex);
@@ -5299,7 +5306,11 @@ bool PortableEnvironmentHost::Impl::Render(ocpnDC& dc,
   if (!frame_snapshot || frame_snapshot->fields.empty()) return false;
   const auto& fields = frame_snapshot->fields;
   bool rendered = false;
-  ViewPort projection = viewport;
+  auto project = [viewport](double latitude, double longitude) {
+    wxPoint point;
+    GetCanvasPixLL(viewport, &point, latitude, longitude);
+    return point;
+  };
 
   auto vector_samples = [&](const wxString& u_name, const wxString& v_name,
                             bool marine_only) {
@@ -5473,9 +5484,9 @@ bool PortableEnvironmentHost::Impl::Render(ocpnDC& dc,
       if (magnitude < 0.01 ||
           (marine_only && !PlausibleCurrent(us.value, vs.value)))
         continue;
-      const wxPoint origin = projection.GetPixFromLL(us.latitude, us.longitude);
-      if (origin.x < 0 || origin.y < 0 || origin.x >= viewport.pix_width ||
-          origin.y >= viewport.pix_height)
+      const wxPoint origin = project(us.latitude, us.longitude);
+      if (origin.x < 0 || origin.y < 0 || origin.x >= viewport->pix_width ||
+          origin.y >= viewport->pix_height)
         continue;
       if (!accept_point(origin)) continue;
       if (meteorological && settings.vector_style == 0) {
@@ -5540,9 +5551,9 @@ bool PortableEnvironmentHost::Impl::Render(ocpnDC& dc,
         continue;
       const double magnitude = std::hypot(us.value, vs.value);
       if (magnitude < 0.01) continue;
-      const wxPoint base = projection.GetPixFromLL(us.latitude, us.longitude);
-      if (base.x < 0 || base.y < 0 || base.x >= viewport.pix_width ||
-          base.y >= viewport.pix_height)
+      const wxPoint base = project(us.latitude, us.longitude);
+      if (base.x < 0 || base.y < 0 || base.x >= viewport->pix_width ||
+          base.y >= viewport->pix_height)
         continue;
       const auto cell = std::make_pair(base.x / spacing, base.y / spacing);
       if (!occupied.insert(cell).second) continue;
@@ -5613,10 +5624,9 @@ bool PortableEnvironmentHost::Impl::Render(ocpnDC& dc,
           direction.value > 360.0)
         continue;
       if (!IsMarinePoint(height.latitude, height.longitude)) continue;
-      const wxPoint origin =
-          projection.GetPixFromLL(height.latitude, height.longitude);
-      if (origin.x < 0 || origin.y < 0 || origin.x >= viewport.pix_width ||
-          origin.y >= viewport.pix_height)
+      const wxPoint origin = project(height.latitude, height.longitude);
+      if (origin.x < 0 || origin.y < 0 || origin.x >= viewport->pix_width ||
+          origin.y >= viewport->pix_height)
         continue;
       if (!accept_point(origin)) continue;
 
@@ -5624,7 +5634,7 @@ bool PortableEnvironmentHost::Impl::Render(ocpnDC& dc,
       // propagation direction and rotate with the chart viewport.
       const double travel_bearing =
           std::fmod(direction.value + 180.0, 360.0) * kPi / 180.0 +
-          viewport.rotation;
+          viewport->rotation;
       const double along_x = std::sin(travel_bearing);
       const double along_y = -std::cos(travel_bearing);
       const double across_x = -along_y;
@@ -5696,10 +5706,9 @@ bool PortableEnvironmentHost::Impl::Render(ocpnDC& dc,
           settings.overlay_palette, fraction, settings.colour, gradual_colours);
       dc.SetBrush(wxBrush(wxColour(colour.Red(), colour.Green(), colour.Blue(),
                                    overlay_opacity)));
-      const wxPoint point =
-          projection.GetPixFromLL(sample.latitude, sample.longitude);
-      if (point.x < 0 || point.y < 0 || point.x >= viewport.pix_width ||
-          point.y >= viewport.pix_height)
+      const wxPoint point = project(sample.latitude, sample.longitude);
+      if (point.x < 0 || point.y < 0 || point.x >= viewport->pix_width ||
+          point.y >= viewport->pix_height)
         continue;
       const auto cell =
           std::make_pair(point.x / scalar_cell, point.y / scalar_cell);
@@ -5851,10 +5860,9 @@ bool PortableEnvironmentHost::Impl::Render(ocpnDC& dc,
       return true;
     };
     for (const auto& sample : samples) {
-      const wxPoint point =
-          projection.GetPixFromLL(sample.latitude, sample.longitude);
-      if (point.x < 0 || point.y < 0 || point.x >= viewport.pix_width ||
-          point.y >= viewport.pix_height)
+      const wxPoint point = project(sample.latitude, sample.longitude);
+      if (point.x < 0 || point.y < 0 || point.x >= viewport->pix_width ||
+          point.y >= viewport->pix_height)
         continue;
       if (!accept_point(point)) continue;
       const double value = convert_display(sample.value, settings, kind);
@@ -5909,11 +5917,10 @@ bool PortableEnvironmentHost::Impl::Render(ocpnDC& dc,
     double minimum = std::numeric_limits<double>::max();
     double maximum = std::numeric_limits<double>::lowest();
     for (const auto& sample : samples) {
-      const wxPoint point =
-          projection.GetPixFromLL(sample.latitude, sample.longitude);
+      const wxPoint point = project(sample.latitude, sample.longitude);
       if (point.x < -cell_size || point.y < -cell_size ||
-          point.x > viewport.pix_width + cell_size ||
-          point.y > viewport.pix_height + cell_size)
+          point.x > viewport->pix_width + cell_size ||
+          point.y > viewport->pix_height + cell_size)
         continue;
       auto& cell = cells[{point.x / cell_size, point.y / cell_size}];
       cell.total += sample.value;
@@ -5926,8 +5933,8 @@ bool PortableEnvironmentHost::Impl::Render(ocpnDC& dc,
     const double first = std::ceil(minimum / interval) * interval;
     for (double level = first; level <= maximum; level += interval) {
       bool labelled = false;
-      for (int y = -1; y <= viewport.pix_height / cell_size; ++y) {
-        for (int x = -1; x <= viewport.pix_width / cell_size; ++x) {
+      for (int y = -1; y <= viewport->pix_height / cell_size; ++y) {
+        for (int x = -1; x <= viewport->pix_width / cell_size; ++x) {
           const std::pair<int, int> keys[4] = {
               {x, y}, {x + 1, y}, {x + 1, y + 1}, {x, y + 1}};
           double values[4];
@@ -6289,12 +6296,16 @@ bool PortableEnvironmentHost::Impl::DisplayedTime(int64_t* unix_time) const {
 PortableEnvironmentHost::PortableEnvironmentHost(
     wxWindow* parent, const wxString& plugin_id, const wxString& package_root,
     const wxString& surface_resource, bool credential_access,
-    ocpn_portable_runtime* runtime, std::shared_ptr<std::mutex> runtime_mutex,
+    SurfaceEvent surface_event, DatasetOpened dataset_opened,
+    ViewBounds view_bounds, RefreshCanvas refresh_canvas,
     std::function<std::vector<PortableEnvironmentPosition>()> list_waypoints,
     std::function<bool(PortableEnvironmentPosition*)> vessel_position)
     : m_impl(std::make_unique<Impl>(parent, plugin_id, package_root,
                                     surface_resource, credential_access,
-                                    runtime, std::move(runtime_mutex),
+                                    std::move(surface_event),
+                                    std::move(dataset_opened),
+                                    std::move(view_bounds),
+                                    std::move(refresh_canvas),
                                     std::move(list_waypoints),
                                     std::move(vessel_position))) {}
 
@@ -6304,7 +6315,12 @@ bool PortableEnvironmentHost::Show(wxString* error) {
   return m_impl->Show(error);
 }
 
-bool PortableEnvironmentHost::Render(ocpnDC& dc, const ViewPort& viewport) {
+bool PortableEnvironmentHost::OpenDataset(
+    const std::vector<wxString>& paths, wxString* error) {
+  return m_impl->OpenDataset(paths, error);
+}
+
+bool PortableEnvironmentHost::Render(wxDC& dc, PlugIn_ViewPort* viewport) {
   return m_impl->Render(dc, viewport);
 }
 

@@ -178,7 +178,7 @@ bool SupportedControlType(const std::string& type) {
       "file-open-multiple", "file-save",    "integer",
       "navigation-create", "navigation-object", "navigation-route",
       "number",          "optional-number", "position-source",
-      "progress",        "slider",          "status",
+      "polar-plot",      "progress",        "slider",          "status",
       "table",           "grid",            "text",            "toggle"};
   return supported.count(type) != 0;
 }

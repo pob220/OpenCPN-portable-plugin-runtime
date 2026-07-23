@@ -1,18 +1,20 @@
-#ifndef GUI_PORTABLE_WEATHER_ROUTING_HOST_H_
-#define GUI_PORTABLE_WEATHER_ROUTING_HOST_H_
+#ifndef PORTABLE_PLUGIN_MANAGER_WEATHER_ROUTING_HOST_H
+#define PORTABLE_PLUGIN_MANAGER_WEATHER_ROUTING_HOST_H
 
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <mutex>
+#include <string>
 #include <vector>
 
 #include <wx/string.h>
 
-class ocpnDC;
-class ViewPort;
+class wxDC;
+class wxFileConfig;
 class wxWindow;
-struct ocpn_portable_runtime;
+struct PlugIn_ViewPort;
+
+#include "routing_service.h"
 
 /** Stable, value-based snapshot of an OpenCPN navigation position. */
 struct PortableNavigationPosition {
@@ -31,9 +33,13 @@ struct PortableNavigationRoute {
 
 class PortableWeatherRoutingHost {
 public:
+  using CalculateRoute =
+      std::function<bool(ppm::RoutingRequest, ppm::RoutingOutcome*,
+                         std::string*)>;
+
   PortableWeatherRoutingHost(
-      wxWindow* parent, ocpn_portable_runtime* runtime,
-      std::shared_ptr<std::mutex> runtime_mutex, const wxString& package_root,
+      wxWindow* parent, wxFileConfig* config, CalculateRoute calculate_route,
+      std::function<void()> cancel_routes, const wxString& package_root,
       const wxString& plugin_id, const wxString& surface_resource,
       std::function<wxString()> dataset_summary,
       std::function<std::vector<PortableNavigationPosition>()> list_waypoints,
@@ -51,7 +57,8 @@ public:
       double start_latitude, double start_longitude);
   ~PortableWeatherRoutingHost();
   bool Show(wxString* error);
-  bool Render(ocpnDC& dc, const ViewPort& viewport);
+  bool Render(wxDC& dc, PlugIn_ViewPort* viewport);
+  bool RenderGL(PlugIn_ViewPort* viewport);
   void ReportProgress(unsigned percent, const wxString& message);
   bool Cancelled() const;
   void Shutdown();

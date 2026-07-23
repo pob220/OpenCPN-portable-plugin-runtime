@@ -1,11 +1,11 @@
-#include "portable_service_version.h"
+#include "service_version.h"
 
 #include <cassert>
 
-using ocpn::portable::IsServiceVersionRange;
-using ocpn::portable::ParseServiceVersion;
-using ocpn::portable::ServiceVersion;
-using ocpn::portable::ServiceVersionSatisfies;
+using ppm::IsServiceVersionRange;
+using ppm::ParseServiceVersion;
+using ppm::ServiceVersion;
+using ppm::ServiceVersionSatisfies;
 
 int main() {
   ServiceVersion version;

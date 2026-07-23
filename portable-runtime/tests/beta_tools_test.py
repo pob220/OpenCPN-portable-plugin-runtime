@@ -60,7 +60,10 @@ class BetaToolsTest(unittest.TestCase):
         self.assertNotIn("Bearer-secret", redacted)
 
     def test_copernicus_password_stays_out_of_jobs_and_arguments(self):
-        source = (ROOT / "gui/src/portable_environment_host.cpp").read_text()
+        source = (
+            ROOT
+            / "plugins/portable_plugin_manager_pi/src/environment_workbench.cpp"
+        ).read_text()
         package = (ROOT / "portable-plugins/igrib/package/igrib-viewer.ui.json").read_text()
         self.assertIn("copernicus_nws", package)
         self.assertIn("copernicus_global", package)
@@ -75,23 +78,11 @@ class BetaToolsTest(unittest.TestCase):
         self.assertNotIn('"--password"', source)
         self.assertNotIn("TPXO model directory", source)
 
-    def test_environment_viewer_open_is_deferred_outside_runtime_callback(self):
-        source = (ROOT / "gui/src/portable_plugin_manager.cpp").read_text()
-        callback = source.split(
-            "int32_t PortablePluginManager::Impl::OpenEnvironmentalViewer", 1
-        )[1].split(
-            "int32_t PortablePluginManager::Impl::OpenWeatherRouting", 1
-        )[0]
-        self.assertIn("environmental_viewer_pending", callback)
-        self.assertIn("wxTheApp->CallAfter", callback)
-        self.assertLess(
-            callback.index("wxTheApp->CallAfter"),
-            callback.index("environmental_host->Show"),
-        )
-        self.assertIn("current component action has returned", callback)
-
     def test_environment_frames_use_byte_budget_prefetch_and_grouped_routing(self):
-        source = (ROOT / "gui/src/portable_environment_host.cpp").read_text()
+        source = (
+            ROOT
+            / "plugins/portable_plugin_manager_pi/src/environment_workbench.cpp"
+        ).read_text()
 
         self.assertIn('ReadLong("frameCacheMiB", 256)', source)
         self.assertIn("Operation::PrefetchFrame", source)
@@ -141,7 +132,10 @@ class BetaToolsTest(unittest.TestCase):
             {"minimal", "routing", "marine"},
         )
 
-        host = (ROOT / "gui/src/portable_environment_host.cpp").read_text()
+        host = (
+            ROOT
+            / "plugins/portable_plugin_manager_pi/src/environment_workbench.cpp"
+        ).read_text()
         for provider_id in (
             "copernicus_nws", "copernicus_global", "noaa_rtofs_global",
         ):

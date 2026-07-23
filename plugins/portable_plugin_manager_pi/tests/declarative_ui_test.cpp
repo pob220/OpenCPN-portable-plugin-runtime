@@ -59,9 +59,11 @@ int main() {
     std::cerr << "iPolars surface: " << diagnostic << '\n';
     return 1;
   }
-  CHECK(parsed.tabs.size() == 4);
-  CHECK(parsed.controls.size() == 22);
-  CHECK(parsed.controls[12].type == "grid");
+  CHECK(parsed.tabs.size() == 5);
+  CHECK(parsed.controls.size() == 40);
+  CHECK(parsed.controls[0].type == "polar-plot");
+  CHECK(parsed.controls[13].type == "grid");
+  CHECK(parsed.controls[19].type == "file-open-multiple");
 
   wxJSONValue invalid = routing;
   invalid["controls"][1]["id"] = invalid["controls"][0]["id"];

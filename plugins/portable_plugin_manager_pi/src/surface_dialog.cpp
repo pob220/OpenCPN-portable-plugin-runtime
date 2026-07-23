@@ -1,13 +1,17 @@
 #include "surface_dialog.h"
 
 #include <algorithm>
+#include <cmath>
 #include <map>
+#include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <wx/button.h>
 #include <wx/checkbox.h>
 #include <wx/choice.h>
+#include <wx/dcbuffer.h>
 #include <wx/filedlg.h>
 #include <wx/gauge.h>
 #include <wx/grid.h>
@@ -21,6 +25,7 @@
 #include <wx/sizer.h>
 #include <wx/slider.h>
 #include <wx/stattext.h>
+#include <wx/settings.h>
 #include <wx/sstream.h>
 #include <wx/textctrl.h>
 
@@ -81,6 +86,180 @@ bool IsButton(const std::string& type) {
          type == "file-save" || type == "navigation-create";
 }
 
+class PolarPlotPanel final : public wxPanel {
+ public:
+  explicit PolarPlotPanel(wxWindow* parent, const wxString& accessible_name)
+      : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(-1, 420)) {
+    SetName(accessible_name);
+    SetToolTip(
+        "Boat speed through water by true wind angle and true wind speed");
+    SetMinSize(wxSize(480, 360));
+    SetBackgroundStyle(wxBG_STYLE_PAINT);
+    Bind(wxEVT_PAINT, &PolarPlotPanel::OnPaint, this);
+    Bind(wxEVT_SIZE, [this](wxSizeEvent& event) {
+      Refresh(false);
+      event.Skip();
+    });
+  }
+
+  void Apply(const wxJSONValue& value) {
+    winds_.clear();
+    angles_.clear();
+    speeds_.clear();
+    if (!value.IsObject() || !value.HasMember("columns") ||
+        !value.HasMember("rows") || !value.ItemAt("columns").IsArray() ||
+        !value.ItemAt("rows").IsArray()) {
+      Refresh(false);
+      return;
+    }
+    const wxJSONValue columns = value.ItemAt("columns");
+    for (int index = 1; index < columns.Size(); ++index) {
+      wxString text = columns.ItemAt(index).AsString();
+      text.Replace("kn", "");
+      double wind = 0.0;
+      if (text.Trim(true).Trim(false).ToDouble(&wind) && wind > 0.0)
+        winds_.push_back(wind);
+    }
+    const wxJSONValue rows = value.ItemAt("rows");
+    for (int row = 0; row < rows.Size(); ++row) {
+      const wxJSONValue cells = rows.ItemAt(row);
+      if (!cells.IsArray() || cells.Size() == 0) continue;
+      double angle = 0.0;
+      if (!cells.ItemAt(0).AsString().ToDouble(&angle) || angle < 0.0 ||
+          angle > 180.0)
+        continue;
+      std::vector<std::optional<double>> values(winds_.size());
+      for (std::size_t column = 0; column < winds_.size(); ++column) {
+        if (static_cast<int>(column + 1) >= cells.Size()) break;
+        double speed = 0.0;
+        const wxString text =
+            cells.ItemAt(static_cast<int>(column + 1)).AsString();
+        if (!text.empty() && text.ToDouble(&speed) && speed >= 0.0)
+          values[column] = speed;
+      }
+      angles_.push_back(angle);
+      speeds_.push_back(std::move(values));
+    }
+    Refresh(false);
+  }
+
+ private:
+  static wxColour CurveColour(std::size_t index) {
+    static const wxColour colours[] = {
+        wxColour(24, 101, 171),  wxColour(0, 136, 122),
+        wxColour(236, 112, 20),  wxColour(178, 54, 147),
+        wxColour(93, 63, 152),   wxColour(44, 145, 48),
+        wxColour(200, 65, 58),   wxColour(34, 139, 160),
+        wxColour(137, 104, 22),  wxColour(118, 79, 143),
+        wxColour(25, 125, 95),   wxColour(209, 92, 135)};
+    return colours[index % (sizeof(colours) / sizeof(colours[0]))];
+  }
+
+  void OnPaint(wxPaintEvent&) {
+    wxAutoBufferedPaintDC dc(this);
+    dc.SetBackground(
+        wxBrush(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW)));
+    dc.Clear();
+    const wxSize size = GetClientSize();
+    if (size.x < 120 || size.y < 120) return;
+
+    dc.SetTextForeground(
+        wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
+    dc.SetFont(wxFontInfo(11).Bold());
+    dc.DrawText("Polar diagram — STW by TWA and TWS", 12, 8);
+    dc.SetFont(*wxSMALL_FONT);
+    if (winds_.empty() || angles_.empty() || speeds_.empty()) {
+      dc.DrawText("Open or create a polar to display its performance curves.",
+                  12, 40);
+      return;
+    }
+
+    double maximum_speed = 0.0;
+    for (const auto& row : speeds_)
+      for (const auto& value : row)
+        if (value) maximum_speed = std::max(maximum_speed, *value);
+    if (maximum_speed <= 0.0) {
+      dc.DrawText("The current polar contains no non-zero speed samples.", 12,
+                  40);
+      return;
+    }
+    const double scale_max = std::max(1.0, std::ceil(maximum_speed));
+    const int legend_width = size.x >= 720 ? 145 : 90;
+    const int radius =
+        std::max(45, std::min((size.x - legend_width - 28) / 2,
+                             (size.y - 62) / 2));
+    const wxPoint centre(16 + radius, 46 + radius);
+    const wxColour grid =
+        wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT);
+    dc.SetPen(wxPen(grid, 1, wxPENSTYLE_DOT));
+    dc.SetBrush(*wxTRANSPARENT_BRUSH);
+    for (int ring = 1; ring <= 4; ++ring) {
+      const int ring_radius = radius * ring / 4;
+      dc.DrawCircle(centre, ring_radius);
+      dc.DrawText(wxString::Format("%.1f", scale_max * ring / 4.0),
+                  centre.x + 3, centre.y - ring_radius - 2);
+    }
+    constexpr double kPi = 3.14159265358979323846;
+    for (int angle = 0; angle <= 180; angle += 30) {
+      const double radians = angle * kPi / 180.0;
+      const int dx =
+          static_cast<int>(std::lround(std::sin(radians) * radius));
+      const int dy =
+          static_cast<int>(std::lround(std::cos(radians) * radius));
+      dc.DrawLine(centre.x - dx, centre.y - dy, centre.x + dx,
+                  centre.y - dy);
+      if (angle % 60 == 0)
+        dc.DrawText(wxString::Format("%d°", angle), centre.x + dx + 2,
+                    centre.y - dy - 7);
+    }
+    dc.SetPen(wxPen(grid, 1));
+    dc.DrawLine(centre.x, centre.y - radius, centre.x, centre.y + radius);
+    dc.DrawText("STW kn", centre.x - 18, centre.y + radius + 6);
+
+    for (std::size_t wind = 0; wind < winds_.size(); ++wind) {
+      std::vector<wxPoint> starboard;
+      std::vector<wxPoint> port;
+      for (std::size_t row = 0;
+           row < angles_.size() && row < speeds_.size(); ++row) {
+        if (wind >= speeds_[row].size() || !speeds_[row][wind]) continue;
+        const double radians = angles_[row] * kPi / 180.0;
+        const double distance =
+            std::clamp(*speeds_[row][wind] / scale_max, 0.0, 1.0) * radius;
+        const int dx =
+            static_cast<int>(std::lround(std::sin(radians) * distance));
+        const int dy =
+            static_cast<int>(std::lround(std::cos(radians) * distance));
+        starboard.emplace_back(centre.x + dx, centre.y - dy);
+        port.emplace_back(centre.x - dx, centre.y - dy);
+      }
+      const wxColour colour = CurveColour(wind);
+      dc.SetPen(wxPen(colour, 2));
+      if (starboard.size() >= 2)
+        dc.DrawLines(static_cast<int>(starboard.size()), starboard.data());
+      if (port.size() >= 2)
+        dc.DrawLines(static_cast<int>(port.size()), port.data());
+      dc.SetBrush(wxBrush(colour));
+      for (const auto& point : starboard) dc.DrawCircle(point, 2);
+      for (const auto& point : port) dc.DrawCircle(point, 2);
+
+      const int legend_x = centre.x + radius + 18;
+      const int legend_y = 40 + static_cast<int>(wind) * 17;
+      if (legend_y + 14 < size.y) {
+        dc.SetPen(wxPen(colour, 3));
+        dc.DrawLine(legend_x, legend_y + 6, legend_x + 18, legend_y + 6);
+        dc.SetTextForeground(
+            wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
+        dc.DrawText(wxString::Format("%.1f kn", winds_[wind]),
+                    legend_x + 24, legend_y);
+      }
+    }
+  }
+
+  std::vector<double> winds_;
+  std::vector<double> angles_;
+  std::vector<std::vector<std::optional<double>>> speeds_;
+};
+
 }  // namespace
 
 SurfaceDialog::SurfaceDialog(wxWindow* parent,
@@ -140,7 +319,10 @@ SurfaceDialog::SurfaceDialog(wxWindow* parent,
       auto* page = pages.at(control.tab);
       page_sizers.at(control.tab)
           ->Add(BuildControl(page, control),
-                (control.type == "table" || control.type == "grid") ? 1 : 0,
+                (control.type == "table" || control.type == "grid" ||
+                 control.type == "polar-plot")
+                    ? 1
+                    : 0,
                 wxEXPAND | wxALL, 5);
     }
     outer_sizer->Add(notebook, 1, wxEXPAND | wxALL, 8);
@@ -151,7 +333,10 @@ SurfaceDialog::SurfaceDialog(wxWindow* parent,
     page->SetSizer(sizer);
     for (const auto& control : definition_.controls)
       sizer->Add(BuildControl(page, control),
-                 (control.type == "table" || control.type == "grid") ? 1 : 0,
+                 (control.type == "table" || control.type == "grid" ||
+                  control.type == "polar-plot")
+                     ? 1
+                     : 0,
                  wxEXPAND | wxALL, 5);
     outer_sizer->Add(page, 1, wxEXPAND | wxALL, 8);
   }
@@ -175,7 +360,8 @@ wxWindow* SurfaceDialog::BuildControl(wxWindow* parent,
   auto* row = new wxPanel(parent);
   auto* sizer = new wxBoxSizer(
       control.type == "table" || control.type == "grid" ||
-              control.type == "diagnostics"
+              control.type == "diagnostics" ||
+              control.type == "polar-plot"
           ? wxVERTICAL
           : wxHORIZONTAL);
   row->SetSizer(sizer);
@@ -264,6 +450,14 @@ wxWindow* SurfaceDialog::BuildControl(wxWindow* parent,
                             Text(control.columns[index]));
       widget = table;
       sizer->Add(widget, 1, wxEXPAND);
+      widget->Bind(wxEVT_LIST_ITEM_SELECTED,
+                   [this, id = control.id](wxListEvent& event) {
+                     if (!applying_response_)
+                       SendEvent(id, "{\"row\":" +
+                                         std::to_string(event.GetIndex()) +
+                                         "}");
+                     event.Skip();
+                   });
     } else if (control.type == "grid") {
       auto* grid = new wxGrid(row, wxID_ANY, wxDefaultPosition,
                               wxSize(-1, 300));
@@ -301,6 +495,9 @@ wxWindow* SurfaceDialog::BuildControl(wxWindow* parent,
                    event.Skip();
                  });
       widget = grid;
+      sizer->Add(widget, 1, wxEXPAND);
+    } else if (control.type == "polar-plot") {
+      widget = new PolarPlotPanel(row, Text(control.label));
       sizer->Add(widget, 1, wxEXPAND);
     } else if (control.type == "diagnostics") {
       widget = new wxTextCtrl(row, wxID_ANY, wxEmptyString,
@@ -358,7 +555,9 @@ void SurfaceDialog::ApplyResponse(const std::string& control_id,
     const auto item = controls_.find(name.ToStdString());
     if (item == controls_.end()) continue;
     const wxJSONValue value = values.ItemAt(name);
-    if (auto* grid = dynamic_cast<wxGrid*>(item->second)) {
+    if (auto* plot = dynamic_cast<PolarPlotPanel*>(item->second)) {
+      plot->Apply(value);
+    } else if (auto* grid = dynamic_cast<wxGrid*>(item->second)) {
       const wxJSONValue rows = value.ItemAt("rows");
       if (!value.IsObject() || !value.HasMember("rows") ||
           !rows.IsArray())

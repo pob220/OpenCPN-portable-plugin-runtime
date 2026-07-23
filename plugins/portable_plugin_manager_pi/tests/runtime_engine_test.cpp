@@ -1,5 +1,6 @@
 #include "runtime_engine.h"
 
+#include <array>
 #include <chrono>
 #include <atomic>
 #include <condition_variable>
@@ -7,6 +8,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <queue>
 #include <set>
@@ -495,6 +497,49 @@ int main() {
       std::lock_guard<std::mutex> lock(route_diagnostic_mutex);
       CHECK(!route_diagnostic.empty());
     }
+
+    std::vector<std::uint8_t> availability;
+    diagnostic.clear();
+    CHECK(!services.PreflightEnvironment(
+        "org.opencpn.iweather-routing", 50.0, -4.0, {1780000000},
+        &availability, &diagnostic));
+    CHECK(!diagnostic.empty());
+
+    auto blocking_request = request;
+    blocking_request.polars.push_back(
+        {"Runtime blocking test",
+         {0.0, 10.0, 20.0, 40.0},
+         {0.0, 40.0, 90.0, 160.0, 180.0},
+         {0.0, 0.0,  0.0,  0.0,  0.0, 0.0, 3.86, 5.47, 3.92, 3.76,
+          0.0, 3.98, 6.18, 5.30, 4.90, 0.0, 2.33, 3.99, 3.60, 3.33}});
+    auto invalid_blocking_request = blocking_request;
+    invalid_blocking_request.polars.front().boat_speeds_knots.front() =
+        std::numeric_limits<double>::quiet_NaN();
+    ppm::RoutingOutcome invalid_outcome;
+    diagnostic.clear();
+    CHECK(!services.CalculateRouteBlocking(
+        "org.opencpn.iweather-routing", std::move(invalid_blocking_request),
+        &invalid_outcome, &diagnostic));
+    CHECK(diagnostic == "invalid or unbounded polar grid");
+
+    std::array<bool, 2> blocking_results{true, true};
+    std::array<std::string, 2> blocking_diagnostics;
+    std::array<std::thread, 2> blocking_workers;
+    for (std::size_t index = 0; index < blocking_workers.size(); ++index) {
+      blocking_workers[index] = std::thread([&, index]() {
+        ppm::RoutingOutcome outcome;
+        blocking_results[index] = services.CalculateRouteBlocking(
+            "org.opencpn.iweather-routing", blocking_request, &outcome,
+            &blocking_diagnostics[index]);
+      });
+    }
+    for (auto& worker : blocking_workers) worker.join();
+    CHECK(!blocking_results[0]);
+    CHECK(!blocking_results[1]);
+    CHECK(!blocking_diagnostics[0].empty());
+    CHECK(!blocking_diagnostics[1].empty());
+    CHECK(services.WaitForRoute("org.opencpn.iweather-routing",
+                                std::chrono::milliseconds(0)));
 
     CHECK(services.Disable("org.opencpn.iweather-routing", &diagnostic));
     CHECK(services.Disable("org.opencpn.igrib", &diagnostic));

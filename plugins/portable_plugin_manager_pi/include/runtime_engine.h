@@ -115,6 +115,14 @@ public:
   std::string EnvironmentSummary(const std::string& package_id) const;
   bool StartRoute(const std::string& package_id, RoutingRequest request,
                   std::string* diagnostic);
+  bool CalculateRouteBlocking(const std::string& package_id,
+                              RoutingRequest request, RoutingOutcome* outcome,
+                              std::string* diagnostic);
+  bool PreflightEnvironment(const std::string& package_id, double latitude,
+                            double longitude,
+                            const std::vector<std::int64_t>& unix_times,
+                            std::vector<std::uint8_t>* availability,
+                            std::string* diagnostic);
   bool CancelRoute(const std::string& package_id);
   bool WaitForRoute(const std::string& package_id,
                     std::chrono::milliseconds timeout);

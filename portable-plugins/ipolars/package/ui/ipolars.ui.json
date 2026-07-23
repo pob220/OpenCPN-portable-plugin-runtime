@@ -4,7 +4,7 @@
   "role": "vessel-performance-editor",
   "kind": "modeless-window",
   "title": "iPolars — Portable Vessel Performance Editor",
-  "tabs": ["Polar editor", "Live data", "Boat XML", "Validation"],
+  "tabs": ["Polar diagram", "Polar editor", "Live data", "Boat XML", "Validation"],
   "menus": [
     {
       "label": "File",
@@ -17,6 +17,7 @@
     }
   ],
   "controls": [
+    {"id": "polar-plot", "tab": "Polar diagram", "type": "polar-plot", "label": "Symmetric port/starboard polar performance diagram"},
     {"id": "document-type", "tab": "Polar editor", "type": "status", "label": "Document"},
     {"id": "open", "tab": "Polar editor", "type": "file-open", "label": "Open .pol or boat .xml…", "filter": "Polar and boat files (*.pol;*.xml)|*.pol;*.xml|All files|*"},
     {"id": "save-as", "tab": "Polar editor", "type": "file-save", "label": "Save as…", "filter": "Polar and boat files (*.pol;*.xml)|*.pol;*.xml|All files|*"},
@@ -35,8 +36,25 @@
     {"id": "sample-count", "tab": "Live data", "type": "status", "label": "Retained samples"},
     {"id": "import-vdr", "tab": "Live data", "type": "file-open", "label": "Import NMEA/VDR log…", "filter": "NMEA/VDR logs (*.txt;*.log;*.vdr)|*.txt;*.log;*.vdr|All files|*"},
     {"id": "import-csv", "tab": "Live data", "type": "file-open", "label": "Import observations CSV…", "filter": "CSV and tabular logs (*.csv;*.tsv;*.txt)|*.csv;*.tsv;*.txt|All files|*"},
+    {"id": "import-logbooks", "tab": "Live data", "type": "file-open-multiple", "label": "Import multiple logbook files…", "filter": "Logbook and observation files (*.txt;*.csv;*.tsv;*.log;*.vdr)|*.txt;*.csv;*.tsv;*.log;*.vdr|All files|*"},
+    {"id": "measurement-apparent", "tab": "Live data", "type": "toggle", "label": "Manual observation uses apparent wind"},
+    {"id": "measurement-wind-speed", "tab": "Live data", "type": "number", "label": "Manual wind speed (knots)"},
+    {"id": "measurement-wind-angle", "tab": "Live data", "type": "number", "label": "Manual wind angle (degrees)"},
+    {"id": "measurement-stw", "tab": "Live data", "type": "number", "label": "Manual speed through water (knots)"},
+    {"id": "add-measurement", "tab": "Live data", "type": "button", "label": "Add manual observation"},
+    {"id": "measurement-grid", "tab": "Live data", "type": "table", "label": "Manual observations", "columns": ["TWS", "TWA", "AWS", "AWA", "STW"]},
+    {"id": "remove-measurement", "tab": "Live data", "type": "button", "label": "Remove selected observation"},
+    {"id": "clear-measurements", "tab": "Live data", "type": "button", "label": "Clear observations"},
+    {"id": "generate-from-measurements", "tab": "Live data", "type": "button", "label": "Generate measured polar"},
     {"id": "new-boat", "tab": "Boat XML", "type": "button", "label": "New boat XML"},
+    {"id": "boat-name", "tab": "Boat XML", "type": "text", "label": "Boat name"},
     {"id": "boat-grid", "tab": "Boat XML", "type": "grid", "label": "Referenced polar files", "columns": ["Polar file", "Crossover %"]},
+    {"id": "new-polar-file", "tab": "Boat XML", "type": "text", "label": "New polar file reference"},
+    {"id": "new-crossover", "tab": "Boat XML", "type": "number", "label": "New crossover allowance (%)"},
+    {"id": "add-polar-reference", "tab": "Boat XML", "type": "button", "label": "Add polar reference"},
+    {"id": "remove-polar-reference", "tab": "Boat XML", "type": "button", "label": "Remove selected reference"},
+    {"id": "move-polar-up", "tab": "Boat XML", "type": "button", "label": "Move selected reference up"},
+    {"id": "move-polar-down", "tab": "Boat XML", "type": "button", "label": "Move selected reference down"},
     {"id": "diagnostics", "tab": "Validation", "type": "diagnostics", "label": "Interoperability and validation report"},
     {"id": "refresh", "tab": "Validation", "type": "button", "label": "Validate now"}
   ]

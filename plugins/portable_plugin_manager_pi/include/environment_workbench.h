@@ -8,21 +8,19 @@
  * the portable package.
  ***************************************************************************/
 
-#ifndef GUI_PORTABLE_ENVIRONMENT_HOST_H_
-#define GUI_PORTABLE_ENVIRONMENT_HOST_H_
+#ifndef PORTABLE_PLUGIN_MANAGER_ENVIRONMENT_WORKBENCH_H
+#define PORTABLE_PLUGIN_MANAGER_ENVIRONMENT_WORKBENCH_H
 
 #include <memory>
 #include <cstdint>
 #include <functional>
-#include <mutex>
 #include <vector>
 
 #include <wx/string.h>
 
-class ocpnDC;
-class ViewPort;
+class wxDC;
 class wxWindow;
-struct ocpn_portable_runtime;
+class PlugIn_ViewPort;
 
 struct PortableEnvironmentRequest {
   double latitude = 0.0;
@@ -60,12 +58,21 @@ struct PortableEnvironmentDataset {
 
 class PortableEnvironmentHost {
 public:
+  using SurfaceEvent = std::function<bool(
+      const wxString&, const wxString&, wxString*, wxString*)>;
+  using DatasetOpened = std::function<void(const wxString&)>;
+  using ViewBounds =
+      std::function<bool(double*, double*, double*, double*)>;
+  using RefreshCanvas = std::function<void()>;
+
   explicit PortableEnvironmentHost(wxWindow* parent, const wxString& plugin_id,
                                    const wxString& package_root,
                                    const wxString& surface_resource,
                                    bool credential_access,
-                                   ocpn_portable_runtime* runtime,
-                                   std::shared_ptr<std::mutex> runtime_mutex,
+                                   SurfaceEvent surface_event,
+                                   DatasetOpened dataset_opened,
+                                   ViewBounds view_bounds,
+                                   RefreshCanvas refresh_canvas,
                                    std::function<std::vector<
                                        PortableEnvironmentPosition>()>
                                        list_waypoints,
@@ -78,7 +85,8 @@ public:
   PortableEnvironmentHost& operator=(const PortableEnvironmentHost&) = delete;
 
   bool Show(wxString* error);
-  bool Render(ocpnDC& dc, const ViewPort& viewport);
+  bool OpenDataset(const std::vector<wxString>& paths, wxString* error);
+  bool Render(wxDC& dc, PlugIn_ViewPort* viewport);
   void SetCursorPosition(double latitude, double longitude);
   bool SampleBatch(const std::vector<PortableEnvironmentRequest>& requests,
                    std::vector<PortableEnvironmentSample>* results,
@@ -104,4 +112,4 @@ private:
   std::unique_ptr<Impl> m_impl;
 };
 
-#endif  // GUI_PORTABLE_ENVIRONMENT_HOST_H_
+#endif  // PORTABLE_PLUGIN_MANAGER_ENVIRONMENT_WORKBENCH_H

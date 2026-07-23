@@ -121,6 +121,280 @@ std::string ReadSmallFile(const fs::path& path, std::size_t limit, bool* okay) {
   return result;
 }
 
+bool ValidateRoutingRequest(const RoutingRequest& request,
+                            std::string* diagnostic) {
+  if (request.polars.empty() || request.polars.size() > kRoutePolarLimit ||
+      !std::isfinite(request.parameters.start_latitude) ||
+      !std::isfinite(request.parameters.start_longitude) ||
+      !std::isfinite(request.parameters.destination_latitude) ||
+      !std::isfinite(request.parameters.destination_longitude) ||
+      std::abs(request.parameters.start_latitude) > 90.0 ||
+      std::abs(request.parameters.destination_latitude) > 90.0 ||
+      std::abs(request.parameters.start_longitude) > 180.0 ||
+      std::abs(request.parameters.destination_longitude) > 180.0) {
+    if (diagnostic) *diagnostic = "invalid route endpoints or polar count";
+    return false;
+  }
+  std::size_t total_cells = 0;
+  for (const auto& polar : request.polars) {
+    const std::size_t wind_count = polar.true_wind_speeds_knots.size();
+    const std::size_t angle_count = polar.true_wind_angles_degrees.size();
+    if (polar.identity.empty() || polar.identity.size() > 1024 ||
+        wind_count < 2 || angle_count < 2 ||
+        wind_count > kRoutePolarAxisLimit ||
+        angle_count > kRoutePolarAxisLimit ||
+        wind_count > kRoutePolarCellLimit / angle_count ||
+        polar.boat_speeds_knots.size() != wind_count * angle_count ||
+        total_cells > kRoutePolarCellLimit - wind_count * angle_count ||
+        !std::all_of(polar.true_wind_speeds_knots.begin(),
+                     polar.true_wind_speeds_knots.end(),
+                     [](double value) {
+                       return std::isfinite(value) && value >= 0.0 &&
+                              value <= 250.0;
+                     }) ||
+        !std::all_of(polar.true_wind_angles_degrees.begin(),
+                     polar.true_wind_angles_degrees.end(),
+                     [](double value) {
+                       return std::isfinite(value) && value >= 0.0 &&
+                              value <= 180.0;
+                     }) ||
+        !std::all_of(polar.boat_speeds_knots.begin(),
+                     polar.boat_speeds_knots.end(), [](double value) {
+                       return std::isfinite(value) && value >= 0.0 &&
+                              value <= 250.0;
+                     }) ||
+        std::adjacent_find(polar.true_wind_speeds_knots.begin(),
+                           polar.true_wind_speeds_knots.end(),
+                           [](double left, double right) {
+                             return right <= left;
+                           }) != polar.true_wind_speeds_knots.end() ||
+        std::adjacent_find(polar.true_wind_angles_degrees.begin(),
+                           polar.true_wind_angles_degrees.end(),
+                           [](double left, double right) {
+                             return right <= left;
+                           }) != polar.true_wind_angles_degrees.end()) {
+      if (diagnostic) *diagnostic = "invalid or unbounded polar grid";
+      return false;
+    }
+    total_cells += wind_count * angle_count;
+  }
+  return true;
+}
+
+bool ValidRoutePoint(const ocpn_portable_route_point& point) {
+  return std::isfinite(point.latitude) && std::isfinite(point.longitude) &&
+         std::abs(point.latitude) <= 90.0 &&
+         std::abs(point.longitude) <= 180.0;
+}
+
+struct RoutingExecution {
+  bool success = false;
+  RoutingOutcome outcome;
+  std::string failure;
+};
+
+RoutingExecution ExecuteRoute(ocpn_portable_runtime* replica,
+                              RoutingRequest request) noexcept {
+  RoutingExecution execution;
+  std::unique_ptr<ocpn_portable_runtime,
+                  decltype(&ocpn_portable_runtime_destroy)>
+      worker_runtime(replica, ocpn_portable_runtime_destroy);
+  try {
+    std::vector<ocpn_portable_polar_grid> polar_views;
+    polar_views.reserve(request.polars.size());
+    for (const auto& polar : request.polars) {
+      polar_views.push_back(
+          {polar.identity.data(),
+           polar.identity.size(),
+           polar.true_wind_speeds_knots.data(),
+           polar.true_wind_speeds_knots.size(),
+           polar.true_wind_angles_degrees.data(),
+           polar.true_wind_angles_degrees.size(),
+           polar.boat_speeds_knots.data(),
+           polar.boat_speeds_knots.size()});
+    }
+    request.parameters.polars = polar_views.data();
+    request.parameters.polar_count = polar_views.size();
+
+    std::vector<ocpn_portable_route_point> points(kRoutePointLimit);
+    std::vector<ocpn_portable_route_environment_point> environment(
+        kRoutePointLimit);
+    std::vector<ocpn_portable_route_point> isochrone_points(
+        kRouteInspectionPointLimit);
+    std::vector<ocpn_portable_route_line> isochrones(
+        kRouteInspectionLineLimit);
+    std::vector<ocpn_portable_route_point> trace_points(
+        kRouteInspectionPointLimit);
+    std::vector<ocpn_portable_route_line> traces(
+        kRouteInspectionLineLimit);
+    std::array<char, kErrorCapacity> error{};
+    std::array<char, kErrorCapacity> result_diagnostic{};
+    ocpn_portable_route_result result{};
+    result.points = points.data();
+    result.point_capacity = points.size();
+    result.isochrone_points = isochrone_points.data();
+    result.isochrone_point_capacity = isochrone_points.size();
+    result.isochrones = isochrones.data();
+    result.isochrone_capacity = isochrones.size();
+    result.trace_points = trace_points.data();
+    result.trace_point_capacity = trace_points.size();
+    result.traces = traces.data();
+    result.trace_capacity = traces.size();
+    result.route_environment = environment.data();
+    result.route_environment_capacity = environment.size();
+    result.diagnostic = result_diagnostic.data();
+    result.diagnostic_capacity = result_diagnostic.size();
+
+    const int status = ocpn_portable_runtime_calculate_route(
+        worker_runtime.get(), &request.parameters, &result, error.data(),
+        error.size());
+    worker_runtime.reset();
+
+    const bool bounded =
+        result.point_count <= points.size() &&
+        result.route_environment_count <= environment.size() &&
+        result.isochrone_point_count <= isochrone_points.size() &&
+        result.isochrone_count <= isochrones.size() &&
+        result.trace_point_count <= trace_points.size() &&
+        result.trace_count <= traces.size() &&
+        result.diagnostic_len < result_diagnostic.size();
+    auto valid_lines = [](const auto& lines, std::size_t line_count,
+                          std::size_t point_count) {
+      for (std::size_t index = 0; index < line_count; ++index) {
+        if (lines[index].point_offset > point_count ||
+            lines[index].point_count >
+                point_count - lines[index].point_offset) {
+          return false;
+        }
+      }
+      return true;
+    };
+    const bool valid_spans =
+        bounded &&
+        valid_lines(isochrones, result.isochrone_count,
+                    result.isochrone_point_count) &&
+        valid_lines(traces, result.trace_count, result.trace_point_count);
+    const bool valid_points =
+        bounded &&
+        std::all_of(points.begin(), points.begin() + result.point_count,
+                    ValidRoutePoint) &&
+        std::all_of(isochrone_points.begin(),
+                    isochrone_points.begin() + result.isochrone_point_count,
+                    ValidRoutePoint) &&
+        std::all_of(trace_points.begin(),
+                    trace_points.begin() + result.trace_point_count,
+                    ValidRoutePoint);
+    bool chronological = true;
+    for (std::size_t index = 1; index < result.point_count; ++index) {
+      if (points[index].unix_time <= points[index - 1].unix_time) {
+        chronological = false;
+        break;
+      }
+    }
+    const bool valid_environment =
+        bounded && result.route_environment_count == result.point_count &&
+        std::all_of(
+            environment.begin(),
+            environment.begin() + result.route_environment_count,
+            [](const auto& point) {
+              return std::isfinite(point.latitude) &&
+                     std::isfinite(point.longitude) &&
+                     std::abs(point.latitude) <= 90.0 &&
+                     std::abs(point.longitude) <= 180.0 &&
+                     std::isfinite(point.wind_u_knots) &&
+                     std::isfinite(point.wind_v_knots) &&
+                     std::isfinite(point.current_u_knots) &&
+                     std::isfinite(point.current_v_knots) &&
+                     std::isfinite(point.wave_height_metres) &&
+                     (point.available & ~std::uint8_t{3}) == 0;
+            });
+    bool environment_matches_route = valid_environment;
+    for (std::size_t index = 0;
+         environment_matches_route && index < result.point_count; ++index) {
+      environment_matches_route =
+          environment[index].latitude == points[index].latitude &&
+          environment[index].longitude == points[index].longitude &&
+          environment[index].unix_time == points[index].unix_time;
+    }
+    const std::array<double, 10> metrics = {
+        result.distance_nautical_miles, result.average_speed_knots,
+        result.maximum_speed_knots,     result.average_sog_knots,
+        result.maximum_sog_knots,       result.average_wind_knots,
+        result.maximum_wind_knots,      result.average_current_knots,
+        result.maximum_current_knots,   result.estimated_fuel_litres};
+    const bool valid_metrics =
+        std::all_of(metrics.begin(), metrics.end(), [](double value) {
+          return std::isfinite(value) && value >= 0.0;
+        }) &&
+        result.comfort_level >= 1 && result.comfort_level <= 3 &&
+        (result.metrics_available & ~std::uint8_t{3}) == 0;
+    const bool valid_success =
+        status != 0 ||
+        (result.point_count >= 2 && chronological &&
+         environment_matches_route && valid_metrics);
+    execution.success = status == 0 && bounded && valid_spans && valid_points &&
+                        valid_success;
+    if (!bounded || !valid_spans || !valid_points || !valid_success) {
+      execution.failure =
+          "routing component returned an invalid or oversized result";
+      return execution;
+    }
+
+    auto& outcome = execution.outcome;
+    outcome.points.assign(points.begin(), points.begin() + result.point_count);
+    outcome.route_environment.assign(
+        environment.begin(),
+        environment.begin() + result.route_environment_count);
+    auto copy_lines = [](const auto& source_points, const auto& source_lines,
+                         std::size_t line_count, auto* destination) {
+      destination->reserve(line_count);
+      for (std::size_t index = 0; index < line_count; ++index) {
+        const auto& line = source_lines[index];
+        RoutingInspectionLine copied;
+        copied.unix_time = line.unix_time;
+        copied.points.assign(
+            source_points.begin() + line.point_offset,
+            source_points.begin() + line.point_offset + line.point_count);
+        destination->push_back(std::move(copied));
+      }
+    };
+    copy_lines(isochrone_points, isochrones, result.isochrone_count,
+               &outcome.isochrones);
+    copy_lines(trace_points, traces, result.trace_count, &outcome.traces);
+    outcome.diagnostic.assign(result_diagnostic.data(),
+                              result.diagnostic_len);
+    outcome.distance_nautical_miles = result.distance_nautical_miles;
+    outcome.duration_seconds = result.duration_seconds;
+    outcome.states_examined = result.states_examined;
+    outcome.average_speed_knots = result.average_speed_knots;
+    outcome.maximum_speed_knots = result.maximum_speed_knots;
+    outcome.average_sog_knots = result.average_sog_knots;
+    outcome.maximum_sog_knots = result.maximum_sog_knots;
+    outcome.average_wind_knots = result.average_wind_knots;
+    outcome.maximum_wind_knots = result.maximum_wind_knots;
+    outcome.average_current_knots = result.average_current_knots;
+    outcome.maximum_current_knots = result.maximum_current_knots;
+    outcome.tacks = result.tacks;
+    outcome.motor_seconds = result.motor_seconds;
+    outcome.estimated_fuel_litres = result.estimated_fuel_litres;
+    outcome.propulsion_transitions = result.propulsion_transitions;
+    outcome.comfort_level = result.comfort_level;
+    outcome.metrics_available = result.metrics_available;
+    if (!execution.success) {
+      execution.failure =
+          error[0] ? error.data() : execution.outcome.diagnostic;
+      if (execution.failure.empty())
+        execution.failure = "route calculation failed";
+    }
+  } catch (const std::exception& exception) {
+    execution.failure =
+        std::string("routing worker failed safely: ") + exception.what();
+  } catch (...) {
+    execution.failure = "routing worker failed safely with an unknown error";
+  }
+  return execution;
+}
+
 }  // namespace
 
 class RuntimeEngine::Impl {
@@ -160,6 +434,7 @@ public:
     std::atomic_uint64_t disable_count{0};
     std::atomic_bool routing_cancelled{false};
     std::atomic_bool routing_running{false};
+    std::size_t routing_call_count = 0;
     mutable std::mutex routing_mutex;
     std::condition_variable routing_changed;
     std::thread routing_worker;
@@ -222,6 +497,14 @@ public:
   std::string EnvironmentSummary(const std::string& package_id) const;
   bool StartRoute(const std::string& package_id, RoutingRequest request,
                   std::string* diagnostic);
+  bool CalculateRouteBlocking(const std::string& package_id,
+                              RoutingRequest request, RoutingOutcome* outcome,
+                              std::string* diagnostic);
+  bool PreflightEnvironment(const std::string& package_id, double latitude,
+                            double longitude,
+                            const std::vector<std::int64_t>& unix_times,
+                            std::vector<std::uint8_t>* availability,
+                            std::string* diagnostic);
   bool CancelRoute(const std::string& package_id);
   bool WaitForRoute(const std::string& package_id,
                     std::chrono::milliseconds timeout);
@@ -632,63 +915,12 @@ bool RuntimeEngine::Impl::StartRoute(const std::string& package_id,
       *diagnostic = "weather-routing.compute permission is not granted";
     return false;
   }
-  if (request.polars.empty() || request.polars.size() > kRoutePolarLimit ||
-      !std::isfinite(request.parameters.start_latitude) ||
-      !std::isfinite(request.parameters.start_longitude) ||
-      !std::isfinite(request.parameters.destination_latitude) ||
-      !std::isfinite(request.parameters.destination_longitude) ||
-      std::abs(request.parameters.start_latitude) > 90.0 ||
-      std::abs(request.parameters.destination_latitude) > 90.0 ||
-      std::abs(request.parameters.start_longitude) > 180.0 ||
-      std::abs(request.parameters.destination_longitude) > 180.0) {
-    if (diagnostic) *diagnostic = "invalid route endpoints or polar count";
-    return false;
-  }
-  for (const auto& polar : request.polars) {
-    const std::size_t wind_count = polar.true_wind_speeds_knots.size();
-    const std::size_t angle_count = polar.true_wind_angles_degrees.size();
-    if (polar.identity.empty() || polar.identity.size() > 1024 ||
-        wind_count < 2 || angle_count < 2 ||
-        wind_count > kRoutePolarAxisLimit ||
-        angle_count > kRoutePolarAxisLimit ||
-        wind_count > kRoutePolarCellLimit / angle_count ||
-        polar.boat_speeds_knots.size() != wind_count * angle_count ||
-        !std::all_of(polar.true_wind_speeds_knots.begin(),
-                     polar.true_wind_speeds_knots.end(),
-                     [](double value) {
-                       return std::isfinite(value) && value >= 0.0 &&
-                              value <= 250.0;
-                     }) ||
-        !std::all_of(polar.true_wind_angles_degrees.begin(),
-                     polar.true_wind_angles_degrees.end(),
-                     [](double value) {
-                       return std::isfinite(value) && value >= 0.0 &&
-                              value <= 180.0;
-                     }) ||
-        !std::all_of(polar.boat_speeds_knots.begin(),
-                     polar.boat_speeds_knots.end(), [](double value) {
-                       return std::isfinite(value) && value >= 0.0 &&
-                              value <= 250.0;
-                     }) ||
-        std::adjacent_find(polar.true_wind_speeds_knots.begin(),
-                           polar.true_wind_speeds_knots.end(),
-                           [](double left, double right) {
-                             return right <= left;
-                           }) != polar.true_wind_speeds_knots.end() ||
-        std::adjacent_find(polar.true_wind_angles_degrees.begin(),
-                           polar.true_wind_angles_degrees.end(),
-                           [](double left, double right) {
-                             return right <= left;
-                           }) != polar.true_wind_angles_degrees.end()) {
-      if (diagnostic) *diagnostic = "invalid or unbounded polar grid";
-      return false;
-    }
-  }
+  if (!ValidateRoutingRequest(request, diagnostic)) return false;
 
   std::thread previous_worker;
   {
     std::lock_guard<std::mutex> route_lock(instance->routing_mutex);
-    if (instance->routing_running) {
+    if (instance->routing_running || instance->routing_call_count != 0) {
       if (diagnostic) *diagnostic = "a route calculation is already running";
       return false;
     }
@@ -716,7 +948,8 @@ bool RuntimeEngine::Impl::StartRoute(const std::string& package_id,
 
   {
     std::lock_guard<std::mutex> route_lock(instance->routing_mutex);
-    if (!instance->enabled || instance->failed || instance->routing_running) {
+    if (!instance->enabled || instance->failed || instance->routing_running ||
+        instance->routing_call_count != 0) {
       ocpn_portable_runtime_destroy(replica);
       if (diagnostic) *diagnostic = "routing package changed state";
       return false;
@@ -727,157 +960,21 @@ bool RuntimeEngine::Impl::StartRoute(const std::string& package_id,
       instance->routing_worker = std::thread([instance, replica,
                                               request = std::move(
                                                   request)]() mutable {
-      std::unique_ptr<ocpn_portable_runtime,
-                      decltype(&ocpn_portable_runtime_destroy)>
-          worker_runtime(replica, ocpn_portable_runtime_destroy);
-      RoutingOutcome outcome;
-      std::string failure;
-      bool success = false;
-      try {
-        std::vector<ocpn_portable_polar_grid> polar_views;
-        polar_views.reserve(request.polars.size());
-        for (const auto& polar : request.polars) {
-          polar_views.push_back({polar.identity.data(), polar.identity.size(),
-                                 polar.true_wind_speeds_knots.data(),
-                                 polar.true_wind_speeds_knots.size(),
-                                 polar.true_wind_angles_degrees.data(),
-                                 polar.true_wind_angles_degrees.size(),
-                                 polar.boat_speeds_knots.data(),
-                                 polar.boat_speeds_knots.size()});
+        RoutingExecution execution = ExecuteRoute(replica, std::move(request));
+        {
+          std::lock_guard<std::mutex> route_lock(instance->routing_mutex);
+          instance->routing_running = false;
         }
-        request.parameters.polars = polar_views.data();
-        request.parameters.polar_count = polar_views.size();
-
-        std::vector<ocpn_portable_route_point> points(kRoutePointLimit);
-        std::vector<ocpn_portable_route_environment_point> environment(
-            kRoutePointLimit);
-        std::vector<ocpn_portable_route_point> isochrone_points(
-            kRouteInspectionPointLimit);
-        std::vector<ocpn_portable_route_line> isochrones(
-            kRouteInspectionLineLimit);
-        std::vector<ocpn_portable_route_point> trace_points(
-            kRouteInspectionPointLimit);
-        std::vector<ocpn_portable_route_line> traces(kRouteInspectionLineLimit);
-        std::array<char, kErrorCapacity> error{};
-        std::array<char, kErrorCapacity> result_diagnostic{};
-        ocpn_portable_route_result result{};
-        result.points = points.data();
-        result.point_capacity = points.size();
-        result.isochrone_points = isochrone_points.data();
-        result.isochrone_point_capacity = isochrone_points.size();
-        result.isochrones = isochrones.data();
-        result.isochrone_capacity = isochrones.size();
-        result.trace_points = trace_points.data();
-        result.trace_point_capacity = trace_points.size();
-        result.traces = traces.data();
-        result.trace_capacity = traces.size();
-        result.route_environment = environment.data();
-        result.route_environment_capacity = environment.size();
-        result.diagnostic = result_diagnostic.data();
-        result.diagnostic_capacity = result_diagnostic.size();
-
-        const int status = ocpn_portable_runtime_calculate_route(
-            worker_runtime.get(), &request.parameters, &result, error.data(),
-            error.size());
-        worker_runtime.reset();
-
-        const bool bounded =
-            result.point_count <= points.size() &&
-            result.route_environment_count <= environment.size() &&
-            result.isochrone_point_count <= isochrone_points.size() &&
-            result.isochrone_count <= isochrones.size() &&
-            result.trace_point_count <= trace_points.size() &&
-            result.trace_count <= traces.size() &&
-            result.diagnostic_len < result_diagnostic.size();
-        auto valid_lines = [](const auto& lines, std::size_t line_count,
-                              std::size_t point_count) {
-          for (std::size_t index = 0; index < line_count; ++index) {
-            if (lines[index].point_offset > point_count ||
-                lines[index].point_count >
-                    point_count - lines[index].point_offset) {
-              return false;
-            }
-          }
-          return true;
-        };
-        const bool valid_spans =
-            bounded &&
-            valid_lines(isochrones, result.isochrone_count,
-                        result.isochrone_point_count) &&
-            valid_lines(traces, result.trace_count, result.trace_point_count);
-        success = status == 0 && bounded && valid_spans;
-        if (!bounded || !valid_spans) {
-          failure =
-              "routing component returned an invalid or oversized "
-              "result";
-        } else {
-          outcome.points.assign(points.begin(),
-                                points.begin() + result.point_count);
-          outcome.route_environment.assign(
-              environment.begin(),
-              environment.begin() + result.route_environment_count);
-          auto copy_lines = [](const auto& source_points,
-                               const auto& source_lines, std::size_t line_count,
-                               auto* destination) {
-            destination->reserve(line_count);
-            for (std::size_t index = 0; index < line_count; ++index) {
-              const auto& line = source_lines[index];
-              RoutingInspectionLine copied;
-              copied.unix_time = line.unix_time;
-              copied.points.assign(
-                  source_points.begin() + line.point_offset,
-                  source_points.begin() + line.point_offset + line.point_count);
-              destination->push_back(std::move(copied));
-            }
-          };
-          copy_lines(isochrone_points, isochrones, result.isochrone_count,
-                     &outcome.isochrones);
-          copy_lines(trace_points, traces, result.trace_count, &outcome.traces);
-          outcome.diagnostic.assign(result_diagnostic.data(),
-                                    result.diagnostic_len);
-          outcome.distance_nautical_miles = result.distance_nautical_miles;
-          outcome.duration_seconds = result.duration_seconds;
-          outcome.states_examined = result.states_examined;
-          outcome.average_speed_knots = result.average_speed_knots;
-          outcome.maximum_speed_knots = result.maximum_speed_knots;
-          outcome.average_sog_knots = result.average_sog_knots;
-          outcome.maximum_sog_knots = result.maximum_sog_knots;
-          outcome.average_wind_knots = result.average_wind_knots;
-          outcome.maximum_wind_knots = result.maximum_wind_knots;
-          outcome.average_current_knots = result.average_current_knots;
-          outcome.maximum_current_knots = result.maximum_current_knots;
-          outcome.tacks = result.tacks;
-          outcome.motor_seconds = result.motor_seconds;
-          outcome.estimated_fuel_litres = result.estimated_fuel_litres;
-          outcome.propulsion_transitions = result.propulsion_transitions;
-          outcome.comfort_level = result.comfort_level;
-          outcome.metrics_available = result.metrics_available;
-          if (!success) {
-            failure = error[0] ? error.data() : outcome.diagnostic;
-            if (failure.empty()) failure = "route calculation failed";
-          }
+        instance->routing_changed.notify_all();
+        const auto completed = instance->owner->routing_completed;
+        if (completed) {
+          const std::string id = instance->id;
+          instance->owner->Publish(
+              [completed, id, execution = std::move(execution)]() mutable {
+                completed(id, execution.success,
+                          std::move(execution.outcome), execution.failure);
+              });
         }
-      } catch (const std::exception& exception) {
-        failure =
-            std::string("routing worker failed safely: ") + exception.what();
-      } catch (...) {
-        failure = "routing worker failed safely with an unknown error";
-      }
-
-      {
-        std::lock_guard<std::mutex> route_lock(instance->routing_mutex);
-        instance->routing_running = false;
-      }
-      instance->routing_changed.notify_all();
-      const auto completed = instance->owner->routing_completed;
-      if (completed) {
-        const std::string id = instance->id;
-        instance->owner->Publish([completed, id, success,
-                                  outcome = std::move(outcome),
-                                  failure = std::move(failure)]() mutable {
-          completed(id, success, std::move(outcome), failure);
-        });
-      }
       });
     } catch (const std::exception& exception) {
       instance->routing_running = false;
@@ -891,11 +988,120 @@ bool RuntimeEngine::Impl::StartRoute(const std::string& package_id,
   return true;
 }
 
+bool RuntimeEngine::Impl::CalculateRouteBlocking(
+    const std::string& package_id, RoutingRequest request,
+    RoutingOutcome* outcome, std::string* diagnostic) {
+  Instance* instance = Find(package_id);
+  if (!outcome || !instance || !instance->enabled || instance->failed ||
+      !instance->runtime ||
+      !Permitted(*instance, "weather-routing.compute")) {
+    if (diagnostic)
+      *diagnostic =
+          !outcome ? "routing output is required"
+                   : "routing package is unavailable or request is invalid";
+    return false;
+  }
+  if (!ValidateRoutingRequest(request, diagnostic)) return false;
+
+  {
+    std::lock_guard<std::mutex> route_lock(instance->routing_mutex);
+    if (instance->routing_running) {
+      if (diagnostic) *diagnostic = "a route calculation is already running";
+      return false;
+    }
+    if (instance->routing_call_count == 0)
+      instance->routing_cancelled = false;
+    if (instance->routing_cancelled || !instance->enabled ||
+        instance->failed) {
+      if (diagnostic) *diagnostic = "route calculation was cancelled";
+      return false;
+    }
+    ++instance->routing_call_count;
+  }
+  auto finish_call = [instance]() {
+    {
+      std::lock_guard<std::mutex> route_lock(instance->routing_mutex);
+      if (instance->routing_call_count != 0)
+        --instance->routing_call_count;
+    }
+    instance->routing_changed.notify_all();
+  };
+
+  std::array<char, kErrorCapacity> clone_error{};
+  ocpn_portable_runtime* replica = nullptr;
+  {
+    std::lock_guard<std::mutex> runtime_lock(instance->runtime_mutex);
+    if (instance->enabled && !instance->failed && instance->runtime) {
+      replica = ocpn_portable_runtime_clone_compute(
+          instance->runtime, clone_error.data(), clone_error.size());
+    }
+  }
+  if (!replica) {
+    finish_call();
+    if (diagnostic)
+      *diagnostic = clone_error[0] ? clone_error.data()
+                                   : "could not create routing worker";
+    return false;
+  }
+
+  RoutingExecution execution = ExecuteRoute(replica, std::move(request));
+  finish_call();
+  *outcome = std::move(execution.outcome);
+  if (diagnostic) *diagnostic = execution.failure;
+  return execution.success;
+}
+
+bool RuntimeEngine::Impl::PreflightEnvironment(
+    const std::string& package_id, double latitude, double longitude,
+    const std::vector<std::int64_t>& unix_times,
+    std::vector<std::uint8_t>* availability, std::string* diagnostic) {
+  Instance* consumer = Find(package_id);
+  if (!availability || !consumer || !consumer->enabled || consumer->failed ||
+      !Permitted(*consumer, "environment.consume") ||
+      !std::isfinite(latitude) || !std::isfinite(longitude) ||
+      std::abs(latitude) > 90.0 || std::abs(longitude) > 180.0 ||
+      unix_times.empty() || unix_times.size() > 256) {
+    if (diagnostic) *diagnostic = "invalid environmental preflight request";
+    return false;
+  }
+  const Instance* provider =
+      CompatibleProvider(*consumer, "org.opencpn.environment.provider");
+  if (!provider || !provider->environment_provider) {
+    if (diagnostic)
+      *diagnostic = "no compatible environmental provider is enabled";
+    return false;
+  }
+  std::vector<EnvironmentRequest> requests;
+  requests.reserve(unix_times.size());
+  for (const std::int64_t unix_time : unix_times)
+    requests.push_back({latitude, longitude, unix_time});
+  std::vector<EnvironmentSample> samples;
+  if (!provider->environment_provider->SampleBatch(
+          requests, &samples,
+          [consumer]() {
+            return !consumer->enabled || consumer->failed ||
+                   consumer->routing_cancelled || !consumer->owner ||
+                   consumer->owner->stopped;
+          },
+          diagnostic) ||
+      samples.size() != unix_times.size()) {
+    if (diagnostic && diagnostic->empty())
+      *diagnostic = "environmental provider returned an invalid batch";
+    return false;
+  }
+  availability->clear();
+  availability->reserve(samples.size());
+  for (const auto& sample : samples)
+    availability->push_back(static_cast<std::uint8_t>(sample.available));
+  return true;
+}
+
 bool RuntimeEngine::Impl::CancelRoute(const std::string& package_id) {
   Instance* instance = Find(package_id);
   if (!instance) return false;
   instance->routing_cancelled = true;
-  return instance->routing_running;
+  std::lock_guard<std::mutex> route_lock(instance->routing_mutex);
+  return instance->routing_running || instance->routing_call_count != 0;
 }
 
 bool RuntimeEngine::Impl::WaitForRoute(const std::string& package_id,
@@ -907,7 +1113,10 @@ bool RuntimeEngine::Impl::WaitForRoute(const std::string& package_id,
     std::unique_lock<std::mutex> route_lock(instance->routing_mutex);
     if (!instance->routing_changed.wait_for(
             route_lock, timeout,
-            [instance]() { return !instance->routing_running; })) {
+            [instance]() {
+              return !instance->routing_running &&
+                     instance->routing_call_count == 0;
+            })) {
       return false;
     }
     if (instance->routing_worker.joinable())
@@ -1620,7 +1829,8 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
     instance->requested_permissions.insert(permission);
   }
   const std::set<std::string> known_services = {
-      "org.opencpn.environment.provider"};
+      "org.opencpn.environment.provider",
+      "org.opencpn.vessel-performance.editor"};
   auto read_services = [&](const char* member, const char* version_member,
                            std::map<std::string, std::string>* services) {
     if (!manifest.HasMember(member)) return true;
@@ -1750,7 +1960,11 @@ bool RuntimeEngine::Impl::LoadInstalled(bool developer_mode) {
   bool okay = true;
   for (const auto& root : roots) {
     std::string diagnostic;
-    if (!LoadRoot(root, developer_mode, false, &diagnostic)) okay = false;
+    if (!LoadRoot(root, developer_mode, false, &diagnostic)) {
+      okay = false;
+      wxLogWarning("PPM package-static-load-failed root=%s diagnostic=%s",
+                   root.string(), diagnostic);
+    }
   }
   state_changed();
   return okay;
@@ -2158,6 +2372,22 @@ bool RuntimeEngine::StartRoute(const std::string& package_id,
                                RoutingRequest request,
                                std::string* diagnostic) {
   return impl_->StartRoute(package_id, std::move(request), diagnostic);
+}
+
+bool RuntimeEngine::CalculateRouteBlocking(const std::string& package_id,
+                                           RoutingRequest request,
+                                           RoutingOutcome* outcome,
+                                           std::string* diagnostic) {
+  return impl_->CalculateRouteBlocking(package_id, std::move(request), outcome,
+                                       diagnostic);
+}
+
+bool RuntimeEngine::PreflightEnvironment(
+    const std::string& package_id, double latitude, double longitude,
+    const std::vector<std::int64_t>& unix_times,
+    std::vector<std::uint8_t>* availability, std::string* diagnostic) {
+  return impl_->PreflightEnvironment(package_id, latitude, longitude,
+                                     unix_times, availability, diagnostic);
 }
 
 bool RuntimeEngine::CancelRoute(const std::string& package_id) {

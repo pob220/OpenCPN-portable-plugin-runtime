@@ -1,13 +1,19 @@
 #include "portable_plugin_manager_pi.h"
 
 #include <wx/app.h>
+#include <wx/dcmemory.h>
 #include <wx/filename.h>
+#include <wx/image.h>
 #include <wx/log.h>
 #include <wx/msgdlg.h>
 #include <wx/utils.h>
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <new>
 #include <utility>
+#include <vector>
 
 #if defined(__WXOSX__)
 #include <OpenGL/gl.h>
@@ -16,7 +22,9 @@
 #endif
 
 #include "manager_dialog.h"
+#include "environment_workbench.h"
 #include "surface_dialog.h"
+#include "weather_routing_host.h"
 
 #ifndef DECL_EXP
 #ifdef __WXMSW__
@@ -99,6 +107,112 @@ wxString ResolveManagerIcon() {
   return wxFileName::FileExists(icon) ? icon : wxString();
 }
 
+/**
+ * Render the wxDC-based environmental workbench into the current desktop
+ * OpenGL canvas without using any OpenCPN-private drawing classes.
+ *
+ * Stock desktop plugins (including grib_pi) use glDrawPixels for this
+ * compatibility path.  A keyed background is used as a defensive fallback
+ * because wxGTK backends differ in how reliably they preserve alpha while
+ * drawing into a 32-bit wxBitmap.  Pixels whose alpha survives retain it;
+ * drawn pixels with a zero alpha are promoted to opaque.
+ */
+bool RenderEnvironmentWithDesktopGl(PortableEnvironmentHost* workbench,
+                                    PlugIn_ViewPort* viewport) {
+  if (!workbench || !viewport || viewport->pix_width <= 0 ||
+      viewport->pix_height <= 0)
+    return false;
+
+  // This compatibility path holds one wxBitmap, one wxImage and one RGBA
+  // upload.  Keep its worst-case transient allocation reasonable on modest
+  // navigation computers while still covering a 5K display.
+  constexpr int kMaximumCanvasDimension = 8'192;
+  constexpr std::uint64_t kMaximumCanvasPixels = 16'777'216;
+  const std::uint64_t width =
+      static_cast<std::uint64_t>(viewport->pix_width);
+  const std::uint64_t height =
+      static_cast<std::uint64_t>(viewport->pix_height);
+  if (viewport->pix_width > kMaximumCanvasDimension ||
+      viewport->pix_height > kMaximumCanvasDimension ||
+      width * height > kMaximumCanvasPixels) {
+    wxLogWarning(
+        "PPM iGRIB OpenGL overlay skipped: canvas %dx%d exceeds the "
+        "bounded compatibility surface",
+        viewport->pix_width, viewport->pix_height);
+    return false;
+  }
+
+  // This deliberately unusual colour is only a transparency key.  The
+  // environmental palette never emits it, and exact equality prevents nearby
+  // anti-aliased colours from being discarded.
+  constexpr unsigned char kKeyRed = 1;
+  constexpr unsigned char kKeyGreen = 2;
+  constexpr unsigned char kKeyBlue = 3;
+  wxBitmap bitmap(viewport->pix_width, viewport->pix_height, 32);
+  if (!bitmap.IsOk()) return false;
+  bitmap.UseAlpha();
+  wxMemoryDC memory_dc;
+  memory_dc.SelectObject(bitmap);
+  memory_dc.SetBackground(
+      wxBrush(wxColour(kKeyRed, kKeyGreen, kKeyBlue, 255)));
+  memory_dc.Clear();
+  const bool rendered = workbench->Render(memory_dc, viewport);
+  memory_dc.SelectObject(wxNullBitmap);
+  if (!rendered) return false;
+
+  wxImage image = bitmap.ConvertToImage();
+  if (!image.IsOk() || !image.GetData()) return false;
+  const unsigned char* rgb = image.GetData();
+  const unsigned char* source_alpha =
+      image.HasAlpha() ? image.GetAlpha() : nullptr;
+  std::vector<unsigned char> rgba;
+  try {
+    rgba.resize(width * height * 4);
+  } catch (const std::bad_alloc&) {
+    wxLogWarning(
+        "PPM iGRIB OpenGL overlay skipped: could not allocate the bounded "
+        "RGBA compatibility surface");
+    return false;
+  }
+  for (std::uint64_t index = 0; index < width * height; ++index) {
+    const unsigned char red = rgb[index * 3];
+    const unsigned char green = rgb[index * 3 + 1];
+    const unsigned char blue = rgb[index * 3 + 2];
+    const bool background =
+        red == kKeyRed && green == kKeyGreen && blue == kKeyBlue;
+    rgba[index * 4] = red;
+    rgba[index * 4 + 1] = green;
+    rgba[index * 4 + 2] = blue;
+    if (background) {
+      rgba[index * 4 + 3] = 0;
+    } else {
+      const unsigned char alpha = source_alpha ? source_alpha[index] : 255;
+      rgba[index * 4 + 3] = alpha == 0 ? 255 : alpha;
+    }
+  }
+
+  glPushAttrib(GL_COLOR_BUFFER_BIT | GL_CURRENT_BIT | GL_ENABLE_BIT |
+               GL_PIXEL_MODE_BIT);
+  glDisable(GL_DEPTH_TEST);
+  glDisable(GL_TEXTURE_2D);
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  glColor4f(1.0F, 1.0F, 1.0F, 1.0F);
+  GLint previous_unpack_alignment = 4;
+  glGetIntegerv(GL_UNPACK_ALIGNMENT, &previous_unpack_alignment);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  // OpenCPN's desktop overlay projection is top-left based.  The negative
+  // pixel zoom is the same orientation used by stock grib_pi.
+  glRasterPos2i(0, 0);
+  glPixelZoom(1.0F, -1.0F);
+  glDrawPixels(viewport->pix_width, viewport->pix_height, GL_RGBA,
+               GL_UNSIGNED_BYTE, rgba.data());
+  glPixelZoom(1.0F, 1.0F);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, previous_unpack_alignment);
+  glPopAttrib();
+  return true;
+}
+
 }  // namespace
 
 extern "C" DECL_EXP opencpn_plugin* create_pi(void* manager) {
@@ -121,7 +235,7 @@ int PortablePluginManagerPi::Init() {
     wxLogWarning("PPM event=duplicate-init");
     return WANTS_TOOLBAR_CALLBACK | INSTALLS_TOOLBAR_TOOL | WANTS_CONFIG |
            WANTS_NMEA_EVENTS | WANTS_NMEA_SENTENCES | WANTS_OVERLAY_CALLBACK |
-           WANTS_OPENGL_OVERLAY_CALLBACK;
+           WANTS_OPENGL_OVERLAY_CALLBACK | WANTS_CURSOR_LATLON;
   }
   initialized_ = true;
   storage_root_ = ResolveStorageRoot();
@@ -178,6 +292,15 @@ int PortablePluginManagerPi::Init() {
         ApplySurfaceResponse(package_id, surface_id, control_id, state_json,
                              diagnostic);
       });
+  runtime_engine_->SetRoutingProgressCallback(
+      [this](const std::string& package_id, std::uint8_t percent,
+             const std::string& message) {
+        if (package_id == "org.opencpn.iweather-routing" &&
+            weather_routing_host_) {
+          weather_routing_host_->ReportProgress(
+              percent, wxString::FromUTF8(message));
+        }
+      });
   if (!runtime_engine_->LoadInstalled(developer_mode_)) {
     wxLogWarning(
         "PPM event=runtime-engine-load-completed-with-package-failures");
@@ -195,9 +318,37 @@ int PortablePluginManagerPi::Init() {
           package.id, diagnostic, wxString::FromUTF8(runtime_diagnostic));
     }
   }
+  if (developer_mode_) {
+    wxString startup_action;
+    if (wxGetEnv("OCPN_PPM_DEVELOPER_STARTUP_ACTION", &startup_action) &&
+        !startup_action.empty()) {
+      const int separator = startup_action.Find(':');
+      if (separator > 0 && separator + 1 < static_cast<int>(startup_action.size())) {
+        const std::string package_id =
+            startup_action.Left(separator).ToStdString();
+        const std::string action_id =
+            startup_action.Mid(separator + 1).ToStdString();
+        wxTheApp->CallAfter([this, package_id, action_id]() {
+          if (!initialized_ || !runtime_engine_ ||
+              !runtime_engine_->HandleAction(package_id, action_id)) {
+            wxLogWarning(
+                "PPM developer startup action failed package=%s action=%s",
+                package_id, action_id);
+          } else {
+            wxLogMessage(
+                "PPM developer startup action invoked package=%s action=%s",
+                package_id, action_id);
+          }
+        });
+      } else {
+        wxLogWarning(
+            "PPM ignored malformed OCPN_PPM_DEVELOPER_STARTUP_ACTION");
+      }
+    }
+  }
   return WANTS_TOOLBAR_CALLBACK | INSTALLS_TOOLBAR_TOOL | WANTS_CONFIG |
          WANTS_NMEA_EVENTS | WANTS_NMEA_SENTENCES | WANTS_OVERLAY_CALLBACK |
-         WANTS_OPENGL_OVERLAY_CALLBACK;
+         WANTS_OPENGL_OVERLAY_CALLBACK | WANTS_CURSOR_LATLON;
 }
 
 bool PortablePluginManagerPi::DeInit() {
@@ -207,13 +358,21 @@ bool PortablePluginManagerPi::DeInit() {
     manager_dialog_->Destroy();
     manager_dialog_.release();
   }
+  if (weather_routing_host_) {
+    weather_routing_host_->Shutdown();
+    weather_routing_host_.reset();
+  }
+  if (environment_workbench_) {
+    environment_workbench_->Shutdown();
+    environment_workbench_.reset();
+  }
+  surface_dialogs_.clear();
   if (runtime_engine_) {
     runtime_engine_->Shutdown();
     if (ui_callback_gate_) ui_callback_gate_->store(false);
     runtime_engine_.reset();
   }
   ui_callback_gate_.reset();
-  surface_dialogs_.clear();
   permission_store_.reset();
   package_store_.reset();
   RemoveAllActions();
@@ -351,6 +510,171 @@ void PortablePluginManagerPi::SetManagerStatus(const wxString& status) {
 
 void PortablePluginManagerPi::OpenPackageSurface(
     const std::string& package_id, const DeclarativeSurface& surface) {
+  if (package_id == "org.opencpn.igrib" &&
+      surface.id == "environment.viewer") {
+    if (!environment_workbench_) {
+      const wxString separator = wxFileName::GetPathSeparator();
+      const wxString package_root =
+          storage_root_ + separator + "packages" + separator +
+          wxString::FromUTF8(package_id);
+      bool credential_access = false;
+      if (package_store_) {
+        for (const auto& package : package_store_->Installed()) {
+          if (package.id == package_id) {
+            credential_access =
+                std::find(package.permissions.begin(),
+                          package.permissions.end(),
+                          "credentials.provider") != package.permissions.end();
+            break;
+          }
+        }
+      }
+      environment_workbench_ = std::make_unique<PortableEnvironmentHost>(
+          nullptr, wxString::FromUTF8(package_id), package_root,
+          "ui/igrib-viewer.ui.json", credential_access,
+          [this, package_id](const wxString& control_id,
+                             const wxString& value_json, wxString* error,
+                             wxString* accepted_state) {
+            if (accepted_state) accepted_state->clear();
+            const wxScopedCharBuffer control = control_id.utf8_str();
+            const wxScopedCharBuffer value = value_json.utf8_str();
+            if (!control || !value || !runtime_engine_ ||
+                !runtime_engine_->HandleSurfaceEvent(
+                    package_id, "environment.viewer",
+                    std::string(control.data(), control.length()),
+                    std::string(value.data(), value.length()))) {
+              if (error)
+                *error =
+                    "portable environmental controller is unavailable";
+              return false;
+            }
+            return true;
+          },
+          [this, package_id](const wxString& path) {
+            const wxScopedCharBuffer value = path.utf8_str();
+            if (!value || !runtime_engine_ ||
+                !runtime_engine_->SelectEnvironmentDataset(
+                    package_id,
+                    {std::string(value.data(), value.length())})) {
+              SetManagerStatus(
+                  "iGRIB opened the dataset, but the typed routing provider "
+                  "could not adopt it.");
+            }
+          },
+          [this](double* west, double* south, double* east, double* north) {
+            if (!view_bounds_valid_ || !west || !south || !east || !north)
+              return false;
+            *west = view_west_;
+            *south = view_south_;
+            *east = view_east_;
+            *north = view_north_;
+            return true;
+          },
+          []() { RequestRefresh(GetOCPNCanvasWindow()); },
+          [this]() {
+            std::vector<PortableEnvironmentPosition> result;
+            for (const auto& waypoint : ListWaypoints()) {
+              result.push_back({waypoint.id, waypoint.name, waypoint.latitude,
+                                waypoint.longitude});
+            }
+            return result;
+          },
+          [this](PortableEnvironmentPosition* position) {
+            if (!position || !vessel_position_valid_) return false;
+            *position = {"opencpn:vessel", "Current boat position",
+                         vessel_latitude_, vessel_longitude_};
+            return true;
+          });
+    }
+    wxString error;
+    if (!environment_workbench_->Show(&error)) {
+      SetManagerStatus("Could not open iGRIB: " + error);
+      return;
+    }
+    if (developer_mode_ && !developer_smoke_fixture_opened_) {
+      wxString fixture;
+      if (wxGetEnv("OCPN_PPM_IGRIB_SMOKE_FIXTURE", &fixture) &&
+          !fixture.empty()) {
+        developer_smoke_fixture_opened_ = true;
+        if (!environment_workbench_->OpenDataset({fixture}, &error)) {
+          SetManagerStatus("Could not open the iGRIB smoke fixture: " + error);
+        } else {
+          wxLogMessage("PPM iGRIB developer smoke fixture requested: %s",
+                       fixture);
+        }
+      }
+    }
+    return;
+  }
+
+  if (package_id == "org.opencpn.iweather-routing" &&
+      surface.id == "routing.workbench") {
+    if (!weather_routing_host_) {
+      const wxString separator = wxFileName::GetPathSeparator();
+      const wxString package_root =
+          storage_root_ + separator + "packages" + separator +
+          wxString::FromUTF8(package_id);
+      weather_routing_host_ = std::make_unique<PortableWeatherRoutingHost>(
+          nullptr, GetOCPNConfigObject(),
+          [this, package_id](RoutingRequest request, RoutingOutcome* outcome,
+                             std::string* diagnostic) {
+            return runtime_engine_ &&
+                   runtime_engine_->CalculateRouteBlocking(
+                       package_id, std::move(request), outcome, diagnostic);
+          },
+          [this, package_id]() {
+            if (runtime_engine_) runtime_engine_->CancelRoute(package_id);
+          },
+          package_root, wxString::FromUTF8(package_id),
+          "ui/iweather-routing.ui.json",
+          [this]() {
+            return runtime_engine_
+                       ? wxString::FromUTF8(runtime_engine_->EnvironmentSummary(
+                             "org.opencpn.igrib"))
+                       : wxString("Environmental provider unavailable");
+          },
+          [this]() { return ListWaypoints(); },
+          [this]() { return ListRoutes(); },
+          [this](const wxString& name,
+                 const std::vector<PortableNavigationPosition>& points,
+                 wxString* diagnostic) {
+            return CreateOpenCpnRoute(name, points, diagnostic);
+          },
+          [this](PortableNavigationPosition* position) {
+            if (!position || !vessel_position_valid_) return false;
+            *position = {"vessel", "Vessel position", vessel_latitude_,
+                         vessel_longitude_};
+            return true;
+          },
+          [this](PortableNavigationPosition* position) {
+            if (!position || !cursor_position_valid_) return false;
+            *position = {"cursor", "Chart cursor", cursor_latitude_,
+                         cursor_longitude_};
+            return true;
+          },
+          [](std::int64_t*) { return false; },
+          [this, package_id](
+              double latitude, double longitude,
+              const std::vector<std::int64_t>& unix_times,
+              std::vector<std::uint8_t>* availability, wxString* diagnostic) {
+            std::string error;
+            const bool okay =
+                runtime_engine_ &&
+                runtime_engine_->PreflightEnvironment(
+                    package_id, latitude, longitude, unix_times, availability,
+                    &error);
+            if (!okay && diagnostic) *diagnostic = wxString::FromUTF8(error);
+            return okay;
+          },
+          vessel_position_valid_ ? vessel_latitude_ : 0.0,
+          vessel_position_valid_ ? vessel_longitude_ : 0.0);
+    }
+    wxString error;
+    if (!weather_routing_host_->Show(&error))
+      SetManagerStatus("Could not open iWeatherRouting: " + error);
+    return;
+  }
+
   const std::string key = package_id + "\n" + surface.id;
   const auto existing = surface_dialogs_.find(key);
   if (existing != surface_dialogs_.end()) {
@@ -441,6 +765,15 @@ void PortablePluginManagerPi::ApplySurfaceResponse(
 
 void PortablePluginManagerPi::ClosePackageSurfaces(
     const std::string& package_id) {
+  if (package_id == "org.opencpn.igrib" && environment_workbench_) {
+    environment_workbench_->Shutdown();
+    environment_workbench_.reset();
+  }
+  if (package_id == "org.opencpn.iweather-routing" &&
+      weather_routing_host_) {
+    weather_routing_host_->Shutdown();
+    weather_routing_host_.reset();
+  }
   const std::string prefix = package_id + "\n";
   for (auto item = surface_dialogs_.begin(); item != surface_dialogs_.end();) {
     if (item->first.rfind(prefix, 0) == 0)
@@ -783,7 +1116,115 @@ void PortablePluginManagerPi::RevokePackagePermissions(
 }
 
 void PortablePluginManagerPi::SetPositionFixEx(PlugIn_Position_Fix_Ex& fix) {
+  vessel_position_valid_ =
+      std::isfinite(fix.Lat) && std::isfinite(fix.Lon) &&
+      fix.Lat >= -90.0 && fix.Lat <= 90.0 &&
+      fix.Lon >= -180.0 && fix.Lon <= 180.0;
+  if (vessel_position_valid_) {
+    vessel_latitude_ = fix.Lat;
+    vessel_longitude_ = fix.Lon;
+  }
   if (runtime_engine_) runtime_engine_->SetPositionFix(fix);
+}
+
+void PortablePluginManagerPi::SetCursorLatLon(double latitude,
+                                               double longitude) {
+  cursor_position_valid_ =
+      std::isfinite(latitude) && std::isfinite(longitude) &&
+      latitude >= -90.0 && latitude <= 90.0 &&
+      longitude >= -180.0 && longitude <= 180.0;
+  if (cursor_position_valid_) {
+    cursor_latitude_ = latitude;
+    cursor_longitude_ = longitude;
+    if (environment_workbench_)
+      environment_workbench_->SetCursorPosition(latitude, longitude);
+  }
+}
+
+std::vector<PortableNavigationPosition>
+PortablePluginManagerPi::ListWaypoints() const {
+  std::vector<PortableNavigationPosition> result;
+  const wxArrayString identifiers = GetWaypointGUIDArray();
+  result.reserve(std::min<std::size_t>(identifiers.size(), 50'000));
+  for (std::size_t index = 0;
+       index < identifiers.size() && result.size() < 50'000; ++index) {
+    const auto waypoint = GetWaypoint_Plugin(identifiers[index]);
+    if (!waypoint || !std::isfinite(waypoint->m_lat) ||
+        !std::isfinite(waypoint->m_lon) ||
+        std::abs(waypoint->m_lat) > 90.0 ||
+        std::abs(waypoint->m_lon) > 180.0) {
+      continue;
+    }
+    result.push_back(
+        {waypoint->m_GUID,
+         waypoint->m_MarkName.empty() ? waypoint->m_GUID
+                                      : waypoint->m_MarkName,
+         waypoint->m_lat, waypoint->m_lon});
+  }
+  return result;
+}
+
+std::vector<PortableNavigationRoute>
+PortablePluginManagerPi::ListRoutes() const {
+  std::vector<PortableNavigationRoute> result;
+  const wxArrayString identifiers = GetRouteGUIDArray();
+  result.reserve(std::min<std::size_t>(identifiers.size(), 10'000));
+  for (std::size_t index = 0;
+       index < identifiers.size() && result.size() < 10'000; ++index) {
+    const auto route = GetRoute_Plugin(identifiers[index]);
+    if (!route || !route->pWaypointList) continue;
+    PortableNavigationRoute copied;
+    copied.id = route->m_GUID;
+    copied.name =
+        route->m_NameString.empty() ? route->m_GUID : route->m_NameString;
+    for (auto node = route->pWaypointList->GetFirst();
+         node && copied.points.size() < 20'000; node = node->GetNext()) {
+      const PlugIn_Waypoint* waypoint = node->GetData();
+      if (!waypoint || !std::isfinite(waypoint->m_lat) ||
+          !std::isfinite(waypoint->m_lon) ||
+          std::abs(waypoint->m_lat) > 90.0 ||
+          std::abs(waypoint->m_lon) > 180.0) {
+        continue;
+      }
+      copied.points.push_back(
+          {waypoint->m_GUID,
+           waypoint->m_MarkName.empty() ? waypoint->m_GUID
+                                        : waypoint->m_MarkName,
+           waypoint->m_lat, waypoint->m_lon});
+    }
+    if (copied.points.size() >= 2) result.push_back(std::move(copied));
+  }
+  return result;
+}
+
+bool PortablePluginManagerPi::CreateOpenCpnRoute(
+    const wxString& name,
+    const std::vector<PortableNavigationPosition>& points,
+    wxString* diagnostic) {
+  if (points.size() < 2 || points.size() > 2'000) {
+    if (diagnostic)
+      *diagnostic = "A route must contain between 2 and 2,000 points.";
+    return false;
+  }
+  PlugIn_Route route;
+  route.m_NameString = name;
+  route.m_StartString = points.front().name;
+  route.m_EndString = points.back().name;
+  for (const auto& point : points) {
+    if (!std::isfinite(point.latitude) || !std::isfinite(point.longitude) ||
+        std::abs(point.latitude) > 90.0 ||
+        std::abs(point.longitude) > 180.0) {
+      if (diagnostic) *diagnostic = "The route contains an invalid position.";
+      return false;
+    }
+    route.pWaypointList->Append(new PlugIn_Waypoint(
+        point.latitude, point.longitude, "circle", point.name));
+  }
+  if (!AddPlugInRoute(&route, true)) {
+    if (diagnostic) *diagnostic = "OpenCPN rejected the generated route.";
+    return false;
+  }
+  return true;
 }
 
 void PortablePluginManagerPi::SetNMEASentence(wxString& sentence) {
@@ -797,7 +1238,23 @@ void PortablePluginManagerPi::SetNMEASentence(wxString& sentence) {
 bool PortablePluginManagerPi::RenderOverlayMultiCanvas(
     wxDC& dc, PlugIn_ViewPort* viewport, int, int priority) {
   if (!runtime_engine_ || !viewport || priority != 0) return false;
-  bool rendered = false;
+  view_bounds_valid_ =
+      viewport->bValid && std::isfinite(viewport->lon_min) &&
+      std::isfinite(viewport->lat_min) && std::isfinite(viewport->lon_max) &&
+      std::isfinite(viewport->lat_max) && viewport->lon_min < viewport->lon_max &&
+      viewport->lat_min < viewport->lat_max;
+  if (view_bounds_valid_) {
+    view_west_ = viewport->lon_min;
+    view_south_ = viewport->lat_min;
+    view_east_ = viewport->lon_max;
+    view_north_ = viewport->lat_max;
+  }
+  bool rendered =
+      weather_routing_host_ &&
+      weather_routing_host_->Render(dc, viewport);
+  const bool environment_rendered =
+      environment_workbench_ && environment_workbench_->Render(dc, viewport);
+  rendered = environment_rendered || rendered;
   for (const auto& scene : runtime_engine_->Scenes()) {
     if (scene.points.size() < 2) continue;
     dc.SetPen(wxPen(wxColour(scene.red, scene.green, scene.blue, scene.alpha),
@@ -814,13 +1271,39 @@ bool PortablePluginManagerPi::RenderOverlayMultiCanvas(
     }
     rendered = true;
   }
+  if (developer_mode_ && environment_rendered &&
+      !developer_software_overlay_logged_) {
+    wxString dataset_error;
+    if (environment_workbench_->AcquireDataset(&dataset_error)) {
+      developer_software_overlay_logged_ = true;
+      wxLogMessage(
+          "PPM event=environment-overlay-rendered path=wxdc dataset=ready "
+          "renderer-compatible=software,vulkan");
+    }
+  }
   return rendered;
 }
 
 bool PortablePluginManagerPi::RenderGLOverlayMultiCanvas(
     wxGLContext*, PlugIn_ViewPort* viewport, int, int priority) {
   if (!runtime_engine_ || !viewport || priority != 0) return false;
-  bool rendered = false;
+  view_bounds_valid_ =
+      viewport->bValid && std::isfinite(viewport->lon_min) &&
+      std::isfinite(viewport->lat_min) && std::isfinite(viewport->lon_max) &&
+      std::isfinite(viewport->lat_max) && viewport->lon_min < viewport->lon_max &&
+      viewport->lat_min < viewport->lat_max;
+  if (view_bounds_valid_) {
+    view_west_ = viewport->lon_min;
+    view_south_ = viewport->lat_min;
+    view_east_ = viewport->lon_max;
+    view_north_ = viewport->lat_max;
+  }
+  bool rendered =
+      weather_routing_host_ && weather_routing_host_->RenderGL(viewport);
+  const bool environment_rendered =
+      environment_workbench_ &&
+      RenderEnvironmentWithDesktopGl(environment_workbench_.get(), viewport);
+  rendered = environment_rendered || rendered;
   for (const auto& scene : runtime_engine_->Scenes()) {
     if (scene.points.size() < 2) continue;
     glPushAttrib(GL_COLOR_BUFFER_BIT | GL_ENABLE_BIT | GL_LINE_BIT);
@@ -833,11 +1316,21 @@ bool PortablePluginManagerPi::RenderGLOverlayMultiCanvas(
     for (const auto& point : scene.points) {
       wxPoint pixel;
       GetCanvasPixLL(viewport, &pixel, point.latitude, point.longitude);
-      glVertex2i(pixel.x, viewport->pix_height - pixel.y);
+      glVertex2i(pixel.x, pixel.y);
     }
     glEnd();
     glPopAttrib();
     rendered = true;
+  }
+  if (developer_mode_ && environment_rendered &&
+      !developer_opengl_overlay_logged_) {
+    wxString dataset_error;
+    if (environment_workbench_->AcquireDataset(&dataset_error)) {
+      developer_opengl_overlay_logged_ = true;
+      wxLogMessage(
+          "PPM event=environment-overlay-rendered "
+          "path=opengl-compatibility dataset=ready");
+    }
   }
   return rendered;
 }

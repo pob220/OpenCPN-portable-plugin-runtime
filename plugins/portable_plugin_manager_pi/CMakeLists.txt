@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(portable_plugin_manager_pi VERSION 0.1.0 LANGUAGES CXX)
+project(portable_plugin_manager_pi VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,6 +14,8 @@ set(PPM_PLUGIN_LIBRARY_DIR "lib/opencpn" CACHE STRING
 set(PPM_PLUGIN_DATA_DIR
     "share/opencpn/plugins/portable_plugin_manager_pi" CACHE STRING
     "Install directory for Portable Plugin Manager data")
+set(PPM_DEVELOPMENT_TRUST_KEY "" CACHE FILEPATH
+    "Optional local public key used for isolated development package trust")
 
 if(NOT EXISTS "${OPENCPN_SOURCE_DIR}/include/ocpn_plugin.h")
   message(FATAL_ERROR
@@ -59,20 +61,27 @@ add_dependencies(ppm_runtime_bridge ppm_runtime_bridge_build)
 
 add_subdirectory("${OPENCPN_SOURCE_DIR}/libs/wxJSON"
                  "${CMAKE_CURRENT_BINARY_DIR}/wxjson")
+add_subdirectory("${OPENCPN_SOURCE_DIR}/libs/pugixml"
+                 "${CMAKE_CURRENT_BINARY_DIR}/pugixml")
 
 add_library(portable_plugin_manager_pi MODULE
   src/action_registry.cpp
   src/declarative_ui.cpp
   src/environment_service.cpp
   src/environment_provider.cpp
+  src/environment_workbench.cpp
   src/job_scheduler.cpp
   src/manager_dialog.cpp
   src/package_store.cpp
   src/permission_store.cpp
+  src/portable_departure_time.cpp
+  src/portable_polar.cpp
   src/portable_plugin_manager_pi.cpp
+  src/portable_ui_menu.cpp
   src/runtime_engine.cpp
   src/serial_executor.cpp
   src/surface_dialog.cpp
+  src/weather_routing_host.cpp
 )
 set_target_properties(portable_plugin_manager_pi PROPERTIES
   PREFIX "lib"
@@ -81,6 +90,7 @@ set_target_properties(portable_plugin_manager_pi PROPERTIES
 target_include_directories(portable_plugin_manager_pi PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/include"
   "${OPENCPN_SOURCE_DIR}/include"
+  "${OPENCPN_SOURCE_DIR}/libs/picosha2"
   "${PPM_RUNTIME_SOURCE_DIR}/bridge/include"
 )
 target_compile_definitions(portable_plugin_manager_pi PRIVATE
@@ -95,6 +105,7 @@ endif()
 target_link_libraries(portable_plugin_manager_pi PRIVATE
   ${wxWidgets_LIBRARIES}
   ocpn::wxjson
+  ocpn::pugixml
   LibArchive::LibArchive
   OpenSSL::Crypto
   ppm_runtime_bridge
@@ -107,8 +118,24 @@ endif()
 install(TARGETS portable_plugin_manager_pi
   LIBRARY DESTINATION "${PPM_PLUGIN_LIBRARY_DIR}"
   RUNTIME DESTINATION "${PPM_PLUGIN_LIBRARY_DIR}")
-install(DIRECTORY data/
-  DESTINATION "${PPM_PLUGIN_DATA_DIR}")
+if(PPM_DEVELOPMENT_TRUST_KEY)
+  if(NOT EXISTS "${PPM_DEVELOPMENT_TRUST_KEY}")
+    message(FATAL_ERROR
+      "PPM_DEVELOPMENT_TRUST_KEY does not exist: ${PPM_DEVELOPMENT_TRUST_KEY}")
+  endif()
+  install(DIRECTORY data/
+    DESTINATION "${PPM_PLUGIN_DATA_DIR}"
+    PATTERN "trust" EXCLUDE)
+  install(FILES "${PPM_DEVELOPMENT_TRUST_KEY}"
+    DESTINATION "${PPM_PLUGIN_DATA_DIR}/trust"
+    RENAME "org.opencpn.development.igrib-2026.pem")
+  install(FILES "${PPM_DEVELOPMENT_TRUST_KEY}"
+    DESTINATION "${PPM_PLUGIN_DATA_DIR}/trust"
+    RENAME "org.opencpn.development.portable-reference-2026.pem")
+else()
+  install(DIRECTORY data/
+    DESTINATION "${PPM_PLUGIN_DATA_DIR}")
+endif()
 
 include(CTest)
 if(BUILD_TESTING)
@@ -147,6 +174,58 @@ if(BUILD_TESTING)
       -Wall -Wextra -Wpedantic)
   endif()
   add_test(NAME ppm_declarative_ui COMMAND ppm_declarative_ui_test)
+
+  add_executable(ppm_portable_polar_test
+    src/portable_polar.cpp
+    "${PPM_RUNTIME_SOURCE_DIR}/tests/portable_polar_test.cpp"
+  )
+  target_include_directories(ppm_portable_polar_test PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include"
+    "${OPENCPN_SOURCE_DIR}/libs/pugixml")
+  target_link_libraries(ppm_portable_polar_test PRIVATE ocpn::pugixml)
+  if(MSVC)
+    target_compile_options(ppm_portable_polar_test PRIVATE /W4)
+  else()
+    target_compile_options(ppm_portable_polar_test PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
+  add_test(NAME ppm_portable_polar COMMAND ppm_portable_polar_test
+    "${OPENCPN_SOURCE_DIR}/portable-plugins/iweather-routing/package/Nicholson35_Mk1_cruising_realistic.pol")
+
+  add_executable(ppm_portable_departure_time_test
+    src/portable_departure_time.cpp
+    "${PPM_RUNTIME_SOURCE_DIR}/tests/portable_departure_time_test.cpp"
+  )
+  target_include_directories(ppm_portable_departure_time_test PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include")
+  target_link_libraries(ppm_portable_departure_time_test PRIVATE
+    ${wxWidgets_LIBRARIES})
+  if(MSVC)
+    target_compile_options(ppm_portable_departure_time_test PRIVATE /W4)
+  else()
+    target_compile_options(ppm_portable_departure_time_test PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
+  add_test(NAME ppm_portable_departure_time
+           COMMAND ppm_portable_departure_time_test)
+
+  add_executable(ppm_portable_ui_menu_test
+    src/portable_ui_menu.cpp
+    "${PPM_RUNTIME_SOURCE_DIR}/tests/portable_ui_menu_test.cpp"
+  )
+  target_include_directories(ppm_portable_ui_menu_test PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include"
+    "${OPENCPN_SOURCE_DIR}/libs/wxJSON/include")
+  target_link_libraries(ppm_portable_ui_menu_test PRIVATE
+    ${wxWidgets_LIBRARIES} ocpn::wxjson)
+  if(MSVC)
+    target_compile_options(ppm_portable_ui_menu_test PRIVATE /W4)
+  else()
+    target_compile_options(ppm_portable_ui_menu_test PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
+  add_test(NAME ppm_portable_ui_menu COMMAND ppm_portable_ui_menu_test
+    "${OPENCPN_SOURCE_DIR}/portable-plugins/iweather-routing/package/iweather-routing.ui.json")
 
   add_executable(ppm_environment_service_test
     src/environment_service.cpp
@@ -291,6 +370,41 @@ if(BUILD_TESTING)
       -Wall -Wextra -Wpedantic)
   endif()
 
+  add_executable(ppm_routing_probe
+    src/declarative_ui.cpp
+    src/environment_provider.cpp
+    src/environment_service.cpp
+    src/job_scheduler.cpp
+    src/permission_store.cpp
+    src/portable_polar.cpp
+    src/runtime_engine.cpp
+    src/serial_executor.cpp
+    tools/routing_probe.cpp
+  )
+  target_include_directories(ppm_routing_probe PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include"
+    "${OPENCPN_SOURCE_DIR}/include"
+    "${OPENCPN_SOURCE_DIR}/libs/pugixml"
+    "${OPENCPN_SOURCE_DIR}/libs/wxJSON/include"
+    "${PPM_RUNTIME_SOURCE_DIR}/bridge/include")
+  target_link_libraries(ppm_routing_probe PRIVATE
+    ${wxWidgets_LIBRARIES}
+    ocpn::pugixml
+    ocpn::wxjson
+    OpenSSL::Crypto
+    ppm_runtime_bridge
+    Threads::Threads
+    ${CMAKE_DL_LIBS})
+  if(UNIX AND NOT APPLE)
+    target_link_libraries(ppm_routing_probe PRIVATE m)
+  endif()
+  if(MSVC)
+    target_compile_options(ppm_routing_probe PRIVATE /W4)
+  else()
+    target_compile_options(ppm_routing_probe PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
+
   set(PPM_TEST_IGRIB_TARGET_DIR
       "${CMAKE_CURRENT_BINARY_DIR}/ppm-test-igrib-target")
   set(PPM_TEST_IGRIB_WASM
@@ -406,6 +520,7 @@ if(BUILD_TESTING)
     src/environment_service.cpp
     src/job_scheduler.cpp
     src/permission_store.cpp
+    src/portable_polar.cpp
     src/runtime_engine.cpp
     src/serial_executor.cpp
     tests/ipolars_runtime_test.cpp
@@ -414,13 +529,16 @@ if(BUILD_TESTING)
   target_include_directories(ppm_ipolars_runtime_test PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/include"
     "${OPENCPN_SOURCE_DIR}/include"
+    "${OPENCPN_SOURCE_DIR}/libs/pugixml"
     "${OPENCPN_SOURCE_DIR}/libs/wxJSON/include"
     "${PPM_RUNTIME_SOURCE_DIR}/bridge/include")
   target_compile_definitions(ppm_ipolars_runtime_test PRIVATE
     PPM_TEST_IPOLARS_WASM="${PPM_TEST_IPOLARS_WASM}"
-    PPM_TEST_IPOLARS_UI="${OPENCPN_SOURCE_DIR}/portable-plugins/ipolars/package/ui/ipolars.ui.json")
+    PPM_TEST_IPOLARS_UI="${OPENCPN_SOURCE_DIR}/portable-plugins/ipolars/package/ui/ipolars.ui.json"
+    PPM_TEST_IPOLARS_MANIFEST="${OPENCPN_SOURCE_DIR}/portable-plugins/ipolars/package/manifest.json")
   target_link_libraries(ppm_ipolars_runtime_test PRIVATE
     ${wxWidgets_LIBRARIES}
+    ocpn::pugixml
     ocpn::wxjson
     OpenSSL::Crypto
     ppm_runtime_bridge

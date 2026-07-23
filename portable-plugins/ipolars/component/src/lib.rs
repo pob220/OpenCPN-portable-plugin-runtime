@@ -24,6 +24,15 @@ struct BoatPolar {
 }
 
 #[derive(Clone)]
+struct Measurement {
+    tws: f64,
+    twa: f64,
+    aws: f64,
+    awa: f64,
+    stw: f64,
+}
+
+#[derive(Clone)]
 enum Document {
     Polar(Polar),
     Boat {
@@ -39,6 +48,15 @@ struct Editor {
     new_angle: String,
     new_wind: String,
     selected: (usize, usize),
+    selected_boat: usize,
+    new_polar_file: String,
+    new_crossover: String,
+    measurement_apparent: bool,
+    measurement_wind_speed: String,
+    measurement_wind_angle: String,
+    measurement_stw: String,
+    selected_measurement: usize,
+    measurements: Vec<Measurement>,
     dirty: bool,
     capturing: bool,
     last_twa: Option<f64>,
@@ -55,6 +73,15 @@ static EDITOR: Mutex<Editor> = Mutex::new(Editor {
     new_angle: String::new(),
     new_wind: String::new(),
     selected: (0, 0),
+    selected_boat: 0,
+    new_polar_file: String::new(),
+    new_crossover: String::new(),
+    measurement_apparent: false,
+    measurement_wind_speed: String::new(),
+    measurement_wind_angle: String::new(),
+    measurement_stw: String::new(),
+    selected_measurement: 0,
+    measurements: Vec::new(),
     dirty: false,
     capturing: false,
     last_twa: None,
@@ -113,6 +140,11 @@ fn fields(line: &str) -> Vec<&str> {
     }
 }
 
+fn is_matrix_header(value: &str) -> bool {
+    let normalized = value.trim().replace('\\', "/").to_ascii_lowercase();
+    normalized == "twa/tws" || normalized == "twa"
+}
+
 fn number(value: &str, label: &str) -> Result<f64, String> {
     let value = value
         .trim()
@@ -152,6 +184,61 @@ fn validate(p: &Polar) -> Result<String, String> {
     ))
 }
 
+fn parse_expedition(lines: &[&str]) -> Result<Polar, String> {
+    let mut samples = Vec::new();
+    let mut winds = Vec::new();
+    let mut angles = Vec::new();
+    for (line_index, line) in lines.iter().enumerate() {
+        let row = fields(line);
+        if row.len() < 5 || row.len() % 2 == 0 {
+            return Err(format!(
+                "Invalid Expedition row {}; expected TWS followed by TWA/STW pairs.",
+                line_index + 1
+            ));
+        }
+        let wind = number(row[0], "TWS")?;
+        if !(0.0..=200.0).contains(&wind) || wind == 0.0 {
+            return Err("Expedition TWS values must lie in (0, 200] kn.".into());
+        }
+        winds.push(wind);
+        for pair in row[1..].chunks_exact(2) {
+            let angle = number(pair[0], "TWA")?;
+            let speed = number(pair[1], "boat speed")?;
+            if !(0.0..=180.0).contains(&angle) || !(0.0..=100.0).contains(&speed) {
+                return Err(
+                    "Expedition TWA/STW values must lie in [0, 180]° and [0, 100] kn.".into(),
+                );
+            }
+            angles.push(angle);
+            samples.push((wind, angle, speed));
+        }
+    }
+    winds.sort_by(f64::total_cmp);
+    winds.dedup_by(|left, right| *left == *right);
+    angles.sort_by(f64::total_cmp);
+    angles.dedup_by(|left, right| *left == *right);
+    let mut speeds = vec![vec![None; winds.len()]; angles.len()];
+    for (wind, angle, speed) in samples {
+        let column = winds
+            .iter()
+            .position(|value| *value == wind)
+            .ok_or("Internal Expedition TWS indexing failure.")?;
+        let row = angles
+            .iter()
+            .position(|value| *value == angle)
+            .ok_or("Internal Expedition TWA indexing failure.")?;
+        speeds[row][column] = Some(speed);
+    }
+    let polar = Polar {
+        name: "Imported Expedition polar".into(),
+        tws: winds,
+        twa: angles,
+        speeds,
+    };
+    validate(&polar)?;
+    Ok(polar)
+}
+
 fn parse_polar(text: &str) -> Result<Polar, String> {
     let mut lines: Vec<&str> = text
         .lines()
@@ -161,10 +248,19 @@ fn parse_polar(text: &str) -> Result<Polar, String> {
     if lines.is_empty() {
         return Err("The polar file is empty.".into());
     }
+    const EXPEDITION_MINIMUM_FIELDS: usize = 5;
+    if lines.iter().all(|line| {
+        let row = fields(line);
+        row.len() >= EXPEDITION_MINIMUM_FIELDS
+            && row.len() % 2 == 1
+            && row.iter().all(|value| value.parse::<f64>().is_ok())
+    }) {
+        return parse_expedition(&lines);
+    }
     let mut name = "Imported polar".to_string();
     if !fields(lines[0])
         .first()
-        .is_some_and(|v| v.eq_ignore_ascii_case("twa/tws") || v.eq_ignore_ascii_case("twa"))
+        .is_some_and(|value| is_matrix_header(value))
     {
         name = lines.remove(0).to_string();
     }
@@ -172,12 +268,10 @@ fn parse_polar(text: &str) -> Result<Polar, String> {
         return Err("The TWA/TWS header is missing.".into());
     }
     let header = fields(lines.remove(0));
-    if header.len() < 3
-        || !(header[0].eq_ignore_ascii_case("twa/tws") || header[0].eq_ignore_ascii_case("twa"))
-    {
+    if header.len() < 3 || !is_matrix_header(header[0]) {
         return Err("Expected TWA/TWS followed by wind-speed columns.".into());
     }
-    let tws = header[1..]
+    let raw_tws = header[1..]
         .iter()
         .map(|v| number(v, "TWS"))
         .collect::<Result<Vec<_>, _>>()?;
@@ -185,12 +279,12 @@ fn parse_polar(text: &str) -> Result<Polar, String> {
     let mut speeds = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         let row = fields(line);
-        if row.is_empty() || row.len() > tws.len() + 1 {
+        if row.is_empty() || row.len() > raw_tws.len() + 1 {
             return Err(format!("Invalid row {}.", index + 2));
         }
         twa.push(number(row[0], "TWA")?);
         let mut values = Vec::new();
-        for column in 0..tws.len() {
+        for column in 0..raw_tws.len() {
             let cell = row.get(column + 1).copied().unwrap_or("");
             values.push(if cell.is_empty() {
                 None
@@ -203,6 +297,26 @@ fn parse_polar(text: &str) -> Result<Polar, String> {
             });
         }
         speeds.push(values);
+    }
+    // polar_pi's OCPN/QTVlm and MaxSea exports add zero-wind and 60-knot
+    // boundary columns populated entirely by zero placeholders.  They are
+    // formatting sentinels rather than measured performance columns.
+    let retained_columns = raw_tws
+        .iter()
+        .enumerate()
+        .filter_map(|(column, wind)| {
+            let has_performance = speeds
+                .iter()
+                .any(|row| row[column].is_some_and(|speed| speed > 0.0));
+            (*wind > 0.0 && has_performance).then_some(column)
+        })
+        .collect::<Vec<_>>();
+    let tws = retained_columns
+        .iter()
+        .map(|column| raw_tws[*column])
+        .collect::<Vec<_>>();
+    for row in &mut speeds {
+        *row = retained_columns.iter().map(|column| row[*column]).collect();
     }
     let polar = Polar {
         name,
@@ -238,12 +352,14 @@ fn parse_boat(text: &str) -> Result<Document, String> {
         let end = rest.find('>').ok_or("Incomplete Polar element.")?;
         let tag = &rest[..=end];
         if let Some(file) = attr(tag, "FileName") {
-            polars.push(BoatPolar {
-                file,
-                crossover: attr(tag, "CrossOverPercentage")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0.0),
-            });
+            let crossover = attr(tag, "CrossOverPercentage")
+                .map(|value| number(&value, "CrossOverPercentage"))
+                .transpose()?
+                .unwrap_or(0.0);
+            if !(0.0..=100.0).contains(&crossover) {
+                return Err("CrossOverPercentage must lie in [0, 100].".into());
+            }
+            polars.push(BoatPolar { file, crossover });
         }
         rest = &rest[end + 1..];
     }
@@ -358,6 +474,40 @@ fn json_string(value: &str) -> Result<String, String> {
     }
 }
 
+fn json_string_array(value: &str) -> Result<Vec<String>, String> {
+    let value = value.trim();
+    if !value.starts_with('[') || !value.ends_with(']') {
+        return Err("Expected a bounded array of opaque file grants.".into());
+    }
+    let body = &value[1..value.len() - 1];
+    let mut values = Vec::new();
+    let mut start = None;
+    let mut escaped = false;
+    for (index, character) in body.char_indices() {
+        if let Some(quote) = start {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                values.push(json_string(&body[quote..=index])?);
+                start = None;
+                if values.len() > 64 {
+                    return Err("At most 64 logbook files may be imported at once.".into());
+                }
+            }
+        } else if character == '"' {
+            start = Some(index);
+        } else if character != ',' && !character.is_whitespace() {
+            return Err("Malformed opaque file-grant array.".into());
+        }
+    }
+    if start.is_some() || escaped || values.is_empty() {
+        return Err("Malformed or empty opaque file-grant array.".into());
+    }
+    Ok(values)
+}
+
 fn integer(value: &str, name: &str) -> Result<usize, String> {
     let needle = format!("\"{name}\":");
     let start = value
@@ -387,18 +537,33 @@ fn response(editor: &Editor) -> String {
     match editor.document.as_ref() {
         Some(Document::Polar(p)) => {
             controls.push_str("\"document-type\":\"Polar performance table\",");
-            controls.push_str("\"polar-grid\":{\"columns\":[\"TWA / TWS\"");
-            for wind in &p.tws { controls.push(','); controls.push_str(&json(&format!("{} kn", fmt(*wind)))); }
-            controls.push_str("],\"rows\":[");
-            for (r, angle) in p.twa.iter().enumerate() {
-                if r > 0 { controls.push(','); } controls.push('['); controls.push_str(&json(&fmt(*angle)));
-                for speed in &p.speeds[r] { controls.push(','); controls.push_str(&json(&speed.map(fmt).unwrap_or_default())); }
-                controls.push(']');
+            let mut table = String::from("{\"columns\":[\"TWA / TWS\"");
+            // Build one immutable value for both the editable matrix and the
+            // host-rendered diagram, keeping the portable UI state canonical.
+            for wind in &p.tws {
+                table.push(',');
+                table.push_str(&json(&format!("{} kn", fmt(*wind))));
             }
-            controls.push_str("]},\"boat-grid\":{\"columns\":[\"Polar file\",\"Crossover %\"],\"rows\":[]},");
+            table.push_str("],\"rows\":[");
+            for (r, angle) in p.twa.iter().enumerate() {
+                if r > 0 { table.push(','); }
+                table.push('[');
+                table.push_str(&json(&fmt(*angle)));
+                for speed in &p.speeds[r] {
+                    table.push(',');
+                    table.push_str(&json(&speed.map(fmt).unwrap_or_default()));
+                }
+                table.push(']');
+            }
+            table.push_str("]}");
+            let _ = write!(
+                controls,
+                "\"polar-grid\":{table},\"polar-plot\":{table},\"boat-name\":\"\",\"boat-grid\":{{\"columns\":[\"Polar file\",\"Crossover %\"],\"rows\":[]}},"
+            );
         }
-        Some(Document::Boat { polars, .. }) => {
-            controls.push_str("\"document-type\":\"OpenCPN Weather Routing boat XML\",\"polar-grid\":{\"columns\":[\"TWA / TWS\"],\"rows\":[]},");
+        Some(Document::Boat { name, polars }) => {
+            controls.push_str("\"document-type\":\"OpenCPN Weather Routing boat XML\",\"polar-grid\":{\"columns\":[\"TWA / TWS\"],\"rows\":[]},\"polar-plot\":{\"columns\":[\"TWA / TWS\"],\"rows\":[]},");
+            let _ = write!(controls, "\"boat-name\":{},", json(name));
             controls.push_str("\"boat-grid\":{\"columns\":[\"Polar file\",\"Crossover %\"],\"rows\":[");
             for (i, p) in polars.iter().enumerate() {
                 if i > 0 { controls.push(','); }
@@ -406,14 +571,40 @@ fn response(editor: &Editor) -> String {
             }
             controls.push_str("]},");
         }
-        None => controls.push_str("\"document-type\":\"No document\",\"polar-grid\":{\"columns\":[\"TWA / TWS\"],\"rows\":[]},\"boat-grid\":{\"columns\":[\"Polar file\",\"Crossover %\"],\"rows\":[]},"),
+        None => controls.push_str("\"document-type\":\"No document\",\"polar-grid\":{\"columns\":[\"TWA / TWS\"],\"rows\":[]},\"polar-plot\":{\"columns\":[\"TWA / TWS\"],\"rows\":[]},\"boat-name\":\"\",\"boat-grid\":{\"columns\":[\"Polar file\",\"Crossover %\"],\"rows\":[]},"),
     }
+    controls.push_str("\"measurement-grid\":{\"rows\":[");
+    for (index, measurement) in editor.measurements.iter().enumerate() {
+        if index > 0 {
+            controls.push(',');
+        }
+        let _ = write!(
+            controls,
+            "[{},{},{},{},{}]",
+            json(&fmt(measurement.tws)),
+            json(&fmt(measurement.twa)),
+            json(&fmt(measurement.aws)),
+            json(&fmt(measurement.awa)),
+            json(&fmt(measurement.stw))
+        );
+    }
+    controls.push_str("]},");
     let _ = write!(
         controls,
-        "\"diagnostics\":{},\"new-angle\":{},\"new-wind\":{},\"capture\":{},\"capture-status\":{},\"sample-count\":{}",
+        "\"diagnostics\":{},\"new-angle\":{},\"new-wind\":{},\"new-polar-file\":{},\"new-crossover\":{},\"measurement-apparent\":{},\"measurement-wind-speed\":{},\"measurement-wind-angle\":{},\"measurement-stw\":{},\"capture\":{},\"capture-status\":{},\"sample-count\":{}",
         json(&editor.diagnostics),
         json(&editor.new_angle),
         json(&editor.new_wind),
+        json(&editor.new_polar_file),
+        json(&editor.new_crossover),
+        if editor.measurement_apparent {
+            "true"
+        } else {
+            "false"
+        },
+        json(&editor.measurement_wind_speed),
+        json(&editor.measurement_wind_angle),
+        json(&editor.measurement_stw),
         if editor.capturing { "true" } else { "false" },
         json(&if editor.capturing {
             format!(
@@ -536,6 +727,31 @@ fn true_from_apparent(aws: f64, awa: f64, stw: f64) -> Option<(f64, f64)> {
     Some((tws, twa))
 }
 
+fn apparent_from_true(tws: f64, twa: f64, stw: f64) -> Option<(f64, f64)> {
+    if !tws.is_finite()
+        || !twa.is_finite()
+        || !stw.is_finite()
+        || tws < 0.0
+        || stw < 0.0
+        || !(0.0..=180.0).contains(&twa)
+    {
+        return None;
+    }
+    let angle = twa.to_radians();
+    let apparent_forward = -tws * angle.cos() - stw;
+    let apparent_starboard = -tws * angle.sin();
+    let aws = apparent_forward.hypot(apparent_starboard);
+    if aws < 1e-9 {
+        return Some((0.0, 0.0));
+    }
+    let awa = (-apparent_starboard)
+        .atan2(-apparent_forward)
+        .to_degrees()
+        .abs()
+        .clamp(0.0, 180.0);
+    Some((aws, awa))
+}
+
 fn nmea_speed(value: f64, unit: &str) -> Option<f64> {
     match unit {
         "N" => Some(value),
@@ -595,8 +811,7 @@ fn navigation_sample(editor: &mut Editor, sentence: &str) {
     retain_sample(editor, twa, tws, stw);
 }
 
-fn import_nmea_log(editor: &mut Editor, text: &str) -> (usize, usize) {
-    begin_capture(editor);
+fn append_nmea_log(editor: &mut Editor, text: &str) -> (usize, usize) {
     editor.capturing = true;
     let mut valid = 0;
     let mut rejected = 0;
@@ -617,6 +832,11 @@ fn import_nmea_log(editor: &mut Editor, text: &str) -> (usize, usize) {
     (valid, rejected)
 }
 
+fn import_nmea_log(editor: &mut Editor, text: &str) -> (usize, usize) {
+    begin_capture(editor);
+    append_nmea_log(editor, text)
+}
+
 fn csv_fields(line: &str) -> Vec<&str> {
     if line.contains('\t') {
         line.split('\t').map(str::trim).collect()
@@ -627,7 +847,7 @@ fn csv_fields(line: &str) -> Vec<&str> {
     }
 }
 
-fn import_csv(editor: &mut Editor, text: &str) -> Result<(usize, usize), String> {
+fn append_csv(editor: &mut Editor, text: &str) -> Result<(usize, usize), String> {
     let mut lines = text.lines().filter(|line| !line.trim().is_empty());
     let header = csv_fields(lines.next().ok_or("Observation CSV is empty.")?);
     let names = header
@@ -656,7 +876,6 @@ fn import_csv(editor: &mut Editor, text: &str) -> Result<(usize, usize), String>
             "1" | "true" | "yes" | "on"
         )
     };
-    begin_capture(editor);
     let mut accepted = 0;
     let mut rejected = 0;
     for line in lines.take(1_000_000) {
@@ -699,6 +918,110 @@ fn import_csv(editor: &mut Editor, text: &str) -> Result<(usize, usize), String>
     Ok((accepted, rejected))
 }
 
+fn import_csv(editor: &mut Editor, text: &str) -> Result<(usize, usize), String> {
+    begin_capture(editor);
+    append_csv(editor, text)
+}
+
+fn logbook_number(value: &str) -> Option<f64> {
+    let normalized = value.trim().replace(',', ".");
+    let token = normalized
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches(|character: char| {
+            !(character.is_ascii_digit()
+                || character == '.'
+                || character == '-'
+                || character == '+'
+                || character == 'e'
+                || character == 'E')
+        });
+    token
+        .parse::<f64>()
+        .ok()
+        .filter(|number| number.is_finite())
+}
+
+fn append_logbook_konni(editor: &mut Editor, text: &str) -> (usize, usize) {
+    let mut accepted = 0;
+    let mut rejected = 0;
+    for line in text.lines().take(1_000_000) {
+        let fields = line.split('\t').map(str::trim).collect::<Vec<_>>();
+        if fields.len() <= 20 || fields.get(7).copied() != Some("S") {
+            rejected += 1;
+            continue;
+        }
+        let engine_running = [28_usize, 40_usize].iter().any(|index| {
+            fields
+                .get(*index)
+                .is_some_and(|value| !value.is_empty() && !value.contains("00:00"))
+        });
+        if engine_running {
+            rejected += 1;
+            continue;
+        }
+        let Some(stw) = fields.get(15).and_then(|value| logbook_number(value)) else {
+            rejected += 1;
+            continue;
+        };
+        let Some(direction_field) = fields.get(19) else {
+            rejected += 1;
+            continue;
+        };
+        let Some(mut angle) = logbook_number(direction_field) else {
+            rejected += 1;
+            continue;
+        };
+        let Some(speed_field) = fields.get(20) else {
+            rejected += 1;
+            continue;
+        };
+        let Some(raw_wind) = logbook_number(speed_field) else {
+            rejected += 1;
+            continue;
+        };
+        let lower = speed_field.to_ascii_lowercase();
+        let wind = if lower.contains("m/s") {
+            raw_wind * 1.943_844_492_440_6
+        } else if lower.contains("km/h") || lower.contains("kph") {
+            raw_wind / 1.852
+        } else {
+            raw_wind
+        };
+        angle = angle.rem_euclid(360.0);
+        if angle > 180.0 {
+            angle = 360.0 - angle;
+        }
+        let true_wind = if direction_field.to_ascii_uppercase().contains('R') {
+            true_from_apparent(wind, angle, stw)
+        } else {
+            Some((wind, angle))
+        };
+        if let Some((tws, twa)) = true_wind {
+            if retain_sample(editor, twa, tws, stw) {
+                accepted += 1;
+                continue;
+            }
+        }
+        rejected += 1;
+    }
+    (accepted, rejected)
+}
+
+fn looks_like_nmea(text: &str) -> bool {
+    text.lines().take(200).any(|line| {
+        line.find('$')
+            .is_some_and(|start| valid_nmea(line[start..].trim()).is_some())
+    })
+}
+
+fn looks_like_logbook_konni(text: &str) -> bool {
+    text.lines()
+        .take(50)
+        .any(|line| line.split('\t').count() >= 21)
+}
+
 struct IPolars;
 impl exports::opencpn::portable::plugin::Guest for IPolars {
     fn initialize() -> Result<exports::opencpn::portable::plugin::PluginInfo, String> {
@@ -710,6 +1033,8 @@ impl exports::opencpn::portable::plugin::Guest for IPolars {
         )?;
         let mut e = EDITOR.lock().map_err(|_| "iPolars state lock failed")?;
         e.document = Some(Document::Polar(default_polar()));
+        e.new_polar_file = "boat.pol".into();
+        e.new_crossover = "0".into();
         e.status = "New cruising polar — open a .pol or boat .xml file, or begin editing.".into();
         refresh(&mut e);
         Ok(exports::opencpn::portable::plugin::PluginInfo {
@@ -772,6 +1097,158 @@ impl exports::opencpn::portable::plugin::Guest for IPolars {
                 e.dirty = false;
                 e.status = "Created a new interoperable boat XML.".into();
             }
+            "boat-name" => {
+                let name = json_string(&value)?;
+                if name.trim().is_empty() || name.len() > 256 {
+                    return Err("Boat name must contain 1–256 characters.".into());
+                }
+                let Some(Document::Boat {
+                    name: document_name,
+                    ..
+                }) = &mut e.document
+                else {
+                    return Err("Open a boat XML document first.".into());
+                };
+                *document_name = name;
+                e.dirty = true;
+                e.status = "Boat name edited.".into();
+            }
+            "new-polar-file" => e.new_polar_file = json_string(&value)?,
+            "new-crossover" => e.new_crossover = json_string(&value)?,
+            "add-polar-reference" => {
+                let file = e.new_polar_file.trim().to_string();
+                if file.is_empty() || file.len() > 4096 {
+                    return Err("Enter a bounded polar file reference.".into());
+                }
+                let crossover = number(&e.new_crossover, "crossover")?;
+                if !(0.0..=100.0).contains(&crossover) {
+                    return Err("Crossover must lie in [0, 100] percent.".into());
+                }
+                let Some(Document::Boat { polars, .. }) = &mut e.document else {
+                    return Err("Open a boat XML document first.".into());
+                };
+                polars.push(BoatPolar { file, crossover });
+                e.selected_boat = polars.len() - 1;
+                e.dirty = true;
+                e.status = "Added a polar reference.".into();
+            }
+            "remove-polar-reference" => {
+                let selected = e.selected_boat;
+                let Some(Document::Boat { polars, .. }) = &mut e.document else {
+                    return Err("Open a boat XML document first.".into());
+                };
+                if polars.len() <= 1 {
+                    return Err("A routable boat XML must retain at least one polar.".into());
+                }
+                if selected >= polars.len() {
+                    return Err("Select a polar reference first.".into());
+                }
+                polars.remove(selected);
+                e.selected_boat = selected.min(polars.len() - 1);
+                e.dirty = true;
+                e.status = "Removed the selected polar reference.".into();
+            }
+            "move-polar-up" | "move-polar-down" => {
+                let selected = e.selected_boat;
+                let Some(Document::Boat { polars, .. }) = &mut e.document else {
+                    return Err("Open a boat XML document first.".into());
+                };
+                if selected >= polars.len() {
+                    return Err("Select a polar reference first.".into());
+                }
+                let destination = if control == "move-polar-up" {
+                    selected.saturating_sub(1)
+                } else {
+                    (selected + 1).min(polars.len() - 1)
+                };
+                if destination != selected {
+                    polars.swap(selected, destination);
+                    e.selected_boat = destination;
+                    e.dirty = true;
+                }
+                e.status = "Reordered the boat polar references.".into();
+            }
+            "measurement-apparent" => {
+                e.measurement_apparent = value.trim() == "true";
+            }
+            "measurement-wind-speed" => {
+                e.measurement_wind_speed = json_string(&value)?;
+            }
+            "measurement-wind-angle" => {
+                e.measurement_wind_angle = json_string(&value)?;
+            }
+            "measurement-stw" => e.measurement_stw = json_string(&value)?,
+            "add-measurement" => {
+                let wind_speed = number(&e.measurement_wind_speed, "wind speed")?;
+                let wind_angle = number(&e.measurement_wind_angle, "wind angle")?;
+                let stw = number(&e.measurement_stw, "speed through water")?;
+                if !(0.0..=200.0).contains(&wind_speed)
+                    || !(0.0..=180.0).contains(&wind_angle)
+                    || !(0.0..=100.0).contains(&stw)
+                {
+                    return Err(
+                        "Wind speed, wind angle and STW are outside physical bounds.".into(),
+                    );
+                }
+                let measurement = if e.measurement_apparent {
+                    let (tws, twa) = true_from_apparent(wind_speed, wind_angle, stw)
+                        .ok_or("Could not convert the apparent-wind observation.")?;
+                    Measurement {
+                        tws,
+                        twa,
+                        aws: wind_speed,
+                        awa: wind_angle,
+                        stw,
+                    }
+                } else {
+                    let (aws, awa) = apparent_from_true(wind_speed, wind_angle, stw)
+                        .ok_or("Could not convert the true-wind observation.")?;
+                    Measurement {
+                        tws: wind_speed,
+                        twa: wind_angle,
+                        aws,
+                        awa,
+                        stw,
+                    }
+                };
+                e.measurements.push(measurement);
+                e.selected_measurement = e.measurements.len() - 1;
+                e.status = format!("Added manual observation {}.", e.measurements.len());
+            }
+            "measurement-grid" => {
+                e.selected_measurement = integer(&value, "row")?;
+            }
+            "remove-measurement" => {
+                let selected = e.selected_measurement;
+                if selected >= e.measurements.len() {
+                    return Err("Select a manual observation first.".into());
+                }
+                e.measurements.remove(selected);
+                e.selected_measurement = e
+                    .selected_measurement
+                    .min(e.measurements.len().saturating_sub(1));
+                e.status = "Removed the selected manual observation.".into();
+            }
+            "clear-measurements" => {
+                e.measurements.clear();
+                e.selected_measurement = 0;
+                e.status = "Cleared all manual observations.".into();
+            }
+            "generate-from-measurements" => {
+                let measurements = e.measurements.clone();
+                if measurements.is_empty() {
+                    return Err("Add at least one manual observation first.".into());
+                }
+                begin_capture(&mut e);
+                for measurement in &measurements {
+                    retain_sample(&mut e, measurement.twa, measurement.tws, measurement.stw);
+                }
+                e.capturing = false;
+                e.status = format!(
+                    "Generated a measured polar from {} manual observation(s).",
+                    measurements.len()
+                );
+            }
             "capture" => {
                 let start = value.trim() == "true";
                 if start && !e.capturing {
@@ -799,6 +1276,47 @@ impl exports::opencpn::portable::plugin::Guest for IPolars {
                 let (accepted, rejected) = import_csv(&mut e, &text)?;
                 e.status = format!(
                     "Imported observations: {accepted} accepted, {rejected} rejected. Motoring, manoeuvring, unstable, incomplete, and SOG-only rows are excluded."
+                );
+            }
+            "import-logbooks" => {
+                let grants = json_string_array(&value)?;
+                begin_capture(&mut e);
+                let mut files = 0_usize;
+                let mut accepted = 0_usize;
+                let mut rejected = 0_usize;
+                let mut formats = Vec::new();
+                for grant in grants {
+                    let bytes = host::user_file_read(&grant)?;
+                    let text = String::from_utf8(bytes)
+                        .map_err(|_| "A selected logbook is not UTF-8 text.")?;
+                    let (file_accepted, file_rejected, format) = if looks_like_nmea(&text) {
+                        let before = e.samples;
+                        let (valid, invalid) = append_nmea_log(&mut e, &text);
+                        let retained =
+                            usize::try_from(e.samples.saturating_sub(before)).unwrap_or(usize::MAX);
+                        (
+                            retained,
+                            invalid + valid.saturating_sub(retained),
+                            "NMEA/VDR",
+                        )
+                    } else if looks_like_logbook_konni(&text) {
+                        let (valid, invalid) = append_logbook_konni(&mut e, &text);
+                        (valid, invalid, "LogbookKonni")
+                    } else {
+                        let (valid, invalid) = append_csv(&mut e, &text)?;
+                        (valid, invalid, "CSV/TSV")
+                    };
+                    accepted += file_accepted;
+                    rejected += file_rejected;
+                    files += 1;
+                    if !formats.contains(&format) {
+                        formats.push(format);
+                    }
+                }
+                e.capturing = false;
+                e.status = format!(
+                    "Imported {files} logbook file(s) ({formats}): {accepted} complete STW/wind observations accepted, {rejected} rows or sentences rejected.",
+                    formats = formats.join(", ")
                 );
             }
             "new-angle" => e.new_angle = json_string(&value)?,
@@ -918,20 +1436,30 @@ impl exports::opencpn::portable::plugin::Guest for IPolars {
             "boat-grid" => {
                 let r = integer(&value, "row")?;
                 let c = integer(&value, "column")?;
-                let text = string_field(&value, "value")?;
-                let Some(Document::Boat { polars, .. }) = &mut e.document else {
-                    return Err("Boat grid inactive.".into());
-                };
-                let p = polars.get_mut(r).ok_or("Boat grid edit out of range.")?;
-                if c == 0 {
-                    p.file = text;
-                } else if c == 1 {
-                    p.crossover = number(&text, "crossover")?;
-                } else {
-                    return Err("Boat grid column invalid.".into());
+                e.selected_boat = r;
+                if value.contains("\"value\":") {
+                    let text = string_field(&value, "value")?;
+                    let Some(Document::Boat { polars, .. }) = &mut e.document else {
+                        return Err("Boat grid inactive.".into());
+                    };
+                    let p = polars.get_mut(r).ok_or("Boat grid edit out of range.")?;
+                    if c == 0 {
+                        if text.trim().is_empty() || text.len() > 4096 {
+                            return Err("Polar file reference is empty or oversized.".into());
+                        }
+                        p.file = text;
+                    } else if c == 1 {
+                        let crossover = number(&text, "crossover")?;
+                        if !(0.0..=100.0).contains(&crossover) {
+                            return Err("Crossover must lie in [0, 100] percent.".into());
+                        }
+                        p.crossover = crossover;
+                    } else {
+                        return Err("Boat grid column invalid.".into());
+                    }
+                    e.dirty = true;
+                    e.status = "Boat reference edited.".into();
                 }
-                e.dirty = true;
-                e.status = "Boat reference edited.".into();
             }
             _ => return Err(format!("Unknown control: {control}")),
         }
