@@ -3,6 +3,7 @@
 
 #include <memory>
 #include <atomic>
+#include <map>
 
 #include <wx/bitmap.h>
 
@@ -15,6 +16,7 @@
 namespace ppm {
 
 class ManagerDialog;
+class SurfaceDialog;
 
 class PortablePluginManagerPi final : public opencpn_plugin_121 {
  public:
@@ -55,6 +57,14 @@ class PortablePluginManagerPi final : public opencpn_plugin_121 {
   void RemovePackage(const std::string& package_id);
   void RollbackPackage(const std::string& package_id);
   void RevokePackagePermissions(const std::string& package_id);
+  void OpenPackageSurface(const std::string& package_id,
+                          const DeclarativeSurface& surface);
+  void ApplySurfaceResponse(const std::string& package_id,
+                            const std::string& surface_id,
+                            const std::string& control_id,
+                            const std::string& state_json,
+                            const std::string& diagnostic);
+  void ClosePackageSurfaces(const std::string& package_id);
   bool PreparePermissions(const std::string& package_id, bool interactive,
                           wxString* diagnostic);
   void SetManagerStatus(const wxString& status);
@@ -72,6 +82,7 @@ class PortablePluginManagerPi final : public opencpn_plugin_121 {
   std::unique_ptr<PermissionStore> permission_store_;
   std::unique_ptr<RuntimeEngine> runtime_engine_;
   std::shared_ptr<std::atomic_bool> ui_callback_gate_;
+  std::map<std::string, std::unique_ptr<SurfaceDialog>> surface_dialogs_;
   std::unique_ptr<ManagerDialog> manager_dialog_;
   bool developer_mode_ = false;
   bool initialized_ = false;

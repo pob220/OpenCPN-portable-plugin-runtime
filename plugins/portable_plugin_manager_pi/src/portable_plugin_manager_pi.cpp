@@ -16,6 +16,7 @@
 #endif
 
 #include "manager_dialog.h"
+#include "surface_dialog.h"
 
 #ifndef DECL_EXP
 #ifdef __WXMSW__
@@ -168,6 +169,18 @@ int PortablePluginManagerPi::Init() {
           if (gate->load()) task();
         });
       });
+  runtime_engine_->SetSurfaceOpenedCallback(
+      [this](const std::string& package_id,
+             const DeclarativeSurface& surface) {
+        OpenPackageSurface(package_id, surface);
+      });
+  runtime_engine_->SetSurfaceResponseCallback(
+      [this](const std::string& package_id, const std::string& surface_id,
+             const std::string& control_id, const std::string& state_json,
+             const std::string& diagnostic) {
+        ApplySurfaceResponse(package_id, surface_id, control_id, state_json,
+                             diagnostic);
+      });
   if (!runtime_engine_->LoadInstalled(developer_mode_)) {
     wxLogWarning(
         "PPM event=runtime-engine-load-completed-with-package-failures");
@@ -203,6 +216,7 @@ bool PortablePluginManagerPi::DeInit() {
     runtime_engine_.reset();
   }
   ui_callback_gate_.reset();
+  surface_dialogs_.clear();
   permission_store_.reset();
   package_store_.reset();
   RemoveAllActions();
@@ -339,6 +353,55 @@ void PortablePluginManagerPi::ShowManager(wxWindow* parent) {
 void PortablePluginManagerPi::SetManagerStatus(const wxString& status) {
   if (manager_dialog_) manager_dialog_->SetStatus(status);
   wxLogMessage("PPM event=manager-operation status=%s", status);
+}
+
+void PortablePluginManagerPi::OpenPackageSurface(
+    const std::string& package_id, const DeclarativeSurface& surface) {
+  const std::string key = package_id + "\n" + surface.id;
+  const auto existing = surface_dialogs_.find(key);
+  if (existing != surface_dialogs_.end()) {
+    existing->second->Show();
+    existing->second->Raise();
+    return;
+  }
+  auto dialog = std::make_unique<SurfaceDialog>(
+      nullptr, surface,
+      [this, package_id, surface_id = surface.id](
+          const std::string& control_id, const std::string& value_json) {
+        if (!runtime_engine_ ||
+            !runtime_engine_->HandleSurfaceEvent(
+                package_id, surface_id, control_id, value_json)) {
+          ApplySurfaceResponse(package_id, surface_id, control_id, {},
+                               "Package is disabled, busy, or unavailable.");
+        }
+      });
+  dialog->Show();
+  dialog->Raise();
+  surface_dialogs_.emplace(key, std::move(dialog));
+  wxLogMessage("PPM event=surface-opened package=%s surface=%s", package_id,
+               surface.id);
+}
+
+void PortablePluginManagerPi::ApplySurfaceResponse(
+    const std::string& package_id, const std::string& surface_id,
+    const std::string& control_id, const std::string& state_json,
+    const std::string& diagnostic) {
+  const auto item =
+      surface_dialogs_.find(package_id + "\n" + surface_id);
+  if (item == surface_dialogs_.end()) return;
+  item->second->ApplyResponse(control_id, state_json, diagnostic);
+}
+
+void PortablePluginManagerPi::ClosePackageSurfaces(
+    const std::string& package_id) {
+  const std::string prefix = package_id + "\n";
+  for (auto item = surface_dialogs_.begin();
+       item != surface_dialogs_.end();) {
+    if (item->first.rfind(prefix, 0) == 0)
+      item = surface_dialogs_.erase(item);
+    else
+      ++item;
+  }
 }
 
 bool PortablePluginManagerPi::PreparePermissions(
@@ -780,6 +843,11 @@ void PortablePluginManagerPi::RefreshManager() {
                                          packages.size(),
                                          packages.size() == 1 ? "" : "s",
                                          failures));
+  }
+  if (runtime_engine_) {
+    for (const auto& package : runtime_engine_->Packages()) {
+      if (package.state != "Enabled") ClosePackageSurfaces(package.id);
+    }
   }
 }
 

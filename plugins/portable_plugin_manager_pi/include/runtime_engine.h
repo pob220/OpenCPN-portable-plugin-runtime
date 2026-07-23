@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "declarative_ui.h"
+
 struct PlugIn_Position_Fix_Ex;
 
 namespace ppm {
@@ -31,6 +33,7 @@ struct PackageSnapshot {
   std::size_t pending_calls = 0;
   std::uint64_t enable_count = 0;
   std::uint64_t disable_count = 0;
+  std::size_t surface_count = 0;
 };
 
 struct OverlayPoint {
@@ -56,6 +59,11 @@ class RuntimeEngine {
   using RemoveActions = std::function<void(const std::string&)>;
   using StateChanged = std::function<void()>;
   using UiDispatch = std::function<void(std::function<void()>)>;
+  using SurfaceOpened =
+      std::function<void(const std::string&, const DeclarativeSurface&)>;
+  using SurfaceResponse = std::function<void(
+      const std::string&, const std::string&, const std::string&,
+      const std::string&, const std::string&)>;
 
   RuntimeEngine(std::string storage_root, RegisterAction register_action,
                 RemoveActions remove_actions, StateChanged state_changed,
@@ -66,6 +74,8 @@ class RuntimeEngine {
   RuntimeEngine& operator=(const RuntimeEngine&) = delete;
 
   bool LoadInstalled(bool developer_mode);
+  void SetSurfaceOpenedCallback(SurfaceOpened callback);
+  void SetSurfaceResponseCallback(SurfaceResponse callback);
   bool RefreshPackage(const std::string& package_id, bool developer_mode,
                       std::string* diagnostic);
   bool Enable(const std::string& package_id, std::string* diagnostic);
@@ -81,6 +91,10 @@ class RuntimeEngine {
   void Shutdown();
   bool HandleAction(const std::string& package_id,
                     const std::string& action_id);
+  bool HandleSurfaceEvent(const std::string& package_id,
+                          const std::string& surface_id,
+                          const std::string& control_id,
+                          const std::string& value_json);
   bool WaitForIdle(const std::string& package_id,
                    std::chrono::milliseconds timeout);
   void SetPositionFix(const PlugIn_Position_Fix_Ex& fix);

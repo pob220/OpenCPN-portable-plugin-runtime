@@ -22,10 +22,12 @@
 #include <wx/jsonval.h>
 #include <wx/log.h>
 #include <wx/regex.h>
+#include <wx/sstream.h>
 #include <wx/wfstream.h>
 
 #include "ocpn_plugin.h"
 #include "ocpn_portable_runtime.h"
+#include "declarative_ui.h"
 #include "permission_store.h"
 #include "serial_executor.h"
 
@@ -38,6 +40,8 @@ constexpr std::size_t kErrorCapacity = 4096;
 constexpr std::size_t kSettingCapacity = 64 * 1024;
 constexpr std::size_t kOverlayPointLimit = 1'000'000;
 constexpr std::size_t kPrivateReadLimit = 8 * 1024 * 1024;
+constexpr std::size_t kSurfaceDocumentLimit = 1024 * 1024;
+constexpr std::size_t kSurfaceStateLimit = 64 * 1024;
 
 std::string Text(const char* value, std::size_t length) {
   return value && length ? std::string(value, length) : std::string();
@@ -129,6 +133,7 @@ class RuntimeEngine::Impl {
     std::string diagnostic;
     std::vector<RuntimeAction> registered_actions;
     std::map<std::string, OverlayScene> scenes;
+    std::map<std::string, DeclarativeSurface> surfaces;
   };
 
   Impl(std::string storage_root, RegisterAction register_action,
@@ -143,6 +148,12 @@ class RuntimeEngine::Impl {
   ~Impl() { Shutdown(); }
 
   bool LoadInstalled(bool developer_mode);
+  void SetSurfaceOpenedCallback(SurfaceOpened callback) {
+    surface_opened = std::move(callback);
+  }
+  void SetSurfaceResponseCallback(SurfaceResponse callback) {
+    surface_response = std::move(callback);
+  }
   bool RefreshPackage(const std::string& package_id, bool developer_mode,
                       std::string* diagnostic);
   bool Enable(const std::string& package_id, std::string* diagnostic);
@@ -158,6 +169,10 @@ class RuntimeEngine::Impl {
   void Shutdown();
   bool HandleAction(const std::string& package_id,
                     const std::string& action_id);
+  bool HandleSurfaceEvent(const std::string& package_id,
+                          const std::string& surface_id,
+                          const std::string& control_id,
+                          const std::string& value_json);
   bool WaitForIdle(const std::string& package_id,
                    std::chrono::milliseconds timeout);
   void Fail(Instance& instance, const std::string& operation,
@@ -217,8 +232,14 @@ class RuntimeEngine::Impl {
     return -1;
   }
   static std::int32_t CancelJob(void*, const char*, std::size_t) { return -1; }
-  static std::int32_t OpenEnvironmentalViewer(void*) { return -2; }
-  static std::int32_t OpenWeatherRouting(void*) { return -2; }
+  static std::int32_t OpenEnvironmentalViewer(void* user_data) {
+    return OpenNamedSurface(user_data, "environment.viewer");
+  }
+  static std::int32_t OpenWeatherRouting(void* user_data) {
+    return OpenNamedSurface(user_data, "routing.workbench");
+  }
+  static std::int32_t OpenNamedSurface(void* user_data,
+                                       const std::string& surface_id);
   static std::int32_t EnvironmentSampleBatch(
       void*, const ocpn_portable_environment_sample_request*, std::size_t,
       ocpn_portable_environment_sample*, std::size_t, char* error,
@@ -248,6 +269,8 @@ class RuntimeEngine::Impl {
   RemoveActions remove_actions;
   StateChanged state_changed;
   UiDispatch ui_dispatch;
+  SurfaceOpened surface_opened;
+  SurfaceResponse surface_response;
   std::vector<std::unique_ptr<Instance>> instances;
   bool stopped = false;
   mutable std::mutex position_mutex;
@@ -259,6 +282,26 @@ class RuntimeEngine::Impl {
   bool has_cog = false;
   bool has_sog = false;
 };
+
+std::int32_t RuntimeEngine::Impl::OpenNamedSurface(
+    void* user_data, const std::string& surface_id) {
+  auto* instance = static_cast<Instance*>(user_data);
+  if (!instance || !instance->owner ||
+      !instance->owner->Permitted(*instance, "ui.commands") ||
+      !instance->enabled || instance->failed) {
+    return -1;
+  }
+  const auto item = instance->surfaces.find(surface_id);
+  if (item == instance->surfaces.end() || !instance->owner->surface_opened)
+    return -2;
+  const std::string package_id = instance->id;
+  const DeclarativeSurface surface = item->second;
+  const auto opened = instance->owner->surface_opened;
+  instance->owner->Publish([opened, package_id, surface]() {
+    opened(package_id, surface);
+  });
+  return 0;
+}
 
 void RuntimeEngine::Impl::Log(void* user_data, std::uint32_t level,
                               const char* message,
@@ -717,6 +760,55 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
     }
     instance->requested_permissions.insert(permission);
   }
+  if (!instance->failed && manifest.HasMember("surfaces")) {
+    const wxJSONValue declared_surfaces = manifest["surfaces"];
+    if (!declared_surfaces.IsObject() ||
+        declared_surfaces.Size() == 0 || declared_surfaces.Size() > 16) {
+      instance->failed = true;
+      instance->diagnostic = "manifest surfaces are invalid or exceed policy";
+    } else {
+      const wxArrayString names = declared_surfaces.GetMemberNames();
+      for (const auto& name : names) {
+        const std::string surface_id = name.ToStdString();
+        const wxJSONValue resource_value =
+            declared_surfaces.ItemAt(name);
+        if (!IsSafeName(surface_id) || !resource_value.IsString() ||
+            !SafeRelativePath(resource_value.AsString())) {
+          instance->failed = true;
+          instance->diagnostic = "manifest surface identity/path is invalid";
+          break;
+        }
+        const fs::path surface_path =
+            (root / resource_value.AsString().ToStdString())
+                .lexically_normal();
+        bool read = false;
+        const std::string contents =
+            ReadSmallFile(surface_path, kSurfaceDocumentLimit, &read);
+        wxJSONValue document;
+        wxJSONReader surface_reader;
+        wxStringInputStream stream(wxString::FromUTF8(contents));
+        DeclarativeSurface surface;
+        std::string surface_diagnostic;
+        const std::string expected =
+            surface_id == "routing.workbench" ? std::string() : surface_id;
+        if (!read || surface_reader.Parse(stream, &document) != 0 ||
+            !ParseDeclarativeSurface(document, expected, &surface,
+                                     &surface_diagnostic) ||
+            (surface_id == "routing.workbench" &&
+             surface.id != "routing.workbench" &&
+             surface.id != "routing-workbench")) {
+          instance->failed = true;
+          instance->diagnostic =
+              "invalid declarative surface " + surface_id + ": " +
+              (surface_diagnostic.empty() ? "JSON parse or identity failure"
+                                          : surface_diagnostic);
+          break;
+        }
+        surface.id = surface_id;
+        instance->surfaces.emplace(surface_id, std::move(surface));
+      }
+    }
+  }
   std::error_code filesystem_error;
   fs::create_directories(instance->private_root, filesystem_error);
   if (filesystem_error) {
@@ -935,6 +1027,59 @@ bool RuntimeEngine::Impl::HandleAction(const std::string& package_id,
   return true;
 }
 
+bool RuntimeEngine::Impl::HandleSurfaceEvent(
+    const std::string& package_id, const std::string& surface_id,
+    const std::string& control_id, const std::string& value_json) {
+  Instance* instance = Find(package_id);
+  if (!instance || !instance->enabled || instance->failed ||
+      !instance->runtime || !IsSafeName(surface_id) ||
+      !IsSafeName(control_id) || value_json.size() > kSurfaceStateLimit ||
+      instance->surfaces.count(surface_id) == 0) {
+    return false;
+  }
+  const std::uint64_t generation = instance->executor.Generation();
+  const auto posted = instance->executor.Post(
+      generation,
+      [instance, surface_id, control_id,
+       value_json](std::uint64_t task_generation) {
+        if (task_generation != instance->executor.Generation() ||
+            !instance->enabled || instance->failed) {
+          return;
+        }
+        std::lock_guard<std::mutex> lock(instance->runtime_mutex);
+        if (task_generation != instance->executor.Generation() ||
+            !instance->enabled || instance->failed || !instance->runtime) {
+          return;
+        }
+        std::vector<char> state(kSurfaceStateLimit + 1, '\0');
+        std::array<char, kErrorCapacity> error{};
+        std::size_t state_length = 0;
+        const int result = ocpn_portable_runtime_on_surface_event(
+            instance->runtime, surface_id.data(), surface_id.size(),
+            control_id.data(), control_id.size(), value_json.data(),
+            value_json.size(), state.data(), kSurfaceStateLimit,
+            &state_length, error.data(), error.size());
+        std::string state_json;
+        std::string diagnostic;
+        if (result == 0 && state_length <= kSurfaceStateLimit) {
+          state_json.assign(state.data(), state_length);
+        } else {
+          diagnostic =
+              error[0] ? error.data() : "portable surface event failed";
+        }
+        if (!instance->owner->surface_response) return;
+        const auto response = instance->owner->surface_response;
+        const std::string id = instance->id;
+        instance->owner->Publish(
+            [response, id, surface_id, control_id,
+             state_json = std::move(state_json),
+             diagnostic = std::move(diagnostic)]() {
+              response(id, surface_id, control_id, state_json, diagnostic);
+            });
+      });
+  return posted == SerialExecutor::PostResult::kAccepted;
+}
+
 bool RuntimeEngine::Impl::WaitForIdle(const std::string& package_id,
                                       std::chrono::milliseconds timeout) {
   Instance* instance = Find(package_id);
@@ -966,6 +1111,14 @@ RuntimeEngine::~RuntimeEngine() = default;
 
 bool RuntimeEngine::LoadInstalled(bool developer_mode) {
   return impl_->LoadInstalled(developer_mode);
+}
+
+void RuntimeEngine::SetSurfaceOpenedCallback(SurfaceOpened callback) {
+  impl_->SetSurfaceOpenedCallback(std::move(callback));
+}
+
+void RuntimeEngine::SetSurfaceResponseCallback(SurfaceResponse callback) {
+  impl_->SetSurfaceResponseCallback(std::move(callback));
 }
 
 bool RuntimeEngine::RefreshPackage(const std::string& package_id,
@@ -1013,6 +1166,13 @@ bool RuntimeEngine::HandleAction(const std::string& package_id,
   return impl_->HandleAction(package_id, action_id);
 }
 
+bool RuntimeEngine::HandleSurfaceEvent(
+    const std::string& package_id, const std::string& surface_id,
+    const std::string& control_id, const std::string& value_json) {
+  return impl_->HandleSurfaceEvent(package_id, surface_id, control_id,
+                                   value_json);
+}
+
 bool RuntimeEngine::WaitForIdle(const std::string& package_id,
                                 std::chrono::milliseconds timeout) {
   return impl_->WaitForIdle(package_id, timeout);
@@ -1053,6 +1213,7 @@ std::vector<PackageSnapshot> RuntimeEngine::Packages() const {
          instance->executor.Pending(),
          instance->enable_count.load(),
          instance->disable_count.load()});
+    result.back().surface_count = instance->surfaces.size();
   }
   return result;
 }

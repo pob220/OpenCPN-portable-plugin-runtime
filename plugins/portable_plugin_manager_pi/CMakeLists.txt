@@ -62,12 +62,14 @@ add_subdirectory("${OPENCPN_SOURCE_DIR}/libs/wxJSON"
 
 add_library(portable_plugin_manager_pi MODULE
   src/action_registry.cpp
+  src/declarative_ui.cpp
   src/manager_dialog.cpp
   src/package_store.cpp
   src/permission_store.cpp
   src/portable_plugin_manager_pi.cpp
   src/runtime_engine.cpp
   src/serial_executor.cpp
+  src/surface_dialog.cpp
 )
 set_target_properties(portable_plugin_manager_pi PROPERTIES
   PREFIX "lib"
@@ -120,6 +122,27 @@ if(BUILD_TESTING)
       -Wall -Wextra -Wpedantic)
   endif()
   add_test(NAME ppm_action_registry COMMAND ppm_action_registry_test)
+
+  add_executable(ppm_declarative_ui_test
+    src/declarative_ui.cpp
+    tests/declarative_ui_test.cpp
+  )
+  target_include_directories(ppm_declarative_ui_test PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include"
+    "${OPENCPN_SOURCE_DIR}/libs/wxJSON/include")
+  target_compile_definitions(ppm_declarative_ui_test PRIVATE
+    PPM_TEST_ROUTING_UI="${OPENCPN_SOURCE_DIR}/portable-plugins/iweather-routing/package/iweather-routing.ui.json"
+    PPM_TEST_IGRIB_UI="${OPENCPN_SOURCE_DIR}/portable-plugins/igrib/package/igrib-viewer.ui.json")
+  target_link_libraries(ppm_declarative_ui_test PRIVATE
+    ${wxWidgets_LIBRARIES}
+    ocpn::wxjson)
+  if(MSVC)
+    target_compile_options(ppm_declarative_ui_test PRIVATE /W4)
+  else()
+    target_compile_options(ppm_declarative_ui_test PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
+  add_test(NAME ppm_declarative_ui COMMAND ppm_declarative_ui_test)
 
   add_executable(ppm_serial_executor_test
     src/serial_executor.cpp
@@ -214,6 +237,7 @@ if(BUILD_TESTING)
                     DEPENDS "${PPM_TEST_IGRIB_WASM}")
 
   add_executable(ppm_runtime_engine_test
+    src/declarative_ui.cpp
     src/permission_store.cpp
     src/runtime_engine.cpp
     src/serial_executor.cpp
@@ -226,7 +250,8 @@ if(BUILD_TESTING)
     "${OPENCPN_SOURCE_DIR}/libs/wxJSON/include"
     "${PPM_RUNTIME_SOURCE_DIR}/bridge/include")
   target_compile_definitions(ppm_runtime_engine_test PRIVATE
-    PPM_TEST_IGRIB_WASM="${PPM_TEST_IGRIB_WASM}")
+    PPM_TEST_IGRIB_WASM="${PPM_TEST_IGRIB_WASM}"
+    PPM_TEST_IGRIB_UI="${OPENCPN_SOURCE_DIR}/portable-plugins/igrib/package/igrib-viewer.ui.json")
   target_link_libraries(ppm_runtime_engine_test PRIVATE
     ${wxWidgets_LIBRARIES}
     ocpn::wxjson

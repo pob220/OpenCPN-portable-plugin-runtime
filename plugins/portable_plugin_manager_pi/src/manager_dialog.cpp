@@ -217,11 +217,12 @@ void ManagerDialog::SetPackages(
     packages_->SetItem(row, 2, wxString::FromUTF8(package.state));
     packages_->SetItem(row, 3, wxString::FromUTF8(package.access));
     wxString details = wxString::Format(
-        "Generation %llu; queued %zu; lifecycle %llu/%llu",
+        "Generation %llu; queued %zu; lifecycle %llu/%llu; surfaces %zu",
         static_cast<unsigned long long>(package.generation),
         package.pending_calls,
         static_cast<unsigned long long>(package.enable_count),
-        static_cast<unsigned long long>(package.disable_count));
+        static_cast<unsigned long long>(package.disable_count),
+        package.surface_count);
     if (!package.diagnostic.empty())
       details += "; " + wxString::FromUTF8(package.diagnostic);
     packages_->SetItem(row, 4, details);

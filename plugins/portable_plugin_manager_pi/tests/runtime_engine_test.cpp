@@ -63,6 +63,12 @@ int main() {
                 package_root / "component" / "igrib.wasm",
                 fs::copy_options::overwrite_existing, error);
   CHECK(!error);
+  fs::create_directories(package_root / "ui", error);
+  CHECK(!error);
+  fs::copy_file(PPM_TEST_IGRIB_UI,
+                package_root / "ui" / "igrib-viewer.ui.json",
+                fs::copy_options::overwrite_existing, error);
+  CHECK(!error);
   CHECK(Write(package_root / "resources" / "igrib.svg", "<svg/>"));
   CHECK(Write(package_root / "resources" / "fault-test.svg", "<svg/>"));
   CHECK(Write(package_root / "resources" / "http-download.svg", "<svg/>"));
@@ -76,6 +82,8 @@ int main() {
       "\"component\":\"component/igrib.wasm\","
       "\"runtime\":\">=0.1.0 <0.2.0\","
       "\"portable_api\":\">=0.1.0 <0.2.0\","
+      "\"surfaces\":{\"environment.viewer\":"
+      "\"ui/igrib-viewer.ui.json\"},"
       "\"permissions\":["
       "\"ui.commands\",\"navigation.position.read\","
       "\"navigation.objects.read\",\"settings.read-write\","
@@ -91,6 +99,8 @@ int main() {
   std::set<std::string> actions;
   std::uint32_t next_action = 100;
   int state_changes = 0;
+  int opened_surfaces = 0;
+  bool opened_surface_valid = true;
   auto register_action = [&](const ppm::RuntimeAction& action,
                              std::uint32_t* host_action_id) {
     const std::string key = action.package_id + "/" + action.action_id;
@@ -111,6 +121,13 @@ int main() {
     ppm::RuntimeEngine engine(test_root.string(), register_action,
                               remove_actions,
                               [&]() { ++state_changes; });
+    engine.SetSurfaceOpenedCallback(
+        [&](const std::string& id,
+            const ppm::DeclarativeSurface& surface) {
+          if (id != package_id || surface.id != "environment.viewer")
+            opened_surface_valid = false;
+          ++opened_surfaces;
+        });
     const bool loaded = engine.LoadInstalled(true);
     if (!loaded) {
       for (const auto& package : engine.Packages())
@@ -122,6 +139,7 @@ int main() {
     CHECK(packages.size() == 1);
     CHECK(Snapshot(packages, package_id));
     CHECK(Snapshot(packages, package_id)->state == "Unloaded");
+    CHECK(Snapshot(packages, package_id)->surface_count == 1);
     CHECK(!engine.IsEnabled(package_id));
     CHECK(actions.empty());
     std::string diagnostic;
@@ -140,11 +158,19 @@ int main() {
     CHECK(engine.IsEnabled(package_id));
     CHECK(actions.size() == 3);
 
+    CHECK(engine.HandleAction(package_id, "igrib.toggle"));
+    CHECK(engine.WaitForIdle(package_id, std::chrono::seconds(2)));
+    CHECK(opened_surfaces == 1);
+    CHECK(opened_surface_valid);
+    CHECK(Snapshot(engine.Packages(), package_id)->state == "Failed");
+    CHECK(engine.Enable(package_id, &diagnostic));
+    CHECK(engine.IsEnabled(package_id));
+
     CHECK(engine.Disable(package_id, &diagnostic));
     CHECK(!engine.IsEnabled(package_id));
     const auto disabled = engine.Packages();
     CHECK(Snapshot(disabled, package_id)->state == "Disabled");
-    CHECK(Snapshot(disabled, package_id)->enable_count == 1);
+    CHECK(Snapshot(disabled, package_id)->enable_count == 2);
     CHECK(Snapshot(disabled, package_id)->disable_count == 1);
     CHECK(actions.empty());
 
