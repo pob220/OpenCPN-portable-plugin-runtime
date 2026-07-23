@@ -1,9 +1,14 @@
 #include "runtime_engine.h"
 
 #include <chrono>
+#include <atomic>
+#include <condition_variable>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
+#include <mutex>
+#include <queue>
 #include <set>
 #include <string>
 #include <thread>
@@ -41,9 +46,82 @@ const ppm::PackageSnapshot* Snapshot(
   return nullptr;
 }
 
+class UiLoop {
+ public:
+  UiLoop() : thread_([this]() { Run(); }) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    changed_.wait(lock, [this]() { return started_; });
+  }
+  ~UiLoop() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stop_ = true;
+    }
+    changed_.notify_all();
+    thread_.join();
+  }
+  void Post(std::function<void()> task) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      tasks_.push(std::move(task));
+      ++pending_;
+    }
+    changed_.notify_all();
+  }
+  bool WaitIdle(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return changed_.wait_for(lock, timeout,
+                             [this]() { return pending_ == 0; });
+  }
+  std::thread::id ThreadId() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return thread_id_;
+  }
+
+ private:
+  void Run() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      thread_id_ = std::this_thread::get_id();
+      started_ = true;
+    }
+    changed_.notify_all();
+    for (;;) {
+      std::function<void()> task;
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        changed_.wait(lock, [this]() { return stop_ || !tasks_.empty(); });
+        if (stop_ && tasks_.empty()) return;
+        task = std::move(tasks_.front());
+        tasks_.pop();
+      }
+      task();
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        --pending_;
+      }
+      changed_.notify_all();
+    }
+  }
+
+  mutable std::mutex mutex_;
+  std::condition_variable changed_;
+  std::queue<std::function<void()>> tasks_;
+  std::thread thread_;
+  std::thread::id thread_id_;
+  std::size_t pending_ = 0;
+  bool started_ = false;
+  bool stop_ = false;
+};
+
+std::mutex land_thread_mutex;
+std::thread::id land_thread;
+
 }  // namespace
 
 extern "C" bool PlugIn_GSHHS_CrossesLand(double, double, double, double) {
+  std::lock_guard<std::mutex> lock(land_thread_mutex);
+  land_thread = std::this_thread::get_id();
   return false;
 }
 
@@ -99,9 +177,9 @@ int main() {
 
   std::set<std::string> actions;
   std::uint32_t next_action = 100;
-  int state_changes = 0;
-  int opened_surfaces = 0;
-  bool opened_surface_valid = true;
+  std::atomic_int state_changes{0};
+  std::atomic_int opened_surfaces{0};
+  std::atomic_bool opened_surface_valid{true};
   auto register_action = [&](const ppm::RuntimeAction& action,
                              std::uint32_t* host_action_id) {
     const std::string key = action.package_id + "/" + action.action_id;
@@ -117,11 +195,15 @@ int main() {
         ++item;
     }
   };
+  UiLoop ui_loop;
 
   {
     ppm::RuntimeEngine engine(test_root.string(), register_action,
                               remove_actions,
-                              [&]() { ++state_changes; });
+                              [&]() { ++state_changes; },
+                              [&](std::function<void()> task) {
+                                ui_loop.Post(std::move(task));
+                              });
     engine.SetSurfaceOpenedCallback(
         [&](const std::string& id,
             const ppm::DeclarativeSurface& surface) {
@@ -161,11 +243,16 @@ int main() {
 
     CHECK(engine.HandleAction(package_id, "igrib.toggle"));
     CHECK(engine.WaitForIdle(package_id, std::chrono::seconds(2)));
+    CHECK(ui_loop.WaitIdle(std::chrono::seconds(2)));
     CHECK(opened_surfaces == 1);
     CHECK(opened_surface_valid);
     CHECK(engine.IsEnabled(package_id));
     CHECK(Snapshot(engine.Packages(), package_id)->state == "Enabled");
     CHECK(engine.Scenes().size() == 1);
+    {
+      std::lock_guard<std::mutex> lock(land_thread_mutex);
+      CHECK(land_thread == ui_loop.ThreadId());
+    }
 
     CHECK(engine.Disable(package_id, &diagnostic));
     CHECK(!engine.IsEnabled(package_id));
@@ -204,6 +291,7 @@ int main() {
 
     CHECK(engine.HandleAction(package_id, "igrib.failure-test"));
     CHECK(engine.WaitForIdle(package_id, std::chrono::seconds(2)));
+    CHECK(ui_loop.WaitIdle(std::chrono::seconds(2)));
     CHECK(Snapshot(engine.Packages(), package_id)->state == "Failed");
     CHECK(!engine.IsEnabled(package_id));
     CHECK(actions.empty());

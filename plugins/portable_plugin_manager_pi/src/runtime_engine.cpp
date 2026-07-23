@@ -5,6 +5,7 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -25,6 +26,7 @@
 #include <wx/log.h>
 #include <wx/regex.h>
 #include <wx/sstream.h>
+#include <wx/thread.h>
 #include <wx/wfstream.h>
 
 #include "ocpn_plugin.h"
@@ -212,6 +214,31 @@ class RuntimeEngine::Impl {
   void PublishStateChanged() {
     const auto changed = state_changed;
     Publish([changed]() { changed(); });
+  }
+  bool RunUiService(std::function<void()> task,
+                    std::chrono::milliseconds timeout) {
+    if (!task) return false;
+    if (!ui_dispatch || wxIsMainThread()) {
+      task();
+      return true;
+    }
+    struct Completion {
+      std::mutex mutex;
+      std::condition_variable changed;
+      bool complete = false;
+    };
+    auto completion = std::make_shared<Completion>();
+    ui_dispatch([completion, task = std::move(task)]() mutable {
+      task();
+      {
+        std::lock_guard<std::mutex> lock(completion->mutex);
+        completion->complete = true;
+      }
+      completion->changed.notify_all();
+    });
+    std::unique_lock<std::mutex> lock(completion->mutex);
+    return completion->changed.wait_for(
+        lock, timeout, [&completion]() { return completion->complete; });
   }
   void PublishRemoveActions(const std::string& package_id) {
     const auto remove = remove_actions;
@@ -755,16 +782,29 @@ std::int32_t RuntimeEngine::Impl::ChartsQuerySegments(
       !instance->owner->Permitted(*instance, "charts.coverage")) {
     return -1;
   }
-  for (std::size_t index = 0; index < segment_count; ++index) {
-    const auto& segment = segments[index];
-    results[index] = {
-        PlugIn_GSHHS_CrossesLand(
-            segment.start.latitude, segment.start.longitude,
-            segment.end.latitude, segment.end.longitude)
-            ? 1U
-            : 0U,
-        1U};
+  const std::vector<ocpn_portable_geo_segment> input(
+      segments, segments + segment_count);
+  auto output =
+      std::make_shared<std::vector<ocpn_portable_chart_segment_result>>(
+          segment_count);
+  if (!instance->owner->RunUiService(
+          [input, output]() {
+            for (std::size_t index = 0; index < input.size(); ++index) {
+              const auto& segment = input[index];
+              (*output)[index] = {
+                  PlugIn_GSHHS_CrossesLand(
+                      segment.start.latitude, segment.start.longitude,
+                      segment.end.latitude, segment.end.longitude)
+                      ? 1U
+                      : 0U,
+                  1U};
+            }
+          },
+          std::chrono::seconds(5))) {
+    wxLogWarning("PPM chart service timed out waiting for the UI thread");
+    return -2;
   }
+  std::copy(output->begin(), output->end(), results);
   return 0;
 }
 
