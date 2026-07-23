@@ -17,6 +17,7 @@ buildwin/crashrpt/CrashRpt1402.dll
 buildwin/crashrpt/CrashSender1402.exe
 buildwin/configdev.bat
 build-*
+!tools/runtime-host/build-linux.sh
 cache
 cmake-build-*
 crowdin.yaml
