@@ -66,7 +66,7 @@ int main() {
   CHECK(Write(
       package / "manifest.json",
       "{\"format_version\":1,\"id\":\"org.opencpn.ipolars\","
-      "\"name\":\"iPolars\",\"version\":\"0.1.0\","
+      "\"name\":\"iPolars\",\"version\":\"0.1.1\","
       "\"component\":\"component/ipolars.wasm\","
       "\"runtime\":\">=0.1.0 <0.2.0\","
       "\"portable_api\":\">=0.1.0 <0.2.0\","
