@@ -63,6 +63,7 @@ add_subdirectory("${OPENCPN_SOURCE_DIR}/libs/wxJSON"
 add_library(portable_plugin_manager_pi MODULE
   src/action_registry.cpp
   src/declarative_ui.cpp
+  src/environment_service.cpp
   src/job_scheduler.cpp
   src/manager_dialog.cpp
   src/package_store.cpp
@@ -145,6 +146,20 @@ if(BUILD_TESTING)
       -Wall -Wextra -Wpedantic)
   endif()
   add_test(NAME ppm_declarative_ui COMMAND ppm_declarative_ui_test)
+
+  add_executable(ppm_environment_service_test
+    src/environment_service.cpp
+    tests/environment_service_test.cpp
+  )
+  target_include_directories(ppm_environment_service_test PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include")
+  if(MSVC)
+    target_compile_options(ppm_environment_service_test PRIVATE /W4)
+  else()
+    target_compile_options(ppm_environment_service_test PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
+  add_test(NAME ppm_environment_service COMMAND ppm_environment_service_test)
 
   add_executable(ppm_job_scheduler_test
     src/job_scheduler.cpp
@@ -240,6 +255,19 @@ if(BUILD_TESTING)
     target_compile_options(ppm_package_cli PRIVATE /W4)
   else()
     target_compile_options(ppm_package_cli PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
+
+  add_executable(ppm_environment_probe
+    src/environment_service.cpp
+    tools/environment_probe.cpp
+  )
+  target_include_directories(ppm_environment_probe PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include")
+  if(MSVC)
+    target_compile_options(ppm_environment_probe PRIVATE /W4)
+  else()
+    target_compile_options(ppm_environment_probe PRIVATE
       -Wall -Wextra -Wpedantic)
   endif()
 
