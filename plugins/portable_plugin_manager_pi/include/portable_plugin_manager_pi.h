@@ -38,6 +38,7 @@ class PortablePluginManagerPi final : public opencpn_plugin_121 {
   void OnToolbarToolCallback(int id) override;
   void ShowPreferencesDialog(wxWindow* parent) override;
   void SetPositionFixEx(PlugIn_Position_Fix_Ex& fix) override;
+  void SetNMEASentence(wxString& sentence) override;
   bool RenderOverlayMultiCanvas(wxDC& dc, PlugIn_ViewPort* viewport,
                                 int canvas_index, int priority) override;
   bool RenderGLOverlayMultiCanvas(wxGLContext* context,

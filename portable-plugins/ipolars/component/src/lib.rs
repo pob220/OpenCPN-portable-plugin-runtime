@@ -40,6 +40,12 @@ struct Editor {
     new_wind: String,
     selected: (usize, usize),
     dirty: bool,
+    capturing: bool,
+    last_twa: Option<f64>,
+    last_tws: Option<f64>,
+    last_stw: Option<f64>,
+    sample_counts: Vec<Vec<u32>>,
+    samples: u64,
 }
 
 static EDITOR: Mutex<Editor> = Mutex::new(Editor {
@@ -50,6 +56,12 @@ static EDITOR: Mutex<Editor> = Mutex::new(Editor {
     new_wind: String::new(),
     selected: (0, 0),
     dirty: false,
+    capturing: false,
+    last_twa: None,
+    last_tws: None,
+    last_stw: None,
+    sample_counts: Vec::new(),
+    samples: 0,
 });
 
 fn default_polar() -> Polar {
@@ -67,6 +79,22 @@ fn default_polar() -> Polar {
         .collect();
     Polar {
         name: "New cruising polar".into(),
+        tws,
+        twa,
+        speeds,
+    }
+}
+
+fn capture_polar() -> Polar {
+    let tws = (1..=20)
+        .map(|value| f64::from(value * 2))
+        .collect::<Vec<_>>();
+    let twa = (0..=36)
+        .map(|value| f64::from(value * 5))
+        .collect::<Vec<_>>();
+    let speeds = vec![vec![None; tws.len()]; twa.len()];
+    Polar {
+        name: "Measured 5° TWA / 2 kn TWS polar".into(),
         tws,
         twa,
         speeds,
@@ -382,10 +410,20 @@ fn response(editor: &Editor) -> String {
     }
     let _ = write!(
         controls,
-        "\"diagnostics\":{},\"new-angle\":{},\"new-wind\":{}",
+        "\"diagnostics\":{},\"new-angle\":{},\"new-wind\":{},\"capture\":{},\"capture-status\":{},\"sample-count\":{}",
         json(&editor.diagnostics),
         json(&editor.new_angle),
-        json(&editor.new_wind)
+        json(&editor.new_wind),
+        if editor.capturing { "true" } else { "false" },
+        json(&if editor.capturing {
+            format!(
+                "Recording valid true-wind and speed-through-water sentences — {} samples retained.",
+                editor.samples
+            )
+        } else {
+            format!("Stopped — {} samples retained.", editor.samples)
+        }),
+        json(&editor.samples.to_string())
     );
     format!(
         "{{\"status\":{},\"controls\":{{{controls}}}}}",
@@ -428,6 +466,77 @@ fn refresh(editor: &mut Editor) {
         ),
         None => "Open or create a document.".into(),
     };
+}
+
+fn valid_nmea(sentence: &str) -> Option<Vec<&str>> {
+    let sentence = sentence.trim();
+    let star = sentence.rfind('*')?;
+    if !sentence.starts_with('$') || star + 3 != sentence.len() {
+        return None;
+    }
+    let expected = u8::from_str_radix(&sentence[star + 1..], 16).ok()?;
+    let actual = sentence.as_bytes()[1..star]
+        .iter()
+        .fold(0_u8, |checksum, value| checksum ^ value);
+    (actual == expected).then(|| sentence[..star].split(',').collect())
+}
+
+fn navigation_sample(editor: &mut Editor, sentence: &str) {
+    let Some(fields) = valid_nmea(sentence) else {
+        return;
+    };
+    let kind = fields
+        .first()
+        .and_then(|value| value.get(value.len().saturating_sub(3)..));
+    match kind {
+        Some("VWT") if fields.len() >= 5 => {
+            if let (Ok(angle), Ok(speed)) = (fields[1].parse::<f64>(), fields[3].parse::<f64>()) {
+                editor.last_twa = Some(angle.clamp(0.0, 180.0));
+                editor.last_tws = Some(speed);
+            }
+        }
+        Some("MWV")
+            if fields.len() >= 6 && fields[2] == "T" && fields[4] == "N" && fields[5] == "A" =>
+        {
+            if let (Ok(angle), Ok(speed)) = (fields[1].parse::<f64>(), fields[3].parse::<f64>()) {
+                editor.last_twa = Some(angle.min(360.0 - angle).clamp(0.0, 180.0));
+                editor.last_tws = Some(speed);
+            }
+        }
+        Some("VHW") if fields.len() >= 7 && fields[6] == "N" => {
+            editor.last_stw = fields[5].parse::<f64>().ok();
+        }
+        _ => return,
+    }
+    if !editor.capturing {
+        return;
+    }
+    let (Some(twa), Some(tws), Some(stw)) = (editor.last_twa, editor.last_tws, editor.last_stw)
+    else {
+        return;
+    };
+    if !(0.0..=180.0).contains(&twa)
+        || !(0.0..=200.0).contains(&tws)
+        || !(0.0..=100.0).contains(&stw)
+    {
+        return;
+    }
+    let Some(Document::Polar(polar)) = &mut editor.document else {
+        return;
+    };
+    let row = ((twa / 5.0).round() as usize).min(polar.twa.len() - 1);
+    let column = ((tws / 2.0).round() as usize)
+        .saturating_sub(1)
+        .min(polar.tws.len() - 1);
+    if editor.sample_counts.len() != polar.twa.len() {
+        editor.sample_counts = vec![vec![0; polar.tws.len()]; polar.twa.len()];
+    }
+    let count = editor.sample_counts[row][column];
+    let previous = polar.speeds[row][column].unwrap_or(stw);
+    polar.speeds[row][column] = Some((previous * f64::from(count) + stw) / f64::from(count + 1));
+    editor.sample_counts[row][column] = count + 1;
+    editor.samples += 1;
+    editor.dirty = true;
 }
 
 struct IPolars;
@@ -502,6 +611,22 @@ impl exports::opencpn::portable::plugin::Guest for IPolars {
                 });
                 e.dirty = false;
                 e.status = "Created a new interoperable boat XML.".into();
+            }
+            "capture" => {
+                let start = value.trim() == "true";
+                if start && !e.capturing {
+                    let polar = capture_polar();
+                    e.sample_counts = vec![vec![0; polar.tws.len()]; polar.twa.len()];
+                    e.document = Some(Document::Polar(polar));
+                    e.samples = 0;
+                    e.last_twa = None;
+                    e.last_tws = None;
+                    e.last_stw = None;
+                    e.status = "Live polar capture started.".into();
+                } else if !start {
+                    e.status = "Live capture stopped; review and interpolate before saving.".into();
+                }
+                e.capturing = start;
             }
             "new-angle" => e.new_angle = json_string(&value)?,
             "new-wind" => e.new_wind = json_string(&value)?,
@@ -641,6 +766,11 @@ impl exports::opencpn::portable::plugin::Guest for IPolars {
         Ok(response(&e))
     }
     fn on_job_event(_: String, _: exports::opencpn::portable::plugin::JobEvent) {}
+    fn on_navigation_sentence(sentence: String) {
+        if let Ok(mut editor) = EDITOR.lock() {
+            navigation_sample(&mut editor, &sentence);
+        }
+    }
     fn calculate_route(
         _: exports::opencpn::portable::plugin::RouteRequest,
     ) -> Result<exports::opencpn::portable::plugin::RouteResult, String> {

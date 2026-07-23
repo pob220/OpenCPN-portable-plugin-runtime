@@ -278,6 +278,9 @@ int32_t ocpn_portable_runtime_on_job_event(
     ocpn_portable_runtime* runtime, const char* job_id, size_t job_id_len,
     uint32_t event_kind, uint8_t progress, const char* message,
     size_t message_len, char* error, size_t error_capacity);
+int32_t ocpn_portable_runtime_on_navigation_sentence(
+    ocpn_portable_runtime* runtime, const char* sentence,
+    size_t sentence_len, char* error, size_t error_capacity);
 int32_t ocpn_portable_runtime_calculate_route(
     ocpn_portable_runtime* runtime, const ocpn_portable_route_request* request,
     ocpn_portable_route_result* result, char* error, size_t error_capacity);

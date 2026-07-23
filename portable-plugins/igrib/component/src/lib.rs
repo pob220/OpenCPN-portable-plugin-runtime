@@ -233,6 +233,8 @@ impl exports::opencpn::portable::plugin::Guest for IGrib {
         }
     }
 
+    fn on_navigation_sentence(_: String) {}
+
     fn calculate_route(
         _request: exports::opencpn::portable::plugin::RouteRequest,
     ) -> Result<exports::opencpn::portable::plugin::RouteResult, String> {

@@ -193,6 +193,7 @@ class RuntimeEngine::Impl {
                              std::string* token, std::string* diagnostic);
   bool WaitForIdle(const std::string& package_id,
                    std::chrono::milliseconds timeout);
+  void DeliverNavigationSentence(const std::string& sentence);
   void Fail(Instance& instance, const std::string& operation,
             const std::string& diagnostic);
   Instance* Find(const std::string& package_id);
@@ -1407,6 +1408,48 @@ bool RuntimeEngine::Impl::WaitForIdle(const std::string& package_id,
              : instance->executor.WaitIdle(timeout - elapsed);
 }
 
+void RuntimeEngine::Impl::DeliverNavigationSentence(
+    const std::string& sentence) {
+  if (sentence.empty() || sentence.size() > 1024 ||
+      (sentence.front() != '$' && sentence.front() != '!') ||
+      !std::all_of(sentence.begin(), sentence.end(), [](unsigned char value) {
+        return value == '\r' || value == '\n' ||
+               (value >= 0x20 && value <= 0x7e);
+      })) {
+    return;
+  }
+  for (auto& item : instances) {
+    Instance* instance = item.get();
+    if (!instance->enabled || instance->failed || !instance->runtime ||
+        !Permitted(*instance, "navigation.nmea.read")) {
+      continue;
+    }
+    const std::uint64_t generation = instance->executor.Generation();
+    instance->executor.Post(
+        generation,
+        [instance, sentence](std::uint64_t task_generation) {
+          if (task_generation != instance->executor.Generation() ||
+              !instance->enabled || instance->failed) {
+            return;
+          }
+          std::lock_guard<std::mutex> lock(instance->runtime_mutex);
+          if (!instance->runtime ||
+              task_generation != instance->executor.Generation()) {
+            return;
+          }
+          std::array<char, kErrorCapacity> error{};
+          if (ocpn_portable_runtime_on_navigation_sentence(
+                  instance->runtime, sentence.data(), sentence.size(),
+                  error.data(), error.size()) != 0) {
+            instance->owner->Fail(
+                *instance, "navigation sentence",
+                error[0] ? error.data()
+                         : "portable navigation sentence handler failed");
+          }
+        });
+  }
+}
+
 void RuntimeEngine::Impl::Shutdown() {
   if (stopped) return;
   stopped = true;
@@ -1519,6 +1562,10 @@ void RuntimeEngine::SetPositionFix(const PlugIn_Position_Fix_Ex& fix) {
   impl_->has_sog = std::isfinite(fix.Sog);
   impl_->cog = impl_->has_cog ? fix.Cog : 0.0;
   impl_->sog = impl_->has_sog ? fix.Sog : 0.0;
+}
+
+void RuntimeEngine::DeliverNavigationSentence(const std::string& sentence) {
+  impl_->DeliverNavigationSentence(sentence);
 }
 
 std::vector<PackageSnapshot> RuntimeEngine::Packages() const {

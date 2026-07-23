@@ -102,6 +102,7 @@ class RuntimeEngine {
   bool WaitForIdle(const std::string& package_id,
                    std::chrono::milliseconds timeout);
   void SetPositionFix(const PlugIn_Position_Fix_Ex& fix);
+  void DeliverNavigationSentence(const std::string& sentence);
   std::vector<PackageSnapshot> Packages() const;
   std::vector<OverlayScene> Scenes() const;
   const std::string& StorageRoot() const { return storage_root_; }

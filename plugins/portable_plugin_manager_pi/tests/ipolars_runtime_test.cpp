@@ -72,7 +72,8 @@ int main() {
       "\"portable_api\":\">=0.1.0 <0.2.0\","
       "\"surfaces\":{\"polars.editor\":\"ui/ipolars.ui.json\"},"
       "\"permissions\":[\"ui.commands\",\"settings.read-write\","
-      "\"storage.user-selected\"],\"development\":true}"));
+      "\"storage.user-selected\",\"navigation.nmea.read\"],"
+      "\"development\":true}"));
 
   std::set<std::string> actions;
   std::string last_state;
@@ -138,6 +139,24 @@ int main() {
   CHECK(engine.WaitForIdle(id, std::chrono::seconds(2)));
   CHECK(last_error.empty());
   CHECK(Read(output).find("90\t5.25\t6.5") != std::string::npos);
+
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor", "capture", "true"));
+  CHECK(engine.WaitForIdle(id, std::chrono::seconds(2)));
+  engine.DeliverNavigationSentence(
+      "$IIVWT,90.0,R,12.0,N,6.2,M,22.2,K*73");
+  engine.DeliverNavigationSentence(
+      "$IIVHW,0.0,T,0.0,M,5.50,N,10.2,K*56");
+  CHECK(engine.WaitForIdle(id, std::chrono::seconds(2)));
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor", "refresh", "null"));
+  CHECK(engine.WaitForIdle(id, std::chrono::seconds(2)));
+  CHECK(last_state.find("1 samples retained") != std::string::npos);
+  CHECK(last_state.find("5.5") != std::string::npos);
+  engine.DeliverNavigationSentence(
+      "$IIVHW,0.0,T,0.0,M,99.00,N,10.2,K*00");
+  CHECK(engine.WaitForIdle(id, std::chrono::seconds(2)));
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor", "refresh", "null"));
+  CHECK(engine.WaitForIdle(id, std::chrono::seconds(2)));
+  CHECK(last_state.find("1 samples retained") != std::string::npos);
 
   last_error.clear();
   CHECK(engine.HandleSurfaceEvent(id, "polars.editor", "save-as",

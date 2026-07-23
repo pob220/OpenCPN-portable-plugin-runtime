@@ -3439,6 +3439,8 @@ impl exports::opencpn::portable::plugin::Guest for IWeatherRouting {
         Ok(value_json)
     }
     fn on_job_event(_: String, _: exports::opencpn::portable::plugin::JobEvent) {}
+
+    fn on_navigation_sentence(_: String) {}
     fn calculate_route(request: RouteRequest) -> Result<RouteResult, String> {
         calculate(request)
     }

@@ -36,6 +36,7 @@ const POLAR_AXIS_LIMIT: usize = 200;
 const POLAR_CELL_LIMIT: usize = 200_000;
 const PRIVATE_READ_LIMIT: usize = 8 * 1024 * 1024;
 const USER_FILE_LIMIT: usize = 8 * 1024 * 1024;
+const NAVIGATION_SENTENCE_LIMIT: usize = 1024;
 const EPOCH_TICK: Duration = Duration::from_millis(100);
 const CALL_EPOCH_DEADLINE: u64 = 50;
 const ROUTING_BASE_FUEL: u64 = 2_000_000_000;
@@ -1344,6 +1345,33 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_job_event(
             .bindings
             .opencpn_portable_plugin()
             .call_on_job_event(&mut runtime.store, &job_id, &event)?;
+        Ok(())
+    })();
+    ffi_result(result, error, error_capacity)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ocpn_portable_runtime_on_navigation_sentence(
+    runtime: *mut Runtime,
+    sentence: *const c_char,
+    sentence_len: usize,
+    error: *mut c_char,
+    error_capacity: usize,
+) -> i32 {
+    let Some(runtime) = (unsafe { runtime.as_mut() }) else {
+        write_error(error, error_capacity, "runtime is null");
+        return -1;
+    };
+    let result = (|| -> anyhow::Result<()> {
+        prepare_call(runtime)?;
+        if sentence_len == 0 || sentence_len > NAVIGATION_SENTENCE_LIMIT {
+            anyhow::bail!("navigation sentence is empty or exceeds 1024 bytes");
+        }
+        let sentence = input_string(sentence, sentence_len)?;
+        runtime
+            .bindings
+            .opencpn_portable_plugin()
+            .call_on_navigation_sentence(&mut runtime.store, &sentence)?;
         Ok(())
     })();
     ffi_result(result, error, error_capacity)

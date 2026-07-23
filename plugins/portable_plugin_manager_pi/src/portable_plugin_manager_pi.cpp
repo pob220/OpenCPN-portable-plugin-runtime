@@ -122,7 +122,7 @@ int PortablePluginManagerPi::Init() {
   if (initialized_) {
     wxLogWarning("PPM event=duplicate-init");
     return WANTS_TOOLBAR_CALLBACK | INSTALLS_TOOLBAR_TOOL | WANTS_CONFIG |
-           WANTS_NMEA_EVENTS | WANTS_OVERLAY_CALLBACK |
+           WANTS_NMEA_EVENTS | WANTS_NMEA_SENTENCES | WANTS_OVERLAY_CALLBACK |
            WANTS_OPENGL_OVERLAY_CALLBACK;
   }
   initialized_ = true;
@@ -199,7 +199,7 @@ int PortablePluginManagerPi::Init() {
     }
   }
   return WANTS_TOOLBAR_CALLBACK | INSTALLS_TOOLBAR_TOOL | WANTS_CONFIG |
-         WANTS_NMEA_EVENTS | WANTS_OVERLAY_CALLBACK |
+         WANTS_NMEA_EVENTS | WANTS_NMEA_SENTENCES | WANTS_OVERLAY_CALLBACK |
          WANTS_OPENGL_OVERLAY_CALLBACK;
 }
 
@@ -780,6 +780,14 @@ void PortablePluginManagerPi::RevokePackagePermissions(
 
 void PortablePluginManagerPi::SetPositionFixEx(PlugIn_Position_Fix_Ex& fix) {
   if (runtime_engine_) runtime_engine_->SetPositionFix(fix);
+}
+
+void PortablePluginManagerPi::SetNMEASentence(wxString& sentence) {
+  if (!runtime_engine_) return;
+  const wxScopedCharBuffer value = sentence.utf8_str();
+  if (value)
+    runtime_engine_->DeliverNavigationSentence(
+        std::string(value.data(), value.length()));
 }
 
 bool PortablePluginManagerPi::RenderOverlayMultiCanvas(

@@ -4,7 +4,7 @@
   "role": "vessel-performance-editor",
   "kind": "modeless-window",
   "title": "iPolars — Portable Vessel Performance Editor",
-  "tabs": ["Polar editor", "Boat XML", "Validation"],
+  "tabs": ["Polar editor", "Live data", "Boat XML", "Validation"],
   "menus": [
     {
       "label": "File",
@@ -30,6 +30,9 @@
     {"id": "normalize", "tab": "Polar editor", "type": "button", "label": "Sort and normalize axes"},
     {"id": "interpolate", "tab": "Polar editor", "type": "button", "label": "Interpolate bounded gaps"},
     {"id": "polar-grid", "tab": "Polar editor", "type": "grid", "label": "Boat speed through water (knots)", "columns": ["TWA / TWS"]},
+    {"id": "capture", "tab": "Live data", "type": "toggle", "label": "Record live NMEA polar samples"},
+    {"id": "capture-status", "tab": "Live data", "type": "status", "label": "Capture"},
+    {"id": "sample-count", "tab": "Live data", "type": "status", "label": "Retained samples"},
     {"id": "new-boat", "tab": "Boat XML", "type": "button", "label": "New boat XML"},
     {"id": "boat-grid", "tab": "Boat XML", "type": "grid", "label": "Referenced polar files", "columns": ["Polar file", "Crossover %"]},
     {"id": "diagnostics", "tab": "Validation", "type": "diagnostics", "label": "Interoperability and validation report"},

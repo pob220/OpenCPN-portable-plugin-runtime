@@ -19,7 +19,8 @@
   "permissions": [
     "ui.commands",
     "settings.read-write",
-    "storage.user-selected"
+    "storage.user-selected",
+    "navigation.nmea.read"
   ],
   "resources": [
     "resources/ipolars.svg",
