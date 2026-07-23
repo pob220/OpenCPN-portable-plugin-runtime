@@ -32,6 +32,7 @@
 #include "ocpn_plugin.h"
 #include "ocpn_portable_runtime.h"
 #include "declarative_ui.h"
+#include "environment_provider.h"
 #include "job_scheduler.h"
 #include "permission_store.h"
 #include "service_version.h"
@@ -71,8 +72,7 @@ bool IsSafeName(const std::string& value) {
 }
 
 bool IsPackageId(const wxString& value) {
-  static const wxRegEx expression(
-      "^[a-z0-9]+([.-][a-z0-9]+)+$");
+  static const wxRegEx expression("^[a-z0-9]+([.-][a-z0-9]+)+$");
   return value.length() <= 128 && expression.IsValid() &&
          expression.Matches(value);
 }
@@ -100,8 +100,7 @@ bool SafeRelativePath(const wxString& value) {
   return path.GetFullPath().Find("..") == wxNOT_FOUND;
 }
 
-std::string ReadSmallFile(const fs::path& path, std::size_t limit,
-                          bool* okay) {
+std::string ReadSmallFile(const fs::path& path, std::size_t limit, bool* okay) {
   *okay = false;
   std::error_code error;
   const auto size = fs::file_size(path, error);
@@ -118,7 +117,7 @@ std::string ReadSmallFile(const fs::path& path, std::size_t limit,
 }  // namespace
 
 class RuntimeEngine::Impl {
- public:
+public:
   struct UserFileGrant {
     fs::path path;
     bool writable = false;
@@ -138,6 +137,7 @@ class RuntimeEngine::Impl {
     std::set<std::string> permissions;
     std::map<std::string, std::string> provided_services;
     std::map<std::string, std::string> required_services;
+    std::unique_ptr<EnvironmentProvider> environment_provider;
     ocpn_portable_runtime* runtime = nullptr;
     mutable std::mutex runtime_mutex;
     mutable std::mutex state_mutex;
@@ -194,6 +194,9 @@ class RuntimeEngine::Impl {
   bool RegisterUserFileGrant(const std::string& package_id,
                              const std::string& path, bool writable,
                              std::string* token, std::string* diagnostic);
+  bool SelectEnvironmentDataset(const std::string& package_id,
+                                const std::vector<std::string>& selected_paths);
+  std::string EnvironmentSummary(const std::string& package_id) const;
   bool WaitForIdle(const std::string& package_id,
                    std::chrono::milliseconds timeout);
   void DeliverNavigationSentence(const std::string& sentence);
@@ -273,9 +276,10 @@ class RuntimeEngine::Impl {
       const char* label, std::size_t label_length, const char* tooltip,
       std::size_t tooltip_length, const char* icon_resource,
       std::size_t icon_resource_length, std::uint32_t* host_action_id);
-  static std::int32_t GetVesselPosition(
-      void* user_data, double* latitude, double* longitude, double* cog,
-      std::uint8_t* has_cog, double* sog, std::uint8_t* has_sog);
+  static std::int32_t GetVesselPosition(void* user_data, double* latitude,
+                                        double* longitude, double* cog,
+                                        std::uint8_t* has_cog, double* sog,
+                                        std::uint8_t* has_sog);
   static std::int32_t SettingGet(void* user_data, const char* key,
                                  std::size_t key_length, char* value,
                                  std::size_t value_capacity,
@@ -284,10 +288,11 @@ class RuntimeEngine::Impl {
   static std::int32_t SettingSet(void* user_data, const char* key,
                                  std::size_t key_length, const char* value,
                                  std::size_t value_length);
-  static std::int32_t SubmitPolyline(
-      void* user_data, const char* scene_id, std::size_t scene_id_length,
-      const ocpn_portable_geo_point* points, std::size_t point_count,
-      ocpn_portable_overlay_style style);
+  static std::int32_t SubmitPolyline(void* user_data, const char* scene_id,
+                                     std::size_t scene_id_length,
+                                     const ocpn_portable_geo_point* points,
+                                     std::size_t point_count,
+                                     ocpn_portable_overlay_style style);
   static std::int32_t ClearScene(void* user_data, const char* scene_id,
                                  std::size_t scene_id_length);
   static std::int32_t Unsupported(void*) { return -1; }
@@ -309,36 +314,35 @@ class RuntimeEngine::Impl {
     return OpenNamedSurface(user_data, Text(surface_id, surface_id_length));
   }
   static std::int32_t EnvironmentSampleBatch(
-      void*, const ocpn_portable_environment_sample_request*, std::size_t,
-      ocpn_portable_environment_sample*, std::size_t, char* error,
-      std::size_t error_capacity) {
-    CopyError("environment provider adapter is not connected", error,
-              error_capacity);
-    return -2;
-  }
+      void* user_data, const ocpn_portable_environment_sample_request* requests,
+      std::size_t request_count, ocpn_portable_environment_sample* results,
+      std::size_t result_count, char* error, std::size_t error_capacity);
   static void RoutingProgress(void*, std::uint8_t, const char*, std::size_t) {}
   static std::uint8_t RoutingCancelled(void*) { return 0; }
   static std::int32_t ChartsQuerySegments(
       void* user_data, const ocpn_portable_geo_segment* segments,
       std::size_t segment_count, ocpn_portable_chart_segment_result* results,
       std::size_t result_count);
-  static std::int32_t NetworkGetToPrivate(
-      void*, const char*, std::size_t, const char*, std::size_t, const char*,
-      std::size_t, std::uint64_t) {
+  static std::int32_t NetworkGetToPrivate(void*, const char*, std::size_t,
+                                          const char*, std::size_t, const char*,
+                                          std::size_t, std::uint64_t) {
     return -1;
   }
-  static std::int32_t StoragePrivateRead(
-      void* user_data, const char* private_name,
-      std::size_t private_name_length, std::uint8_t* value,
-      std::size_t value_capacity, std::size_t* value_length);
-  static std::int32_t UserFileRead(
-      void* user_data, const char* grant_token,
-      std::size_t grant_token_length, std::uint8_t* value,
-      std::size_t value_capacity, std::size_t* value_length);
-  static std::int32_t UserFileWrite(
-      void* user_data, const char* grant_token,
-      std::size_t grant_token_length, const std::uint8_t* value,
-      std::size_t value_length);
+  static std::int32_t StoragePrivateRead(void* user_data,
+                                         const char* private_name,
+                                         std::size_t private_name_length,
+                                         std::uint8_t* value,
+                                         std::size_t value_capacity,
+                                         std::size_t* value_length);
+  static std::int32_t UserFileRead(void* user_data, const char* grant_token,
+                                   std::size_t grant_token_length,
+                                   std::uint8_t* value,
+                                   std::size_t value_capacity,
+                                   std::size_t* value_length);
+  static std::int32_t UserFileWrite(void* user_data, const char* grant_token,
+                                    std::size_t grant_token_length,
+                                    const std::uint8_t* value,
+                                    std::size_t value_length);
   void DeliverJobEvent(Instance* instance, const JobEvent& event);
 
   fs::path storage_root;
@@ -361,13 +365,13 @@ class RuntimeEngine::Impl {
   bool has_sog = false;
 };
 
-std::int32_t RuntimeEngine::Impl::StartJob(
-    void* user_data, const char* job_id, std::size_t job_id_length,
-    std::uint32_t work_units) {
+std::int32_t RuntimeEngine::Impl::StartJob(void* user_data, const char* job_id,
+                                           std::size_t job_id_length,
+                                           std::uint32_t work_units) {
   auto* instance = static_cast<Instance*>(user_data);
   const std::string id = Text(job_id, job_id_length);
-  if (!instance || !instance->owner || !instance->enabled ||
-      instance->failed || !IsSafeName(id) ||
+  if (!instance || !instance->owner || !instance->enabled || instance->failed ||
+      !IsSafeName(id) ||
       !instance->owner->Permitted(*instance, "jobs.compute")) {
     return -1;
   }
@@ -383,16 +387,16 @@ std::int32_t RuntimeEngine::Impl::StartJob(
              : -2;
 }
 
-std::int32_t RuntimeEngine::Impl::CancelJob(
-    void* user_data, const char* job_id, std::size_t job_id_length) {
+std::int32_t RuntimeEngine::Impl::CancelJob(void* user_data, const char* job_id,
+                                            std::size_t job_id_length) {
   auto* instance = static_cast<Instance*>(user_data);
   const std::string id = Text(job_id, job_id_length);
   if (!instance || !instance->owner || !IsSafeName(id) ||
       !instance->owner->Permitted(*instance, "jobs.compute")) {
     return -1;
   }
-  return instance->owner->jobs.Cancel(
-             instance->id, id, instance->executor.Generation())
+  return instance->owner->jobs.Cancel(instance->id, id,
+                                      instance->executor.Generation())
              ? 0
              : -2;
 }
@@ -443,15 +447,16 @@ std::int32_t RuntimeEngine::Impl::OpenNamedSurface(
   const std::string package_id = instance->id;
   const DeclarativeSurface surface = item->second;
   const auto opened = instance->owner->surface_opened;
-  instance->owner->Publish([opened, package_id, surface]() {
-    opened(package_id, surface);
-  });
+  instance->owner->Publish(
+      [opened, package_id, surface]() { opened(package_id, surface); });
   return 0;
 }
 
-bool RuntimeEngine::Impl::RegisterUserFileGrant(
-    const std::string& package_id, const std::string& path_value,
-    bool writable, std::string* token, std::string* diagnostic) {
+bool RuntimeEngine::Impl::RegisterUserFileGrant(const std::string& package_id,
+                                                const std::string& path_value,
+                                                bool writable,
+                                                std::string* token,
+                                                std::string* diagnostic) {
   Instance* instance = Find(package_id);
   if (!instance || !instance->enabled || instance->failed ||
       !Permitted(*instance, "storage.user-selected")) {
@@ -467,7 +472,8 @@ bool RuntimeEngine::Impl::RegisterUserFileGrant(
   }
   if (writable) {
     if (fs::is_directory(path, error) || fs::is_symlink(path, error)) {
-      if (diagnostic) *diagnostic = "save target must not be a directory or link";
+      if (diagnostic)
+        *diagnostic = "save target must not be a directory or link";
       return false;
     }
     error.clear();
@@ -506,22 +512,92 @@ bool RuntimeEngine::Impl::RegisterUserFileGrant(
       return false;
     }
     instance->user_file_grants.emplace(
-        generated, UserFileGrant{path, writable, false,
-                                 instance->executor.Generation()});
+        generated,
+        UserFileGrant{path, writable, false, instance->executor.Generation()});
   }
   if (token) *token = generated;
   return true;
 }
 
-std::int32_t RuntimeEngine::Impl::UserFileRead(
-    void* user_data, const char* grant_token,
-    std::size_t grant_token_length, std::uint8_t* value,
-    std::size_t value_capacity, std::size_t* value_length) {
+bool RuntimeEngine::Impl::SelectEnvironmentDataset(
+    const std::string& package_id,
+    const std::vector<std::string>& selected_paths) {
+  Instance* instance = Find(package_id);
+  if (!instance || !instance->enabled || instance->failed ||
+      !instance->environment_provider ||
+      !Permitted(*instance, "environment.datasets") ||
+      !Permitted(*instance, "helpers.environment.decode") ||
+      selected_paths.empty() || selected_paths.size() > 16) {
+    return false;
+  }
+  const std::uint64_t generation = instance->executor.Generation();
+  const auto posted = instance->executor.Post(
+      generation, [instance, selected_paths](std::uint64_t task_generation) {
+        if (task_generation != instance->executor.Generation() ||
+            !instance->enabled || instance->failed ||
+            !instance->environment_provider) {
+          return;
+        }
+        std::string diagnostic;
+        const bool opened = instance->environment_provider->OpenDataset(
+            selected_paths,
+            [instance, task_generation]() {
+              return task_generation != instance->executor.Generation() ||
+                     !instance->enabled || instance->failed;
+            },
+            &diagnostic);
+        if (!instance->owner->surface_response) return;
+        std::string state;
+        if (opened) {
+          const std::string summary = instance->environment_provider->Summary();
+          auto json_string = [](const std::string& value) {
+            std::string result{"\""};
+            for (const unsigned char character : value) {
+              if (character == '"' || character == '\\') {
+                result.push_back('\\');
+                result.push_back(static_cast<char>(character));
+              } else if (character >= 0x20) {
+                result.push_back(static_cast<char>(character));
+              }
+            }
+            result.push_back('"');
+            return result;
+          };
+          state =
+              "{\"status\":\"GRIB ready for weather routing\","
+              "\"controls\":{\"file\":" +
+              json_string(summary) + "}}";
+        }
+        const auto response = instance->owner->surface_response;
+        const std::string id = instance->id;
+        instance->owner->Publish([response, id, state = std::move(state),
+                                  diagnostic = std::move(diagnostic)]() {
+          response(id, "environment.viewer", "open", state, diagnostic);
+        });
+      });
+  return posted == SerialExecutor::PostResult::kAccepted;
+}
+
+std::string RuntimeEngine::Impl::EnvironmentSummary(
+    const std::string& package_id) const {
+  const Instance* instance = Find(package_id);
+  return instance && instance->environment_provider
+             ? instance->environment_provider->Summary()
+             : "No environmental provider is loaded";
+}
+
+std::int32_t RuntimeEngine::Impl::UserFileRead(void* user_data,
+                                               const char* grant_token,
+                                               std::size_t grant_token_length,
+                                               std::uint8_t* value,
+                                               std::size_t value_capacity,
+                                               std::size_t* value_length) {
   auto* instance = static_cast<Instance*>(user_data);
   const std::string token = Text(grant_token, grant_token_length);
   if (!instance || !instance->owner || !value_length ||
       !instance->owner->Permitted(*instance, "storage.user-selected") ||
-      !instance->enabled || instance->failed || value_capacity > kUserFileLimit) {
+      !instance->enabled || instance->failed ||
+      value_capacity > kUserFileLimit) {
     return -1;
   }
   fs::path path;
@@ -546,10 +622,11 @@ std::int32_t RuntimeEngine::Impl::UserFileRead(
   return 0;
 }
 
-std::int32_t RuntimeEngine::Impl::UserFileWrite(
-    void* user_data, const char* grant_token,
-    std::size_t grant_token_length, const std::uint8_t* value,
-    std::size_t value_length) {
+std::int32_t RuntimeEngine::Impl::UserFileWrite(void* user_data,
+                                                const char* grant_token,
+                                                std::size_t grant_token_length,
+                                                const std::uint8_t* value,
+                                                std::size_t value_length) {
   auto* instance = static_cast<Instance*>(user_data);
   const std::string token = Text(grant_token, grant_token_length);
   if (!instance || !instance->owner || value_length > kUserFileLimit ||
@@ -607,8 +684,7 @@ std::int32_t RuntimeEngine::Impl::UserFileWrite(
 }
 
 void RuntimeEngine::Impl::Log(void* user_data, std::uint32_t level,
-                              const char* message,
-                              std::size_t message_length) {
+                              const char* message, std::size_t message_length) {
   const auto* instance = static_cast<Instance*>(user_data);
   const wxString text = wxString::Format(
       "Portable package %s: %s", instance ? instance->id : "unknown",
@@ -643,10 +719,10 @@ std::int32_t RuntimeEngine::Impl::RegisterRuntimeAction(
   if (!IsSafeName(action.action_id) || action.label.empty()) return -2;
   if (!resource.empty()) {
     if (!SafeRelativePath(resource)) return -3;
-    action.icon_path = (instance->package_root /
-                        fs::path(resource.ToStdString()))
-                           .lexically_normal()
-                           .string();
+    action.icon_path =
+        (instance->package_root / fs::path(resource.ToStdString()))
+            .lexically_normal()
+            .string();
     std::error_code error;
     if (!fs::is_regular_file(action.icon_path, error)) return -4;
   }
@@ -678,10 +754,12 @@ std::int32_t RuntimeEngine::Impl::GetVesselPosition(
   return 0;
 }
 
-std::int32_t RuntimeEngine::Impl::SettingGet(
-    void* user_data, const char* key, std::size_t key_length, char* value,
-    std::size_t value_capacity, std::size_t* value_length,
-    std::uint8_t* found) {
+std::int32_t RuntimeEngine::Impl::SettingGet(void* user_data, const char* key,
+                                             std::size_t key_length,
+                                             char* value,
+                                             std::size_t value_capacity,
+                                             std::size_t* value_length,
+                                             std::uint8_t* found) {
   auto* instance = static_cast<Instance*>(user_data);
   if (!instance || !instance->owner || !value_length || !found ||
       !instance->owner->Permitted(*instance, "settings.read-write")) {
@@ -707,9 +785,10 @@ std::int32_t RuntimeEngine::Impl::SettingGet(
   return 0;
 }
 
-std::int32_t RuntimeEngine::Impl::SettingSet(
-    void* user_data, const char* key, std::size_t key_length,
-    const char* value, std::size_t value_length) {
+std::int32_t RuntimeEngine::Impl::SettingSet(void* user_data, const char* key,
+                                             std::size_t key_length,
+                                             const char* value,
+                                             std::size_t value_length) {
   auto* instance = static_cast<Instance*>(user_data);
   if (!instance || !instance->owner ||
       !instance->owner->Permitted(*instance, "settings.read-write") ||
@@ -765,8 +844,7 @@ std::int32_t RuntimeEngine::Impl::SubmitPolyline(
     if (!std::isfinite(points[index].latitude) ||
         !std::isfinite(points[index].longitude) ||
         points[index].latitude < -90.0 || points[index].latitude > 90.0 ||
-        points[index].longitude < -180.0 ||
-        points[index].longitude > 180.0) {
+        points[index].longitude < -180.0 || points[index].longitude > 180.0) {
       return -2;
     }
     scene.points.push_back({points[index].latitude, points[index].longitude});
@@ -793,6 +871,60 @@ std::int32_t RuntimeEngine::Impl::ClearScene(void* user_data,
   return 0;
 }
 
+std::int32_t RuntimeEngine::Impl::EnvironmentSampleBatch(
+    void* user_data, const ocpn_portable_environment_sample_request* requests,
+    std::size_t request_count, ocpn_portable_environment_sample* results,
+    std::size_t result_count, char* error, std::size_t error_capacity) {
+  auto* consumer = static_cast<Instance*>(user_data);
+  if (!consumer || !consumer->owner || request_count != result_count ||
+      (!requests && request_count != 0) || (!results && result_count != 0) ||
+      request_count > 100'000 ||
+      !consumer->owner->Permitted(*consumer, "environment.consume")) {
+    CopyError("invalid or unauthorized environmental sample batch", error,
+              error_capacity);
+    return -1;
+  }
+  const Instance* provider = consumer->owner->CompatibleProvider(
+      *consumer, "org.opencpn.environment.provider");
+  if (!provider || !provider->environment_provider) {
+    CopyError("no enabled compatible environmental provider is available",
+              error, error_capacity);
+    return -2;
+  }
+  std::vector<EnvironmentRequest> input;
+  input.reserve(request_count);
+  for (std::size_t index = 0; index < request_count; ++index) {
+    input.push_back({requests[index].latitude, requests[index].longitude,
+                     requests[index].unix_time});
+  }
+  std::vector<EnvironmentSample> sampled;
+  std::string diagnostic;
+  if (!provider->environment_provider->SampleBatch(
+          input, &sampled,
+          [consumer]() {
+            return !consumer->enabled || consumer->failed || !consumer->owner ||
+                   consumer->owner->stopped;
+          },
+          &diagnostic) ||
+      sampled.size() != request_count) {
+    CopyError(diagnostic.empty()
+                  ? "environmental provider returned an invalid batch"
+                  : diagnostic,
+              error, error_capacity);
+    return -3;
+  }
+  for (std::size_t index = 0; index < result_count; ++index) {
+    results[index].wind_u_knots = sampled[index].wind_u_knots;
+    results[index].wind_v_knots = sampled[index].wind_v_knots;
+    results[index].current_u_knots = sampled[index].current_u_knots;
+    results[index].current_v_knots = sampled[index].current_v_knots;
+    results[index].wave_height_metres = sampled[index].wave_height_metres;
+    results[index].available =
+        static_cast<std::uint8_t>(sampled[index].available);
+  }
+  return 0;
+}
+
 std::int32_t RuntimeEngine::Impl::ChartsQuerySegments(
     void* user_data, const ocpn_portable_geo_segment* segments,
     std::size_t segment_count, ocpn_portable_chart_segment_result* results,
@@ -803,8 +935,8 @@ std::int32_t RuntimeEngine::Impl::ChartsQuerySegments(
       !instance->owner->Permitted(*instance, "charts.coverage")) {
     return -1;
   }
-  const std::vector<ocpn_portable_geo_segment> input(
-      segments, segments + segment_count);
+  const std::vector<ocpn_portable_geo_segment> input(segments,
+                                                     segments + segment_count);
   auto output =
       std::make_shared<std::vector<ocpn_portable_chart_segment_result>>(
           segment_count);
@@ -830,9 +962,9 @@ std::int32_t RuntimeEngine::Impl::ChartsQuerySegments(
 }
 
 std::int32_t RuntimeEngine::Impl::StoragePrivateRead(
-    void* user_data, const char* private_name,
-    std::size_t private_name_length, std::uint8_t* value,
-    std::size_t value_capacity, std::size_t* value_length) {
+    void* user_data, const char* private_name, std::size_t private_name_length,
+    std::uint8_t* value, std::size_t value_capacity,
+    std::size_t* value_length) {
   auto* instance = static_cast<Instance*>(user_data);
   const std::string name = Text(private_name, private_name_length);
   if (!instance || !instance->owner || !value_length || !IsSafeName(name) ||
@@ -853,23 +985,20 @@ std::int32_t RuntimeEngine::Impl::StoragePrivateRead(
 RuntimeEngine::Impl::Instance* RuntimeEngine::Impl::Find(
     const std::string& package_id) {
   const auto item =
-      std::find_if(instances.begin(), instances.end(), [&](const auto& value) {
-        return value->id == package_id;
-      });
+      std::find_if(instances.begin(), instances.end(),
+                   [&](const auto& value) { return value->id == package_id; });
   return item == instances.end() ? nullptr : item->get();
 }
 
 const RuntimeEngine::Impl::Instance* RuntimeEngine::Impl::Find(
     const std::string& package_id) const {
   const auto item =
-      std::find_if(instances.begin(), instances.end(), [&](const auto& value) {
-        return value->id == package_id;
-      });
+      std::find_if(instances.begin(), instances.end(),
+                   [&](const auto& value) { return value->id == package_id; });
   return item == instances.end() ? nullptr : item->get();
 }
 
-bool RuntimeEngine::Impl::Start(Instance& instance,
-                                std::string* diagnostic) {
+bool RuntimeEngine::Impl::Start(Instance& instance, std::string* diagnostic) {
   if (stopped) {
     if (diagnostic) *diagnostic = "runtime engine is shutting down";
     return false;
@@ -894,6 +1023,7 @@ bool RuntimeEngine::Impl::Start(Instance& instance,
       return false;
     }
   }
+  if (instance.environment_provider) instance.environment_provider->Resume();
   std::lock_guard<std::mutex> lock(instance.runtime_mutex);
   std::array<char, kErrorCapacity> error{};
   if (!instance.runtime) {
@@ -921,16 +1051,16 @@ bool RuntimeEngine::Impl::Start(Instance& instance,
     callbacks.storage_private_read = StoragePrivateRead;
     callbacks.user_file_read = UserFileRead;
     callbacks.user_file_write = UserFileWrite;
-    instance.runtime = ocpn_portable_runtime_create(
-        instance.component_path.c_str(), &callbacks, error.data(), error.size());
+    instance.runtime =
+        ocpn_portable_runtime_create(instance.component_path.c_str(),
+                                     &callbacks, error.data(), error.size());
     if (!instance.runtime ||
         ocpn_portable_runtime_initialize(
             instance.runtime, instance.id.data(), instance.id.size(),
             instance.name.data(), instance.name.size(), instance.version.data(),
             instance.version.size(), error.data(), error.size()) != 0) {
       remove_actions(instance.id);
-      if (instance.runtime)
-        ocpn_portable_runtime_destroy(instance.runtime);
+      if (instance.runtime) ocpn_portable_runtime_destroy(instance.runtime);
       instance.runtime = nullptr;
       instance.registered_actions.clear();
       instance.failed = true;
@@ -957,8 +1087,7 @@ bool RuntimeEngine::Impl::Start(Instance& instance,
     instance.runtime = nullptr;
     instance.registered_actions.clear();
     instance.failed = true;
-    instance.diagnostic =
-        error[0] ? error.data() : "runtime enable failed";
+    instance.diagnostic = error[0] ? error.data() : "runtime enable failed";
     if (diagnostic) *diagnostic = instance.diagnostic;
     return false;
   }
@@ -996,6 +1125,9 @@ bool RuntimeEngine::Impl::Stop(Instance& instance, bool destroy,
       }
     }
   }
+  if (instance.environment_provider) {
+    instance.environment_provider->RequestStop();
+  }
   const bool was_enabled = instance.enabled.exchange(false);
   instance.executor.AdvanceGeneration();
   jobs.CancelOwner(instance.id);
@@ -1029,8 +1161,7 @@ bool RuntimeEngine::Impl::Stop(Instance& instance, bool destroy,
     if (ocpn_portable_runtime_disable(instance.runtime, error.data(),
                                       error.size()) != 0) {
       okay = false;
-      instance.diagnostic =
-          error[0] ? error.data() : "runtime disable failed";
+      instance.diagnostic = error[0] ? error.data() : "runtime disable failed";
       wxLogWarning("PPM package-disable-failed id=%s diagnostic=%s",
                    instance.id, instance.diagnostic);
       destroy = true;
@@ -1055,8 +1186,7 @@ bool RuntimeEngine::Impl::Stop(Instance& instance, bool destroy,
 }
 
 bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
-                                   bool activate,
-                                   std::string* diagnostic) {
+                                   bool activate, std::string* diagnostic) {
   const fs::path manifest_path = root / "manifest.json";
   wxFileInputStream input(wxString::FromUTF8(manifest_path.string()));
   wxJSONValue manifest;
@@ -1078,8 +1208,7 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
       manifest["name"].IsString() && manifest["version"].IsString() &&
       manifest["component"].IsString() && manifest["runtime"].IsString() &&
       manifest["portable_api"].IsString() &&
-      manifest["permissions"].IsArray() &&
-      manifest["development"].IsBool();
+      manifest["permissions"].IsArray() && manifest["development"].IsBool();
   if (!typed || !IsPackageId(id) || name.empty() ||
       !IsSemanticVersion(version) || !SafeRelativePath(component) ||
       manifest["runtime"].AsString() != ">=0.1.0 <0.2.0" ||
@@ -1125,39 +1254,34 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
   }
   const std::set<std::string> known_services = {
       "org.opencpn.environment.provider"};
-  auto read_services =
-      [&](const char* member, const char* version_member,
-          std::map<std::string, std::string>* services) {
-        if (!manifest.HasMember(member)) return true;
-        const wxJSONValue declared = manifest[member];
-        if (!declared.IsArray() || declared.Size() > 32) return false;
-        for (int index = 0; index < declared.Size(); ++index) {
-          const wxJSONValue service = declared.ItemAt(index);
-          const wxJSONValue interface_value = service.ItemAt("interface");
-          const wxJSONValue version_value = service.ItemAt(version_member);
-          if (!service.IsObject() || !interface_value.IsString() ||
-              !version_value.IsString()) {
-            return false;
-          }
-          const std::string interface =
-              interface_value.AsString().ToStdString();
-          const std::string version =
-              version_value.AsString().ToStdString();
-          ServiceVersion parsed;
-          const bool valid_version =
-              std::string(version_member) == "version"
-                  ? ParseServiceVersion(version, &parsed)
-                  : IsServiceVersionRange(version);
-          if (known_services.count(interface) == 0 || !valid_version ||
-              !services->emplace(interface, version).second) {
-            return false;
-          }
-        }
-        return true;
-      };
+  auto read_services = [&](const char* member, const char* version_member,
+                           std::map<std::string, std::string>* services) {
+    if (!manifest.HasMember(member)) return true;
+    const wxJSONValue declared = manifest[member];
+    if (!declared.IsArray() || declared.Size() > 32) return false;
+    for (int index = 0; index < declared.Size(); ++index) {
+      const wxJSONValue service = declared.ItemAt(index);
+      const wxJSONValue interface_value = service.ItemAt("interface");
+      const wxJSONValue version_value = service.ItemAt(version_member);
+      if (!service.IsObject() || !interface_value.IsString() ||
+          !version_value.IsString()) {
+        return false;
+      }
+      const std::string interface = interface_value.AsString().ToStdString();
+      const std::string version = version_value.AsString().ToStdString();
+      ServiceVersion parsed;
+      const bool valid_version = std::string(version_member) == "version"
+                                     ? ParseServiceVersion(version, &parsed)
+                                     : IsServiceVersionRange(version);
+      if (known_services.count(interface) == 0 || !valid_version ||
+          !services->emplace(interface, version).second) {
+        return false;
+      }
+    }
+    return true;
+  };
   if (!instance->failed &&
-      (!read_services("provides", "version",
-                      &instance->provided_services) ||
+      (!read_services("provides", "version", &instance->provided_services) ||
        !read_services("requires", "range", &instance->required_services))) {
     instance->failed = true;
     instance->diagnostic =
@@ -1165,16 +1289,15 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
   }
   if (!instance->failed && manifest.HasMember("surfaces")) {
     const wxJSONValue declared_surfaces = manifest["surfaces"];
-    if (!declared_surfaces.IsObject() ||
-        declared_surfaces.Size() == 0 || declared_surfaces.Size() > 16) {
+    if (!declared_surfaces.IsObject() || declared_surfaces.Size() == 0 ||
+        declared_surfaces.Size() > 16) {
       instance->failed = true;
       instance->diagnostic = "manifest surfaces are invalid or exceed policy";
     } else {
       const wxArrayString names = declared_surfaces.GetMemberNames();
       for (const auto& name : names) {
         const std::string surface_id = name.ToStdString();
-        const wxJSONValue resource_value =
-            declared_surfaces.ItemAt(name);
+        const wxJSONValue resource_value = declared_surfaces.ItemAt(name);
         if (!IsSafeName(surface_id) || !resource_value.IsString() ||
             !SafeRelativePath(resource_value.AsString())) {
           instance->failed = true;
@@ -1182,8 +1305,7 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
           break;
         }
         const fs::path surface_path =
-            (root / resource_value.AsString().ToStdString())
-                .lexically_normal();
+            (root / resource_value.AsString().ToStdString()).lexically_normal();
         bool read = false;
         const std::string contents =
             ReadSmallFile(surface_path, kSurfaceDocumentLimit, &read);
@@ -1220,6 +1342,11 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
   } else if (!fs::is_regular_file(instance->component_path)) {
     instance->failed = true;
     instance->diagnostic = "declared component is missing";
+  }
+  if (!instance->failed && instance->provided_services.count(
+                               "org.opencpn.environment.provider") != 0) {
+    instance->environment_provider = std::make_unique<EnvironmentProvider>(
+        instance->package_root.string(), instance->private_root.string());
   }
   Instance* loaded = instance.get();
   if (!instance->failed) instance->loadable = true;
@@ -1284,8 +1411,7 @@ bool RuntimeEngine::Impl::RefreshPackage(const std::string& package_id,
     state_changed();
     return !error;
   }
-  const bool result =
-      LoadRoot(root, developer_mode, false, diagnostic);
+  const bool result = LoadRoot(root, developer_mode, false, diagnostic);
   state_changed();
   return result;
 }
@@ -1318,8 +1444,9 @@ bool RuntimeEngine::Impl::SetGrantedPermissions(
         instance->requested_permissions.count(permission) == 0 ||
         !granted.insert(permission).second) {
       if (diagnostic)
-        *diagnostic = "grant contains an unknown, unrequested or duplicate "
-                      "permission";
+        *diagnostic =
+            "grant contains an unknown, unrequested or duplicate "
+            "permission";
       return false;
     }
   }
@@ -1371,8 +1498,7 @@ bool RuntimeEngine::Impl::IsEnabled(const std::string& package_id) const {
   return instance && instance->enabled && !instance->failed;
 }
 
-void RuntimeEngine::Impl::Fail(Instance& instance,
-                               const std::string& operation,
+void RuntimeEngine::Impl::Fail(Instance& instance, const std::string& operation,
                                const std::string& diagnostic) {
   instance.failed = true;
   instance.enabled = false;
@@ -1399,9 +1525,8 @@ void RuntimeEngine::Impl::Fail(Instance& instance,
 bool RuntimeEngine::Impl::HandleAction(const std::string& package_id,
                                        const std::string& action_id) {
   const auto item = std::find_if(
-      instances.begin(), instances.end(), [&](const auto& candidate) {
-        return candidate->id == package_id;
-      });
+      instances.begin(), instances.end(),
+      [&](const auto& candidate) { return candidate->id == package_id; });
   if (item == instances.end()) return false;
   Instance& instance = **item;
   if (!instance.enabled || instance.failed || !instance.runtime) return true;
@@ -1418,9 +1543,9 @@ bool RuntimeEngine::Impl::HandleAction(const std::string& package_id,
           return;
         }
         std::array<char, kErrorCapacity> error{};
-        if (ocpn_portable_runtime_on_action(
-                instance.runtime, action_id.data(), action_id.size(),
-                error.data(), error.size()) != 0) {
+        if (ocpn_portable_runtime_on_action(instance.runtime, action_id.data(),
+                                            action_id.size(), error.data(),
+                                            error.size()) != 0) {
           instance.owner->Fail(
               instance, "action " + action_id,
               error[0] ? error.data() : "portable component action failed");
@@ -1433,9 +1558,10 @@ bool RuntimeEngine::Impl::HandleAction(const std::string& package_id,
   return true;
 }
 
-bool RuntimeEngine::Impl::HandleSurfaceEvent(
-    const std::string& package_id, const std::string& surface_id,
-    const std::string& control_id, const std::string& value_json) {
+bool RuntimeEngine::Impl::HandleSurfaceEvent(const std::string& package_id,
+                                             const std::string& surface_id,
+                                             const std::string& control_id,
+                                             const std::string& value_json) {
   Instance* instance = Find(package_id);
   if (!instance || !instance->enabled || instance->failed ||
       !instance->runtime || !IsSafeName(surface_id) ||
@@ -1445,9 +1571,8 @@ bool RuntimeEngine::Impl::HandleSurfaceEvent(
   }
   const std::uint64_t generation = instance->executor.Generation();
   const auto posted = instance->executor.Post(
-      generation,
-      [instance, surface_id, control_id,
-       value_json](std::uint64_t task_generation) {
+      generation, [instance, surface_id, control_id,
+                   value_json](std::uint64_t task_generation) {
         if (task_generation != instance->executor.Generation() ||
             !instance->enabled || instance->failed) {
           return;
@@ -1463,8 +1588,8 @@ bool RuntimeEngine::Impl::HandleSurfaceEvent(
         const int result = ocpn_portable_runtime_on_surface_event(
             instance->runtime, surface_id.data(), surface_id.size(),
             control_id.data(), control_id.size(), value_json.data(),
-            value_json.size(), state.data(), kSurfaceStateLimit,
-            &state_length, error.data(), error.size());
+            value_json.size(), state.data(), kSurfaceStateLimit, &state_length,
+            error.data(), error.size());
         std::string state_json;
         std::string diagnostic;
         if (result == 0 && state_length <= kSurfaceStateLimit) {
@@ -1476,12 +1601,11 @@ bool RuntimeEngine::Impl::HandleSurfaceEvent(
         if (!instance->owner->surface_response) return;
         const auto response = instance->owner->surface_response;
         const std::string id = instance->id;
-        instance->owner->Publish(
-            [response, id, surface_id, control_id,
-             state_json = std::move(state_json),
-             diagnostic = std::move(diagnostic)]() {
-              response(id, surface_id, control_id, state_json, diagnostic);
-            });
+        instance->owner->Publish([response, id, surface_id, control_id,
+                                  state_json = std::move(state_json),
+                                  diagnostic = std::move(diagnostic)]() {
+          response(id, surface_id, control_id, state_json, diagnostic);
+        });
       });
   return posted == SerialExecutor::PostResult::kAccepted;
 }
@@ -1517,8 +1641,7 @@ void RuntimeEngine::Impl::DeliverNavigationSentence(
     }
     const std::uint64_t generation = instance->executor.Generation();
     instance->executor.Post(
-        generation,
-        [instance, sentence](std::uint64_t task_generation) {
+        generation, [instance, sentence](std::uint64_t task_generation) {
           if (task_generation != instance->executor.Generation() ||
               !instance->enabled || instance->failed) {
             return;
@@ -1555,12 +1678,10 @@ void RuntimeEngine::Impl::Shutdown() {
 RuntimeEngine::RuntimeEngine(std::string storage_root,
                              RegisterAction register_action,
                              RemoveActions remove_actions,
-                             StateChanged state_changed,
-                             UiDispatch ui_dispatch)
-    : impl_(std::make_unique<Impl>(storage_root, std::move(register_action),
-                                  std::move(remove_actions),
-                                  std::move(state_changed),
-                                  std::move(ui_dispatch))),
+                             StateChanged state_changed, UiDispatch ui_dispatch)
+    : impl_(std::make_unique<Impl>(
+          storage_root, std::move(register_action), std::move(remove_actions),
+          std::move(state_changed), std::move(ui_dispatch))),
       storage_root_(std::move(storage_root)) {}
 
 RuntimeEngine::~RuntimeEngine() = default;
@@ -1622,18 +1743,31 @@ bool RuntimeEngine::HandleAction(const std::string& package_id,
   return impl_->HandleAction(package_id, action_id);
 }
 
-bool RuntimeEngine::HandleSurfaceEvent(
-    const std::string& package_id, const std::string& surface_id,
-    const std::string& control_id, const std::string& value_json) {
+bool RuntimeEngine::HandleSurfaceEvent(const std::string& package_id,
+                                       const std::string& surface_id,
+                                       const std::string& control_id,
+                                       const std::string& value_json) {
   return impl_->HandleSurfaceEvent(package_id, surface_id, control_id,
                                    value_json);
 }
 
-bool RuntimeEngine::RegisterUserFileGrant(
-    const std::string& package_id, const std::string& path, bool writable,
-    std::string* token, std::string* diagnostic) {
+bool RuntimeEngine::RegisterUserFileGrant(const std::string& package_id,
+                                          const std::string& path,
+                                          bool writable, std::string* token,
+                                          std::string* diagnostic) {
   return impl_->RegisterUserFileGrant(package_id, path, writable, token,
                                       diagnostic);
+}
+
+bool RuntimeEngine::SelectEnvironmentDataset(
+    const std::string& package_id,
+    const std::vector<std::string>& selected_paths) {
+  return impl_->SelectEnvironmentDataset(package_id, selected_paths);
+}
+
+std::string RuntimeEngine::EnvironmentSummary(
+    const std::string& package_id) const {
+  return impl_->EnvironmentSummary(package_id);
 }
 
 bool RuntimeEngine::WaitForIdle(const std::string& package_id,
@@ -1643,10 +1777,9 @@ bool RuntimeEngine::WaitForIdle(const std::string& package_id,
 
 void RuntimeEngine::SetPositionFix(const PlugIn_Position_Fix_Ex& fix) {
   std::lock_guard<std::mutex> lock(impl_->position_mutex);
-  impl_->position_valid =
-      std::isfinite(fix.Lat) && std::isfinite(fix.Lon) &&
-      fix.Lat >= -90.0 && fix.Lat <= 90.0 && fix.Lon >= -180.0 &&
-      fix.Lon <= 180.0;
+  impl_->position_valid = std::isfinite(fix.Lat) && std::isfinite(fix.Lon) &&
+                          fix.Lat >= -90.0 && fix.Lat <= 90.0 &&
+                          fix.Lon >= -180.0 && fix.Lon <= 180.0;
   impl_->latitude = fix.Lat;
   impl_->longitude = fix.Lon;
   impl_->has_cog = std::isfinite(fix.Cog);
@@ -1669,23 +1802,18 @@ std::vector<PackageSnapshot> RuntimeEngine::Packages() const {
       std::lock_guard<std::mutex> lock(instance->state_mutex);
       diagnostic = instance->diagnostic;
     }
-    result.push_back(
-         {instance->id, instance->name, instance->version,
-         instance->failed ? "Failed"
-         : instance->enabled ? "Enabled"
-         : instance->runtime ? "Disabled"
-                             : "Unloaded",
-         "Unknown",
-         diagnostic,
-         instance->executor.Generation(),
-         instance->executor.Pending(),
-         instance->enable_count.load(),
-         instance->disable_count.load()});
+    result.push_back({instance->id, instance->name, instance->version,
+                      instance->failed    ? "Failed"
+                      : instance->enabled ? "Enabled"
+                      : instance->runtime ? "Disabled"
+                                          : "Unloaded",
+                      "Unknown", diagnostic, instance->executor.Generation(),
+                      instance->executor.Pending(),
+                      instance->enable_count.load(),
+                      instance->disable_count.load()});
     result.back().surface_count = instance->surfaces.size();
-    result.back().provided_service_count =
-        instance->provided_services.size();
-    result.back().required_service_count =
-        instance->required_services.size();
+    result.back().provided_service_count = instance->provided_services.size();
+    result.back().required_service_count = instance->required_services.size();
     result.back().job_count = static_cast<std::size_t>(std::count_if(
         jobs.begin(), jobs.end(),
         [&](const auto& job) { return job.owner == instance->id; }));

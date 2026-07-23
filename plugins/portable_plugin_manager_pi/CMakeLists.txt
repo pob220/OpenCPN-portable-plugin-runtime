@@ -64,6 +64,7 @@ add_library(portable_plugin_manager_pi MODULE
   src/action_registry.cpp
   src/declarative_ui.cpp
   src/environment_service.cpp
+  src/environment_provider.cpp
   src/job_scheduler.cpp
   src/manager_dialog.cpp
   src/package_store.cpp
@@ -271,6 +272,25 @@ if(BUILD_TESTING)
       -Wall -Wextra -Wpedantic)
   endif()
 
+  add_executable(ppm_environment_provider_probe
+    src/environment_provider.cpp
+    src/environment_service.cpp
+    tools/environment_provider_probe.cpp
+  )
+  target_include_directories(ppm_environment_provider_probe PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include"
+    "${OPENCPN_SOURCE_DIR}/libs/wxJSON/include")
+  target_link_libraries(ppm_environment_provider_probe PRIVATE
+    ${wxWidgets_LIBRARIES}
+    ocpn::wxjson
+    Threads::Threads)
+  if(MSVC)
+    target_compile_options(ppm_environment_provider_probe PRIVATE /W4)
+  else()
+    target_compile_options(ppm_environment_provider_probe PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
+
   set(PPM_TEST_IGRIB_TARGET_DIR
       "${CMAKE_CURRENT_BINARY_DIR}/ppm-test-igrib-target")
   set(PPM_TEST_IGRIB_WASM
@@ -342,6 +362,8 @@ if(BUILD_TESTING)
 
   add_executable(ppm_runtime_engine_test
     src/declarative_ui.cpp
+    src/environment_provider.cpp
+    src/environment_service.cpp
     src/job_scheduler.cpp
     src/permission_store.cpp
     src/runtime_engine.cpp
@@ -380,6 +402,8 @@ if(BUILD_TESTING)
 
   add_executable(ppm_ipolars_runtime_test
     src/declarative_ui.cpp
+    src/environment_provider.cpp
+    src/environment_service.cpp
     src/job_scheduler.cpp
     src/permission_store.cpp
     src/runtime_engine.cpp

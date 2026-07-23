@@ -56,7 +56,7 @@ struct OverlayScene {
 };
 
 class RuntimeEngine {
- public:
+public:
   using RegisterAction =
       std::function<int(const RuntimeAction&, std::uint32_t*)>;
   using RemoveActions = std::function<void(const std::string&)>;
@@ -101,6 +101,9 @@ class RuntimeEngine {
   bool RegisterUserFileGrant(const std::string& package_id,
                              const std::string& path, bool writable,
                              std::string* token, std::string* diagnostic);
+  bool SelectEnvironmentDataset(const std::string& package_id,
+                                const std::vector<std::string>& selected_paths);
+  std::string EnvironmentSummary(const std::string& package_id) const;
   bool WaitForIdle(const std::string& package_id,
                    std::chrono::milliseconds timeout);
   void SetPositionFix(const PlugIn_Position_Fix_Ex& fix);
@@ -109,7 +112,7 @@ class RuntimeEngine {
   std::vector<OverlayScene> Scenes() const;
   const std::string& StorageRoot() const { return storage_root_; }
 
- private:
+private:
   class Impl;
   std::unique_ptr<Impl> impl_;
   std::string storage_root_;

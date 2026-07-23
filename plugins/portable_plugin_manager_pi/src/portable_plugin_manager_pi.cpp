@@ -28,46 +28,45 @@
 
 namespace {
 
-const char* const kManagerXpm[] = {
-    "32 32 6 1",
-    "  c None",
-    ". c #19324A",
-    "+ c #126F89",
-    "@ c #FFF7DF",
-    "# c #E45B3C",
-    "$ c #FFFFFF",
-    "                                ",
-    "           ..........           ",
-    "        ...++++++++++...        ",
-    "      ..++++++++++++++++..      ",
-    "     .++++++++++++++++++++.     ",
-    "    .++++++@@++++@@++++++++.    ",
-    "   .+++++++@@++++@@+++++++++.   ",
-    "  .++++++++@@++++@@++++++++++.  ",
-    "  .++++++++@@++++@@++++++++++.  ",
-    " .+++++++++@@++++@@+++++++++++. ",
-    " .+++++..................+++++. ",
-    " .++++.@@@@@@@@@@@@@@@@@@.++++. ",
-    ".+++++.@@@@@@@@@@@@@@@@@@.+++++.",
-    ".+++++.@@@@@###@@###@@@@@.+++++.",
-    ".+++++.@@@@##@@@@@@##@@@@.+++++.",
-    ".+++++.@@@@@##@@@@##@@@@@.+++++.",
-    ".+++++.@@@@@@##@@##@@@@@@.+++++.",
-    ".+++++.@@@@@@@@@@@@@@@@@@.+++++.",
-    ".++++++.@@@@@@@@@@@@@@@@.++++++.",
-    ".+++++++.@@@@@@@@@@@@@@.+++++++.",
-    " .++++++..@@@@@@@@@@@@..++++++. ",
-    " .++++++++..@@@@@@@@..++++++++. ",
-    " .++++++++++........++++++++++. ",
-    "  .++++++++++++@@++++++++++++.  ",
-    "  .++++++++++++@@++++++++++++.  ",
-    "   .+++++++++++@@+++++++++++.   ",
-    "    .++++++++++@@++++++++++.    ",
-    "     .+++++++++@@@@@++++++.     ",
-    "      ..++++++++++@@@@@@..      ",
-    "        ...++++++++++...        ",
-    "           ..........           ",
-    "                                "};
+const char* const kManagerXpm[] = {"32 32 6 1",
+                                   "  c None",
+                                   ". c #19324A",
+                                   "+ c #126F89",
+                                   "@ c #FFF7DF",
+                                   "# c #E45B3C",
+                                   "$ c #FFFFFF",
+                                   "                                ",
+                                   "           ..........           ",
+                                   "        ...++++++++++...        ",
+                                   "      ..++++++++++++++++..      ",
+                                   "     .++++++++++++++++++++.     ",
+                                   "    .++++++@@++++@@++++++++.    ",
+                                   "   .+++++++@@++++@@+++++++++.   ",
+                                   "  .++++++++@@++++@@++++++++++.  ",
+                                   "  .++++++++@@++++@@++++++++++.  ",
+                                   " .+++++++++@@++++@@+++++++++++. ",
+                                   " .+++++..................+++++. ",
+                                   " .++++.@@@@@@@@@@@@@@@@@@.++++. ",
+                                   ".+++++.@@@@@@@@@@@@@@@@@@.+++++.",
+                                   ".+++++.@@@@@###@@###@@@@@.+++++.",
+                                   ".+++++.@@@@##@@@@@@##@@@@.+++++.",
+                                   ".+++++.@@@@@##@@@@##@@@@@.+++++.",
+                                   ".+++++.@@@@@@##@@##@@@@@@.+++++.",
+                                   ".+++++.@@@@@@@@@@@@@@@@@@.+++++.",
+                                   ".++++++.@@@@@@@@@@@@@@@@.++++++.",
+                                   ".+++++++.@@@@@@@@@@@@@@.+++++++.",
+                                   " .++++++..@@@@@@@@@@@@..++++++. ",
+                                   " .++++++++..@@@@@@@@..++++++++. ",
+                                   " .++++++++++........++++++++++. ",
+                                   "  .++++++++++++@@++++++++++++.  ",
+                                   "  .++++++++++++@@++++++++++++.  ",
+                                   "   .+++++++++++@@+++++++++++.   ",
+                                   "    .++++++++++@@++++++++++.    ",
+                                   "     .+++++++++@@@@@++++++.     ",
+                                   "      ..++++++++++@@@@@@..      ",
+                                   "        ...++++++++++...        ",
+                                   "           ..........           ",
+                                   "                                "};
 
 const ppm::ActionKey kManagerAction{"org.opencpn.portable-plugin-manager",
                                     "open-manager"};
@@ -85,11 +84,10 @@ wxString ResolveStorageRoot() {
 }
 
 wxString ResolveManagerDataRoot() {
-  const wxString installed =
-      GetPluginDataDir("portable_plugin_manager_pi");
+  const wxString installed = GetPluginDataDir("portable_plugin_manager_pi");
   if (!installed.empty() &&
-      wxFileName::FileExists(
-          installed + wxFileName::GetPathSeparator() + "manager.svg")) {
+      wxFileName::FileExists(installed + wxFileName::GetPathSeparator() +
+                             "manager.svg")) {
     return installed;
   }
   return wxString::FromUTF8(PPM_SOURCE_DATA_DIR);
@@ -137,8 +135,8 @@ int PortablePluginManagerPi::Init() {
       wxGetEnv("OCPN_PPM_DEVELOPER_MODE", &developer) && developer == "1";
   const wxString trust_root =
       ResolveManagerDataRoot() + wxFileName::GetPathSeparator() + "trust";
-  package_store_ = std::make_unique<PackageStore>(
-      storage_root_.ToStdString(), trust_root.ToStdString());
+  package_store_ = std::make_unique<PackageStore>(storage_root_.ToStdString(),
+                                                  trust_root.ToStdString());
   package_store_->SetDeveloperMode(developer_mode_);
   permission_store_ =
       std::make_unique<PermissionStore>(storage_root_.ToStdString());
@@ -147,9 +145,10 @@ int PortablePluginManagerPi::Init() {
     const StoreResult audit = package_store_->AuditInstalled(package.id);
     if (!audit.okay) {
       package_store_->SetEnabled(package.id, false);
-      wxLogError("PPM event=installed-integrity-failed package=%s "
-                 "diagnostic=%s",
-                 package.id, audit.message);
+      wxLogError(
+          "PPM event=installed-integrity-failed package=%s "
+          "diagnostic=%s",
+          package.id, audit.message);
     }
   }
   runtime_engine_ = std::make_unique<RuntimeEngine>(
@@ -161,8 +160,7 @@ int PortablePluginManagerPi::Init() {
         RemovePackageActions(package_id);
       },
       [this]() { OnEngineStateChanged(); },
-      [gate = (ui_callback_gate_ =
-                   std::make_shared<std::atomic_bool>(true))](
+      [gate = (ui_callback_gate_ = std::make_shared<std::atomic_bool>(true))](
           std::function<void()> task) {
         if (!wxTheApp || !task) return;
         wxTheApp->CallAfter([gate, task = std::move(task)]() mutable {
@@ -170,8 +168,7 @@ int PortablePluginManagerPi::Init() {
         });
       });
   runtime_engine_->SetSurfaceOpenedCallback(
-      [this](const std::string& package_id,
-             const DeclarativeSurface& surface) {
+      [this](const std::string& package_id, const DeclarativeSurface& surface) {
         OpenPackageSurface(package_id, surface);
       });
   runtime_engine_->SetSurfaceResponseCallback(
@@ -192,10 +189,10 @@ int PortablePluginManagerPi::Init() {
     if (!PreparePermissions(package.id, false, &diagnostic) ||
         !runtime_engine_->Enable(package.id, &runtime_diagnostic)) {
       package_store_->SetEnabled(package.id, false);
-      wxLogWarning("PPM event=startup-package-disabled package=%s "
-                   "diagnostic=%s%s",
-                   package.id, diagnostic,
-                   wxString::FromUTF8(runtime_diagnostic));
+      wxLogWarning(
+          "PPM event=startup-package-disabled package=%s "
+          "diagnostic=%s%s",
+          package.id, diagnostic, wxString::FromUTF8(runtime_diagnostic));
     }
   }
   return WANTS_TOOLBAR_CALLBACK | INSTALLS_TOOLBAR_TOOL | WANTS_CONFIG |
@@ -239,16 +236,15 @@ bool PortablePluginManagerPi::RegisterManagerAction() {
   const wxString icon = ResolveManagerIcon();
   const int tool_id =
       icon.empty()
-          ? InsertPlugInTool(
-                "Portable Plugin Manager", &plugin_bitmap_, &plugin_bitmap_,
-                wxITEM_NORMAL, "Portable Plugin Manager",
-                "Install and manage portable runtime plugins", nullptr, -1, 0,
-                this)
-          : InsertPlugInToolSVG(
-                "Portable Plugin Manager", icon, icon, icon, wxITEM_NORMAL,
-                "Portable Plugin Manager",
-                "Install and manage portable runtime plugins", nullptr, -1, 0,
-                this);
+          ? InsertPlugInTool("Portable Plugin Manager", &plugin_bitmap_,
+                             &plugin_bitmap_, wxITEM_NORMAL,
+                             "Portable Plugin Manager",
+                             "Install and manage portable runtime plugins",
+                             nullptr, -1, 0, this)
+          : InsertPlugInToolSVG("Portable Plugin Manager", icon, icon, icon,
+                                wxITEM_NORMAL, "Portable Plugin Manager",
+                                "Install and manage portable runtime plugins",
+                                nullptr, -1, 0, this);
   if (!actions_.Add(kManagerAction, tool_id)) {
     if (tool_id >= 0) RemovePlugInTool(tool_id);
     return false;
@@ -271,9 +267,9 @@ int PortablePluginManagerPi::RegisterPortableAction(
     tool_id = InsertPlugInToolSVG(label, icon, icon, icon, wxITEM_NORMAL,
                                   tooltip, tooltip, nullptr, -1, 0, this);
   } else {
-    tool_id = InsertPlugInTool(label, &plugin_bitmap_, &plugin_bitmap_,
-                               wxITEM_NORMAL, tooltip, tooltip, nullptr, -1, 0,
-                               this);
+    tool_id =
+        InsertPlugInTool(label, &plugin_bitmap_, &plugin_bitmap_, wxITEM_NORMAL,
+                         tooltip, tooltip, nullptr, -1, 0, this);
   }
   if (!actions_.Add(key, tool_id)) {
     if (tool_id >= 0) RemovePlugInTool(tool_id);
@@ -281,8 +277,9 @@ int PortablePluginManagerPi::RegisterPortableAction(
   }
   SetToolbarToolViz(tool_id, true);
   *host_action_id = static_cast<std::uint32_t>(tool_id);
-  wxLogMessage("PPM event=package-action-registered package=%s action=%s tool=%d",
-               action.package_id, action.action_id, tool_id);
+  wxLogMessage(
+      "PPM event=package-action-registered package=%s action=%s tool=%d",
+      action.package_id, action.action_id, tool_id);
   return 0;
 }
 
@@ -324,20 +321,17 @@ void PortablePluginManagerPi::ShowPreferencesDialog(wxWindow* parent) {
 void PortablePluginManagerPi::ShowManager(wxWindow* parent) {
   if (!manager_dialog_) {
     ManagerCallbacks callbacks;
-    callbacks.install =
-        [this](const std::string& path) { InstallPackage(path); };
-    callbacks.enable =
-        [this](const std::string& id) { EnablePackage(id); };
-    callbacks.disable =
-        [this](const std::string& id) { DisablePackage(id); };
-    callbacks.unload =
-        [this](const std::string& id) { UnloadPackage(id); };
-    callbacks.remove =
-        [this](const std::string& id) { RemovePackage(id); };
-    callbacks.rollback =
-        [this](const std::string& id) { RollbackPackage(id); };
-    callbacks.revoke_permissions =
-        [this](const std::string& id) { RevokePackagePermissions(id); };
+    callbacks.install = [this](const std::string& path) {
+      InstallPackage(path);
+    };
+    callbacks.enable = [this](const std::string& id) { EnablePackage(id); };
+    callbacks.disable = [this](const std::string& id) { DisablePackage(id); };
+    callbacks.unload = [this](const std::string& id) { UnloadPackage(id); };
+    callbacks.remove = [this](const std::string& id) { RemovePackage(id); };
+    callbacks.rollback = [this](const std::string& id) { RollbackPackage(id); };
+    callbacks.revoke_permissions = [this](const std::string& id) {
+      RevokePackagePermissions(id);
+    };
     manager_dialog_ =
         std::make_unique<ManagerDialog>(parent, std::move(callbacks));
     manager_dialog_->SetRuntimeSummary(
@@ -371,38 +365,57 @@ void PortablePluginManagerPi::OpenPackageSurface(
           const std::vector<SurfaceDialog::UserFileSelection>& selections) {
         std::string delivered_value = value_json;
         if (!selections.empty()) {
-          std::vector<std::string> tokens;
-          tokens.reserve(selections.size());
-          for (const auto& selection : selections) {
-            std::string token;
-            std::string diagnostic;
+          if (package_id == "org.opencpn.igrib" &&
+              surface_id == "environment.viewer" && control_id == "open") {
+            std::vector<std::string> paths;
+            paths.reserve(selections.size());
+            for (const auto& selection : selections) {
+              paths.push_back(selection.path);
+            }
             if (!runtime_engine_ ||
-                !runtime_engine_->RegisterUserFileGrant(
-                    package_id, selection.path, selection.writable, &token,
-                    &diagnostic)) {
-              ApplySurfaceResponse(package_id, surface_id, control_id, {},
-                                   diagnostic.empty()
-                                       ? "Could not grant access to the "
-                                         "selected file."
-                                       : diagnostic);
+                !runtime_engine_->SelectEnvironmentDataset(package_id, paths)) {
+              ApplySurfaceResponse(
+                  package_id, surface_id, control_id, {},
+                  "Environmental provider is disabled or unavailable.");
               return;
             }
-            tokens.push_back(std::move(token));
-          }
-          if (tokens.size() == 1) {
-            delivered_value = "\"" + tokens.front() + "\"";
+            // The component receives only an opaque host-state marker. GRIB
+            // paths and bytes remain in the host-owned provider boundary.
+            delivered_value = "\"host-environment-snapshot\"";
           } else {
-            delivered_value = "[";
-            for (std::size_t index = 0; index < tokens.size(); ++index) {
-              if (index != 0) delivered_value += ",";
-              delivered_value += "\"" + tokens[index] + "\"";
+            std::vector<std::string> tokens;
+            tokens.reserve(selections.size());
+            for (const auto& selection : selections) {
+              std::string token;
+              std::string diagnostic;
+              if (!runtime_engine_ ||
+                  !runtime_engine_->RegisterUserFileGrant(
+                      package_id, selection.path, selection.writable, &token,
+                      &diagnostic)) {
+                ApplySurfaceResponse(package_id, surface_id, control_id, {},
+                                     diagnostic.empty()
+                                         ? "Could not grant access to the "
+                                           "selected file."
+                                         : diagnostic);
+                return;
+              }
+              tokens.push_back(std::move(token));
             }
-            delivered_value += "]";
+            if (tokens.size() == 1) {
+              delivered_value = "\"" + tokens.front() + "\"";
+            } else {
+              delivered_value = "[";
+              for (std::size_t index = 0; index < tokens.size(); ++index) {
+                if (index != 0) delivered_value += ",";
+                delivered_value += "\"" + tokens[index] + "\"";
+              }
+              delivered_value += "]";
+            }
           }
         }
         if (!runtime_engine_ ||
-            !runtime_engine_->HandleSurfaceEvent(
-                package_id, surface_id, control_id, delivered_value)) {
+            !runtime_engine_->HandleSurfaceEvent(package_id, surface_id,
+                                                 control_id, delivered_value)) {
           ApplySurfaceResponse(package_id, surface_id, control_id, {},
                                "Package is disabled, busy, or unavailable.");
         }
@@ -421,8 +434,7 @@ void PortablePluginManagerPi::ApplySurfaceResponse(
     const std::string& package_id, const std::string& surface_id,
     const std::string& control_id, const std::string& state_json,
     const std::string& diagnostic) {
-  const auto item =
-      surface_dialogs_.find(package_id + "\n" + surface_id);
+  const auto item = surface_dialogs_.find(package_id + "\n" + surface_id);
   if (item == surface_dialogs_.end()) return;
   item->second->ApplyResponse(control_id, state_json, diagnostic);
 }
@@ -430,8 +442,7 @@ void PortablePluginManagerPi::ApplySurfaceResponse(
 void PortablePluginManagerPi::ClosePackageSurfaces(
     const std::string& package_id) {
   const std::string prefix = package_id + "\n";
-  for (auto item = surface_dialogs_.begin();
-       item != surface_dialogs_.end();) {
+  for (auto item = surface_dialogs_.begin(); item != surface_dialogs_.end();) {
     if (item->first.rfind(prefix, 0) == 0)
       item = surface_dialogs_.erase(item);
     else
@@ -439,29 +450,28 @@ void PortablePluginManagerPi::ClosePackageSurfaces(
   }
 }
 
-bool PortablePluginManagerPi::PreparePermissions(
-    const std::string& package_id, bool interactive,
-    wxString* diagnostic) {
+bool PortablePluginManagerPi::PreparePermissions(const std::string& package_id,
+                                                 bool interactive,
+                                                 wxString* diagnostic) {
   const auto installed = package_store_->Installed();
   const auto item =
-      std::find_if(installed.begin(), installed.end(), [&](const auto& value) {
-        return value.id == package_id;
-      });
+      std::find_if(installed.begin(), installed.end(),
+                   [&](const auto& value) { return value.id == package_id; });
   if (item == installed.end()) {
     if (diagnostic) *diagnostic = "Package is not installed.";
     return false;
   }
   const PermissionEvaluation evaluation = permission_store_->Evaluate(*item);
   if (!evaluation.okay) {
-    if (diagnostic)
-      *diagnostic = wxString::FromUTF8(evaluation.message);
+    if (diagnostic) *diagnostic = wxString::FromUTF8(evaluation.message);
     return false;
   }
   if (!evaluation.added.empty()) {
     if (!interactive) {
       if (diagnostic)
-        *diagnostic = "Permission approval is required before this package "
-                      "can run.";
+        *diagnostic =
+            "Permission approval is required before this package "
+            "can run.";
       return false;
     }
     if (!ConfirmPermissionApproval(manager_dialog_.get(), *item, evaluation)) {
@@ -479,10 +489,9 @@ bool PortablePluginManagerPi::PreparePermissions(
     }
   }
   std::string runtime_diagnostic;
-  if (!runtime_engine_->SetGrantedPermissions(
-          package_id, item->permissions, &runtime_diagnostic)) {
-    if (diagnostic)
-      *diagnostic = wxString::FromUTF8(runtime_diagnostic);
+  if (!runtime_engine_->SetGrantedPermissions(package_id, item->permissions,
+                                              &runtime_diagnostic)) {
+    if (diagnostic) *diagnostic = wxString::FromUTF8(runtime_diagnostic);
     return false;
   }
   return true;
@@ -494,25 +503,26 @@ bool PortablePluginManagerPi::RestorePreviousPackage(
   const StoreResult rollback = package_store_->Rollback(package_id);
   if (!rollback.okay) {
     if (diagnostic)
-      *diagnostic = "Rollback failed: " +
-                    wxString::FromUTF8(rollback.message);
+      *diagnostic = "Rollback failed: " + wxString::FromUTF8(rollback.message);
     return false;
   }
   const StoreResult audit = package_store_->AuditInstalled(package_id);
   if (!audit.okay) {
     if (diagnostic)
-      *diagnostic = "Previous package was restored but failed integrity "
-                    "verification: " +
-                    wxString::FromUTF8(audit.message);
+      *diagnostic =
+          "Previous package was restored but failed integrity "
+          "verification: " +
+          wxString::FromUTF8(audit.message);
     return false;
   }
   std::string runtime_diagnostic;
   if (!runtime_engine_->RefreshPackage(package_id, developer_mode_,
                                        &runtime_diagnostic)) {
     if (diagnostic)
-      *diagnostic = "Previous package was restored on disk but could not be "
-                    "loaded: " +
-                    wxString::FromUTF8(runtime_diagnostic);
+      *diagnostic =
+          "Previous package was restored on disk but could not be "
+          "loaded: " +
+          wxString::FromUTF8(runtime_diagnostic);
     return false;
   }
   if (enable_after_restore) {
@@ -521,18 +531,17 @@ bool PortablePluginManagerPi::RestorePreviousPackage(
         !runtime_engine_->Enable(package_id, &runtime_diagnostic) ||
         !package_store_->SetEnabled(package_id, true).okay) {
       if (diagnostic)
-        *diagnostic = "Previous package was restored but could not be "
-                      "re-enabled: " +
-                      permission_diagnostic +
-                      wxString::FromUTF8(runtime_diagnostic);
+        *diagnostic =
+            "Previous package was restored but could not be "
+            "re-enabled: " +
+            permission_diagnostic + wxString::FromUTF8(runtime_diagnostic);
       return false;
     }
   }
   return true;
 }
 
-void PortablePluginManagerPi::InstallPackage(
-    const std::string& archive_path) {
+void PortablePluginManagerPi::InstallPackage(const std::string& archive_path) {
   if (!package_store_ || !runtime_engine_) return;
   wxBusyCursor busy;
   SetManagerStatus("Verifying package signature, manifest and contents…");
@@ -543,18 +552,16 @@ void PortablePluginManagerPi::InstallPackage(
     return;
   }
   const auto installed = package_store_->Installed();
-  const bool replacing =
-      std::any_of(installed.begin(), installed.end(), [&](const auto& package) {
-        return package.id == inspected.package_id;
-      });
+  const bool replacing = std::any_of(
+      installed.begin(), installed.end(),
+      [&](const auto& package) { return package.id == inspected.package_id; });
   if (replacing &&
       wxMessageBox(
           "A version of " + wxString::FromUTF8(inspected.package_id) +
               " is already installed.\n\nVerify and install this package as "
               "an update? The current version will be retained for rollback.",
-          "Update portable package",
-          wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION, manager_dialog_.get()) !=
-          wxYES) {
+          "Update portable package", wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION,
+          manager_dialog_.get()) != wxYES) {
     SetManagerStatus("Update cancelled; no files were changed.");
     return;
   }
@@ -566,8 +573,7 @@ void PortablePluginManagerPi::InstallPackage(
     std::string ignored;
     runtime_engine_->Unload(inspected.package_id, &ignored);
   }
-  const StoreResult result =
-      package_store_->Install(archive_path, replacing);
+  const StoreResult result = package_store_->Install(archive_path, replacing);
   if (!result.okay) {
     if (replacing) {
       std::string refresh_diagnostic;
@@ -581,9 +587,10 @@ void PortablePluginManagerPi::InstallPackage(
         package_store_->SetEnabled(inspected.package_id, true);
       }
     }
-    SetManagerStatus("Installation failed without replacing the current "
-                     "package: " +
-                     wxString::FromUTF8(result.message));
+    SetManagerStatus(
+        "Installation failed without replacing the current "
+        "package: " +
+        wxString::FromUTF8(result.message));
     return;
   }
 
@@ -621,28 +628,29 @@ void PortablePluginManagerPi::InstallPackage(
 
   if (was_enabled) {
     wxString permission_diagnostic;
-    if (!PreparePermissions(result.package_id, true,
-                            &permission_diagnostic)) {
-      SetManagerStatus(
-          "Package updated and left disabled: " + permission_diagnostic);
+    if (!PreparePermissions(result.package_id, true, &permission_diagnostic)) {
+      SetManagerStatus("Package updated and left disabled: " +
+                       permission_diagnostic);
       return;
     }
     if (!runtime_engine_->Enable(result.package_id, &runtime_diagnostic)) {
       wxString recovery;
       RestorePreviousPackage(result.package_id, true, &recovery);
-      SetManagerStatus("Updated runtime failed to enable; the previous "
-                       "version was restored. " +
-                       wxString::FromUTF8(runtime_diagnostic) +
-                       (recovery.empty() ? wxString() : "\n" + recovery));
+      SetManagerStatus(
+          "Updated runtime failed to enable; the previous "
+          "version was restored. " +
+          wxString::FromUTF8(runtime_diagnostic) +
+          (recovery.empty() ? wxString() : "\n" + recovery));
       return;
     }
     const StoreResult persisted =
         package_store_->SetEnabled(result.package_id, true);
     if (!persisted.okay) {
       runtime_engine_->Disable(result.package_id, &runtime_diagnostic);
-      SetManagerStatus("Package updated but was left disabled because its "
-                       "state could not be saved: " +
-                       wxString::FromUTF8(persisted.message));
+      SetManagerStatus(
+          "Package updated but was left disabled because its "
+          "state could not be saved: " +
+          wxString::FromUTF8(persisted.message));
       return;
     }
   }
@@ -677,9 +685,10 @@ void PortablePluginManagerPi::EnablePackage(const std::string& package_id) {
   const StoreResult persisted = package_store_->SetEnabled(package_id, true);
   if (!persisted.okay) {
     runtime_engine_->Disable(package_id, &diagnostic);
-    SetManagerStatus("The package started, but was stopped because its "
-                     "enabled state could not be saved: " +
-                     wxString::FromUTF8(persisted.message));
+    SetManagerStatus(
+        "The package started, but was stopped because its "
+        "enabled state could not be saved: " +
+        wxString::FromUTF8(persisted.message));
     return;
   }
   RefreshManager();
@@ -713,11 +722,10 @@ void PortablePluginManagerPi::UnloadPackage(const std::string& package_id) {
   std::string diagnostic;
   const bool clean = runtime_engine_->Unload(package_id, &diagnostic);
   RefreshManager();
-  SetManagerStatus(
-      wxString::FromUTF8(package_id) +
-      (clean ? " unloaded; its Wasmtime memory has been released."
-             : " was forcibly unloaded after an error: " +
-                   wxString::FromUTF8(diagnostic)));
+  SetManagerStatus(wxString::FromUTF8(package_id) +
+                   (clean ? " unloaded; its Wasmtime memory has been released."
+                          : " was forcibly unloaded after an error: " +
+                                wxString::FromUTF8(diagnostic)));
 }
 
 void PortablePluginManagerPi::RemovePackage(const std::string& package_id) {
@@ -736,30 +744,26 @@ void PortablePluginManagerPi::RemovePackage(const std::string& package_id) {
           : "Removal failed: " + wxString::FromUTF8(removed.message));
 }
 
-void PortablePluginManagerPi::RollbackPackage(
-    const std::string& package_id) {
+void PortablePluginManagerPi::RollbackPackage(const std::string& package_id) {
   package_store_->SetEnabled(package_id, false);
   std::string ignored;
   runtime_engine_->Unload(package_id, &ignored);
   const StoreResult rolled_back = package_store_->Rollback(package_id);
   std::string runtime_diagnostic;
-  const StoreResult audit =
-      rolled_back.okay ? package_store_->AuditInstalled(package_id)
-                       : StoreResult{};
-  const bool loaded =
-      rolled_back.okay && audit.okay &&
-      runtime_engine_->RefreshPackage(package_id, developer_mode_,
-                                      &runtime_diagnostic);
+  const StoreResult audit = rolled_back.okay
+                                ? package_store_->AuditInstalled(package_id)
+                                : StoreResult{};
+  const bool loaded = rolled_back.okay && audit.okay &&
+                      runtime_engine_->RefreshPackage(
+                          package_id, developer_mode_, &runtime_diagnostic);
   RefreshManager();
   SetManagerStatus(
       loaded ? wxString::FromUTF8(package_id) +
                    " rolled back and left disabled for review."
              : "Rollback failed: " +
-                   wxString::FromUTF8(
-                       !rolled_back.okay
-                           ? rolled_back.message
-                           : !audit.okay ? audit.message
-                                         : runtime_diagnostic));
+                   wxString::FromUTF8(!rolled_back.okay ? rolled_back.message
+                                      : !audit.okay     ? audit.message
+                                                        : runtime_diagnostic));
 }
 
 void PortablePluginManagerPi::RevokePackagePermissions(
@@ -862,30 +866,23 @@ void PortablePluginManagerPi::RefreshManager() {
         continue;
       }
       const PermissionEvaluation access = permission_store_->Evaluate(*item);
-      package.access =
-          !access.okay
-              ? "Blocked"
-              : access.current
-                    ? "Approved"
-                    : access.added.empty() ? "Access reduced"
-                                           : "Approval required";
+      package.access = !access.okay           ? "Blocked"
+                       : access.current       ? "Approved"
+                       : access.added.empty() ? "Access reduced"
+                                              : "Approval required";
     }
     manager_dialog_->SetPackages(packages);
-    const auto failures =
-        std::count_if(packages.begin(), packages.end(), [](const auto& value) {
-          return value.state == "Failed";
-        });
-    manager_dialog_->SetStatus(failures == 0
-                                   ? wxString::Format(
-                                         "%zu installed package%s.",
-                                         packages.size(),
-                                         packages.size() == 1 ? "" : "s")
-                                   : wxString::Format(
-                                         "%zu installed package%s; %zu "
-                                         "requires attention.",
-                                         packages.size(),
-                                         packages.size() == 1 ? "" : "s",
-                                         failures));
+    const auto failures = std::count_if(
+        packages.begin(), packages.end(),
+        [](const auto& value) { return value.state == "Failed"; });
+    manager_dialog_->SetStatus(
+        failures == 0
+            ? wxString::Format("%zu installed package%s.", packages.size(),
+                               packages.size() == 1 ? "" : "s")
+            : wxString::Format("%zu installed package%s; %zu "
+                               "requires attention.",
+                               packages.size(), packages.size() == 1 ? "" : "s",
+                               failures));
   }
   if (runtime_engine_) {
     for (const auto& package : runtime_engine_->Packages()) {
