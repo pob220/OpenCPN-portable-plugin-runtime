@@ -1665,9 +1665,6 @@ void MyFrame::OnCloseWindow(wxCloseEvent &event) {
   pConfig->UpdateSettings();
 
   //    Deactivate the PlugIns
-#ifdef OCPN_ENABLE_PORTABLE_PLUGINS
-  if (g_pi_manager) g_pi_manager->ShutdownPortablePlugins();
-#endif
   PluginLoader::GetInstance()->DeactivateAllPlugIns();
   wxLogMessage("opencpn::MyFrame exiting cleanly.");
 
@@ -2741,12 +2738,8 @@ void MyFrame::OnToolLeftClick(wxCommandEvent &event) {
         for (unsigned int i = 0; i < tool_array.size(); i++) {
           PlugInToolbarToolContainer *pttc = tool_array[i];
           if (event.GetId() == pttc->id) {
-            if (pttc->m_pplugin) {
+            if (pttc->m_pplugin)
               pttc->m_pplugin->OnToolbarToolCallback(pttc->id);
-#ifdef OCPN_ENABLE_PORTABLE_PLUGINS
-            } else if (g_pi_manager->OnPortableToolbarAction(pttc->id)) {
-#endif
-            }
             return;  // required to prevent event.Skip() being called
           }
         }
@@ -6780,7 +6773,6 @@ void MyFrame::OnResume(wxPowerEvent &WXUNUSED(event)) {
 
 void MyFrame::RequestNewMasterToolbar(bool bforcenew) {
   bool btbRebuild = false;
-  bool toolbar_was_full = g_bmasterToolbarFull;
 
   bool b_reshow = true;
   if (g_MainToolbar) {
@@ -6817,17 +6809,6 @@ void MyFrame::RequestNewMasterToolbar(bool bforcenew) {
 
   if (g_MainToolbar) {
     CreateMasterToolbar();
-
-    // ocpnToolBarSimple's visible-tool count starts at zero.  Initialise it
-    // when constructing the toolbar, and preserve the expanded/collapsed
-    // state when rebuilding after late plugin toolbar registration.
-    m_nMasterToolCountShown =
-        (!btbRebuild || toolbar_was_full)
-            ? static_cast<int>(g_MainToolbar->GetToolCount())
-            : 1;
-    g_MainToolbar->SetToolShowCount(m_nMasterToolCountShown);
-    g_bmasterToolbarFull = !btbRebuild || toolbar_was_full;
-    g_MainToolbar->Realize();
     {
       // g_MainToolbar->RestoreRelativePosition(g_maintoolbar_x,
       // g_maintoolbar_y);

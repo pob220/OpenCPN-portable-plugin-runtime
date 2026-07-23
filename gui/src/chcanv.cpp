@@ -5530,10 +5530,6 @@ bool ChartCanvas::SetViewPoint(double lat, double lon, double scale_ppm,
       m_cursor_lat = lat_mouse;
       m_cursor_lon = lon_mouse;
       SendCursorLatLonToAllPlugIns(m_cursor_lat, m_cursor_lon);
-#ifdef OCPN_ENABLE_PORTABLE_PLUGINS
-      if (g_pi_manager)
-        g_pi_manager->SetPortableCursorPosition(m_cursor_lat, m_cursor_lon);
-#endif
     }
   }
 
@@ -8037,10 +8033,6 @@ bool ChartCanvas::MouseEventSetup(wxMouseEvent &event, bool b_handle_dclick) {
     //  This results in an error in cursor geo position, so we skip this case
     if ((x >= 0) && (y >= 0))
       SendCursorLatLonToAllPlugIns(m_cursor_lat, m_cursor_lon);
-#ifdef OCPN_ENABLE_PORTABLE_PLUGINS
-    if ((x >= 0) && (y >= 0) && g_pi_manager)
-      g_pi_manager->SetPortableCursorPosition(m_cursor_lat, m_cursor_lon);
-#endif
   }
 
   if (!g_btouch) {

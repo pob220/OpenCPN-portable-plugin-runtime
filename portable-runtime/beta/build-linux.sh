@@ -60,6 +60,10 @@ python3 -c 'import cryptography' || {
   printf 'Python cryptography is required for package signing.\n' >&2
   exit 1
 }
+if [[ ! -f "$trusted_key" ]]; then
+  python3 \
+    "$repo_root/portable-runtime/development-keys/generate-development-keys.py"
+fi
 
 for module in eccodes jsoncpp netcdf libcurl qhull_r blosc libzip; do
   if ! pkg-config --exists "$module"; then

@@ -1,7 +1,10 @@
-# Development package key
+# Development package keys
 
-This directory contains the deliberately public key pair used only by the
-experimental iGRIB build and conformance tests. It provides deterministic
-signature-path coverage; it conveys no production trust. Production catalogue
-keys must be stored outside the OpenCPN source tree and supplied to the package
-builder and host trust store by release infrastructure.
+Private signing keys are never stored in this repository. Run
+`generate-development-keys.py` to create a disposable Ed25519 pair for local
+package and conformance testing. The generated PEM files are ignored by Git
+and may be deleted at any time.
+
+These keys provide test coverage only and convey no production trust.
+Production catalogue keys must be supplied by credentialled release
+infrastructure and must never be written into the source tree.

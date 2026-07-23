@@ -91,10 +91,6 @@
 #include "config.h"
 #include "pluginmanager.h"
 
-#ifdef OCPN_ENABLE_PORTABLE_PLUGINS
-#include "portable_plugin_manager.h"
-#endif
-
 #include "o_sound/o_sound.h"
 
 #include "model/ais_decoder.h"
@@ -909,9 +905,6 @@ PlugInManager::PlugInManager(AbstractTopFrame* parent) {
   m_listPanel = NULL;
   m_blacklist = blacklist_factory();
   m_blacklist_ui = std::unique_ptr<BlacklistUI>(new BlacklistUI());
-#ifdef OCPN_ENABLE_PORTABLE_PLUGINS
-  m_portable_manager = std::make_unique<PortablePluginManager>(this);
-#endif
 
   wxDEFINE_EVENT(EVT_JSON_TO_ALL_PLUGINS, ObservedEvt);
   evt_json_to_all_plugins_listener.Listen(g_pRouteMan->json_msg, this,
@@ -939,33 +932,11 @@ PlugInManager::PlugInManager(AbstractTopFrame* parent) {
                            [&](ObservedEvt&) { OnNewMessageType(); });
 }
 PlugInManager::~PlugInManager() {
-#ifdef OCPN_ENABLE_PORTABLE_PLUGINS
-  ShutdownPortablePlugins();
-#endif
 #if !defined(__ANDROID__) && defined(OCPN_USE_CURL)
   wxCurlBase::Shutdown();
 #endif
   delete m_utilHandler;
 }
-
-#ifdef OCPN_ENABLE_PORTABLE_PLUGINS
-bool PlugInManager::LoadPortablePlugins() { return m_portable_manager->Load(); }
-
-void PlugInManager::ShutdownPortablePlugins() {
-  if (m_portable_manager) m_portable_manager->Shutdown();
-}
-
-bool PlugInManager::OnPortableToolbarAction(int toolbar_id) {
-  return m_portable_manager &&
-         m_portable_manager->HandleToolbarAction(toolbar_id);
-}
-
-void PlugInManager::SetPortableCursorPosition(double latitude,
-                                              double longitude) {
-  if (m_portable_manager)
-    m_portable_manager->SetCursorPosition(latitude, longitude);
-}
-#endif
 
 void PlugInManager::InitCommListeners() {
   // Initialize the comm listener to support
@@ -1522,9 +1493,6 @@ bool PlugInManager::RenderAllCanvasOverlayPlugIns(ocpnDC& dc,
     }
   }
 
-#ifdef OCPN_ENABLE_PORTABLE_PLUGINS
-  if (m_portable_manager) m_portable_manager->Render(dc, vp, priority);
-#endif
   return true;
 }
 

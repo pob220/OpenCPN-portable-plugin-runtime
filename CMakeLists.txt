@@ -126,8 +126,6 @@ endif ()
 
 option(OCPN_VERBOSE "Make verbose builds" ON)
 option(OCPN_PEDANTIC "Enable more compiler warnings" OFF)
-option(OCPN_ENABLE_PORTABLE_PLUGINS
-       "Build the experimental Component Model portable-plugin runtime" OFF)
 
 set(OCPN_PACKAGE_RELEASE
   "1" CACHE STRING "Package release number"
@@ -168,11 +166,6 @@ if (QT_ANDROID)
   set(OCPN_BUILD_TEST OFF)
 else ()
   option(OCPN_BUILD_TEST "Enable test subproject build" ON)
-endif ()
-if (OCPN_BUILD_TEST)
-  # This must be called from the top-level directory so ctest discovers tests
-  # registered by optional subdirectories added before test/.
-  enable_testing()
 endif ()
 
 execute_process(
@@ -1066,25 +1059,6 @@ if (NOT MSVC AND NOT APPLE)
   list(APPEND GUI_SRC ${GUI_SRC_DIR}/ocpn_fontdlg.cpp)
 endif ()
 
-if (OCPN_ENABLE_PORTABLE_PLUGINS)
-  if (QT_ANDROID)
-    message(FATAL_ERROR "The portable-plugin prototype does not yet support Android")
-  endif ()
-  list(APPEND GUI_HDRS ${GUI_HDR_DIR}/portable_plugin_manager.h)
-  list(APPEND GUI_HDRS ${GUI_HDR_DIR}/portable_departure_time.h)
-  list(APPEND GUI_HDRS ${GUI_HDR_DIR}/portable_environment_host.h)
-  list(APPEND GUI_HDRS ${GUI_HDR_DIR}/portable_polar.h)
-  list(APPEND GUI_HDRS ${GUI_HDR_DIR}/portable_ui_menu.h)
-  list(APPEND GUI_HDRS ${GUI_HDR_DIR}/portable_weather_routing_host.h)
-  list(APPEND GUI_SRC ${GUI_SRC_DIR}/portable_plugin_manager.cpp
-                      ${GUI_SRC_DIR}/portable_departure_time.cpp
-                      ${GUI_SRC_DIR}/portable_environment_host.cpp
-                      ${GUI_SRC_DIR}/portable_polar.cpp
-                      ${GUI_SRC_DIR}/portable_ui_menu.cpp
-                      ${GUI_SRC_DIR}/portable_weather_routing_host.cpp)
-  add_subdirectory(portable-runtime)
-endif ()
-
 set(SRCS ${GUI_SRC})
 set(HDRS ${GUI_HDRS})
 if (APPLE)
@@ -1111,18 +1085,6 @@ target_include_directories(
             ${CMAKE_CURRENT_SOURCE_DIR}/resources
             ${CMAKE_CURRENT_SOURCE_DIR}/gui/src/mbtiles
 )
-
-if (OCPN_ENABLE_PORTABLE_PLUGINS)
-  target_compile_definitions(${PACKAGE_NAME} PRIVATE
-                             OCPN_ENABLE_PORTABLE_PLUGINS=1)
-  target_include_directories(${PACKAGE_NAME} PRIVATE
-      ${CMAKE_SOURCE_DIR}/portable-runtime/bridge/include)
-  target_link_libraries(${PACKAGE_NAME} PRIVATE ocpn_portable_runtime_bridge)
-  if (UNIX)
-    find_package(Threads REQUIRED)
-    target_link_libraries(${PACKAGE_NAME} PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
-  endif ()
-endif ()
 if (MSVC)
   target_include_directories(_opencpn INTERFACE ${CMAKE_SOURCE_DIR}/buildwin)
 elseif (APPLE)
@@ -1140,13 +1102,6 @@ if ("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang|GNU" AND NOT OCPN_PEDANTIC)
   target_compile_options(
     ${PACKAGE_NAME} PUBLIC -Werror -Wno-unknown-warning-option
   )
-  # GCC 16 diagnoses a false-positive shared_ptr/mutex array bound in the
-  # unchanged chart database worker. Keep warnings-as-errors while allowing
-  # Linux beta testers to build this 5.14-based branch with that compiler.
-  if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
-      CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 16)
-    target_compile_options(${PACKAGE_NAME} PUBLIC -Wno-error=array-bounds)
-  endif ()
 endif ()
 
 set_target_properties(

@@ -1,5 +1,21 @@
 # Incremental migration plan
 
+## Implementation baseline addendum
+
+Implementation continues on `managed-runtime-host-plugin` from the frozen
+modified-core oracle `portable-runtime-reference-2026-07-23` (`834b7b2b9`).
+The branch restores all pre-existing OpenCPN source to official
+`Release_5.14.0` and builds the conventional host independently below
+`plugins/portable_plugin_manager_pi`. See `IMPLEMENTATION-WORKSPACE.md`.
+
+Phase 0 now also requires an isolated stock source/build/install/profile and
+desktop launcher, a machine-checked stock-core invariant, initial resource
+measurements, and production-path smoke hooks. Lightweight target viability
+spikes move forward to the host shell/engine phases so ABI, JIT and packaging
+constraints cannot remain undiscovered until Phase 10. Full target
+conformance, release rebuilds and catalogue publication remain Phase 10 work
+and are outside the current implementation stop point.
+
 ## Smallest decisive vertical slice
 
 Use **iWeatherRouting in a deliberately reduced demonstration mode**, not

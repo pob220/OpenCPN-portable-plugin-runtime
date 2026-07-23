@@ -37,4 +37,6 @@ in `source-ledger.json` and `SOURCE-LEDGER.md`.
 - `RISK-REGISTER.md` — technical/security/governance/platform risks;
 - `UPSTREAM-QUESTIONS.md` — only unresolved maintainer policy decisions;
 - `STUDY-COMPLETION-AUDIT.md` — requirement-to-evidence completion audit;
+- `IMPLEMENTATION-WORKSPACE.md` — frozen baselines, isolated workspace,
+  stock-core invariant and implementation stop point;
 - `SOURCE-LEDGER.md` / `source-ledger.json` — pinned evidence versions.
