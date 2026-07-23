@@ -60,7 +60,7 @@ int main() {
     return 1;
   }
   CHECK(parsed.tabs.size() == 4);
-  CHECK(parsed.controls.size() == 20);
+  CHECK(parsed.controls.size() == 22);
   CHECK(parsed.controls[12].type == "grid");
 
   wxJSONValue invalid = routing;
@@ -70,6 +70,11 @@ int main() {
 
   invalid = routing;
   invalid["controls"][0]["type"] = "native-window-handle";
+  CHECK(!ppm::ParseDeclarativeSurface(
+      invalid, "routing-workbench", &parsed, &diagnostic));
+
+  invalid = routing;
+  invalid["controls"][0]["filter"] = "All files|*";
   CHECK(!ppm::ParseDeclarativeSurface(
       invalid, "routing-workbench", &parsed, &diagnostic));
 

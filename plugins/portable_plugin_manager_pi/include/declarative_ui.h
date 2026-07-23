@@ -26,6 +26,7 @@ struct UiControl {
   std::string tab;
   std::string type;
   std::string label;
+  std::string file_filter;
   std::vector<std::string> columns;
   bool icon_only = false;
 };

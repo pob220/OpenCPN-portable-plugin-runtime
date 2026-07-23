@@ -196,7 +196,8 @@ wxWindow* SurfaceDialog::BuildControl(wxWindow* parent,
       widget = new wxButton(row, wxID_ANY, Text(control.label));
       sizer->Add(widget, 0, wxALIGN_CENTER_VERTICAL);
       widget->Bind(wxEVT_BUTTON,
-                   [this, id = control.id, type = control.type](
+                   [this, id = control.id, type = control.type,
+                    filter = control.file_filter](
                        wxCommandEvent&) {
                      if (type == "file-open" ||
                          type == "file-open-multiple" ||
@@ -210,8 +211,7 @@ wxWindow* SurfaceDialog::BuildControl(wxWindow* parent,
                            this, type == "file-save" ? "Save file"
                                                     : "Choose file",
                            wxEmptyString, wxEmptyString,
-                           "Polar and boat files (*.pol;*.xml)|*.pol;*.xml|"
-                           "All files|*",
+                           filter.empty() ? "All files|*" : Text(filter),
                                            style);
                        if (picker.ShowModal() == wxID_OK) {
                          wxArrayString paths;

@@ -66,7 +66,7 @@ int main() {
   CHECK(Write(
       package / "manifest.json",
       "{\"format_version\":1,\"id\":\"org.opencpn.ipolars\","
-      "\"name\":\"iPolars\",\"version\":\"0.1.1\","
+      "\"name\":\"iPolars\",\"version\":\"0.1.2\","
       "\"component\":\"component/ipolars.wasm\","
       "\"runtime\":\">=0.1.0 <0.2.0\","
       "\"portable_api\":\">=0.1.0 <0.2.0\","
@@ -157,6 +157,40 @@ int main() {
   CHECK(engine.HandleSurfaceEvent(id, "polars.editor", "refresh", "null"));
   CHECK(engine.WaitForIdle(id, std::chrono::seconds(2)));
   CHECK(last_state.find("1 samples retained") != std::string::npos);
+
+  const fs::path vdr = root / "recording.vdr";
+  CHECK(Write(vdr,
+              "2026-07-23T10:00:00Z $IIVWT,90.0,R,12.0,N,6.2,M,22.2,K*73\n"
+              "2026-07-23T10:00:01Z $IIVHW,0.0,T,0.0,M,5.50,N,10.2,K*56\n"
+              "corrupt line\n"));
+  std::string vdr_grant;
+  CHECK(engine.RegisterUserFileGrant(id, vdr.string(), false, &vdr_grant,
+                                     &diagnostic));
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor", "import-vdr",
+                                  "\"" + vdr_grant + "\""));
+  CHECK(engine.WaitForIdle(id, std::chrono::seconds(2)));
+  CHECK(last_error.empty());
+  CHECK(last_state.find("2 valid sentences, 1 rejected lines") !=
+        std::string::npos);
+  CHECK(last_state.find("1 complete samples retained") != std::string::npos);
+
+  const fs::path observations = root / "observations.csv";
+  CHECK(Write(observations,
+              "TWS,TWA,STW,engineOn,manoeuvring,steady\n"
+              "12,90,5.4,false,false,true\n"
+              "12,90,5.8,false,false,true\n"
+              "12,90,9.9,true,false,true\n"
+              "12,90,9.9,false,true,true\n"
+              "12,90,9.9,false,false,false\n"));
+  std::string csv_grant;
+  CHECK(engine.RegisterUserFileGrant(id, observations.string(), false,
+                                     &csv_grant, &diagnostic));
+  CHECK(engine.HandleSurfaceEvent(id, "polars.editor", "import-csv",
+                                  "\"" + csv_grant + "\""));
+  CHECK(engine.WaitForIdle(id, std::chrono::seconds(2)));
+  CHECK(last_error.empty());
+  CHECK(last_state.find("2 accepted, 3 rejected") != std::string::npos);
+  CHECK(last_state.find("5.6") != std::string::npos);
 
   last_error.clear();
   CHECK(engine.HandleSurfaceEvent(id, "polars.editor", "save-as",

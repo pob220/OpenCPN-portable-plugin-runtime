@@ -203,6 +203,8 @@ bool ParseControls(const wxJSONValue& document,
                         kMaximumId) ||
         !RequiredString(value, "label", &control.label, diagnostic) ||
         !OptionalString(value, "tab", &control.tab, diagnostic) ||
+        !OptionalString(value, "filter", &control.file_filter, diagnostic,
+                        512) ||
         !OptionalBoolean(value, "icon_only", &control.icon_only,
                          diagnostic) ||
         !SafeId(control.id) || !control_ids->insert(control.id).second ||
@@ -210,6 +212,13 @@ bool ParseControls(const wxJSONValue& document,
       if (diagnostic->empty())
         *diagnostic =
             "control identifier is invalid/duplicated or type unsupported";
+      return false;
+    }
+    if (!control.file_filter.empty() &&
+        control.type != "file-open" &&
+        control.type != "file-open-multiple" &&
+        control.type != "file-save") {
+      *diagnostic = "file filter is declared on a non-file control";
       return false;
     }
     if ((!tabs.empty() && control.tab.empty()) ||

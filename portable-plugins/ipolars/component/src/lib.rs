@@ -481,48 +481,25 @@ fn valid_nmea(sentence: &str) -> Option<Vec<&str>> {
     (actual == expected).then(|| sentence[..star].split(',').collect())
 }
 
-fn navigation_sample(editor: &mut Editor, sentence: &str) {
-    let Some(fields) = valid_nmea(sentence) else {
-        return;
-    };
-    let kind = fields
-        .first()
-        .and_then(|value| value.get(value.len().saturating_sub(3)..));
-    match kind {
-        Some("VWT") if fields.len() >= 5 => {
-            if let (Ok(angle), Ok(speed)) = (fields[1].parse::<f64>(), fields[3].parse::<f64>()) {
-                editor.last_twa = Some(angle.clamp(0.0, 180.0));
-                editor.last_tws = Some(speed);
-            }
-        }
-        Some("MWV")
-            if fields.len() >= 6 && fields[2] == "T" && fields[4] == "N" && fields[5] == "A" =>
-        {
-            if let (Ok(angle), Ok(speed)) = (fields[1].parse::<f64>(), fields[3].parse::<f64>()) {
-                editor.last_twa = Some(angle.min(360.0 - angle).clamp(0.0, 180.0));
-                editor.last_tws = Some(speed);
-            }
-        }
-        Some("VHW") if fields.len() >= 7 && fields[6] == "N" => {
-            editor.last_stw = fields[5].parse::<f64>().ok();
-        }
-        _ => return,
-    }
-    if !editor.capturing {
-        return;
-    }
-    let (Some(twa), Some(tws), Some(stw)) = (editor.last_twa, editor.last_tws, editor.last_stw)
-    else {
-        return;
-    };
+fn begin_capture(editor: &mut Editor) {
+    let polar = capture_polar();
+    editor.sample_counts = vec![vec![0; polar.tws.len()]; polar.twa.len()];
+    editor.document = Some(Document::Polar(polar));
+    editor.samples = 0;
+    editor.last_twa = None;
+    editor.last_tws = None;
+    editor.last_stw = None;
+}
+
+fn retain_sample(editor: &mut Editor, twa: f64, tws: f64, stw: f64) -> bool {
     if !(0.0..=180.0).contains(&twa)
         || !(0.0..=200.0).contains(&tws)
         || !(0.0..=100.0).contains(&stw)
     {
-        return;
+        return false;
     }
     let Some(Document::Polar(polar)) = &mut editor.document else {
-        return;
+        return false;
     };
     let row = ((twa / 5.0).round() as usize).min(polar.twa.len() - 1);
     let column = ((tws / 2.0).round() as usize)
@@ -537,6 +514,189 @@ fn navigation_sample(editor: &mut Editor, sentence: &str) {
     editor.sample_counts[row][column] = count + 1;
     editor.samples += 1;
     editor.dirty = true;
+    true
+}
+
+fn true_from_apparent(aws: f64, awa: f64, stw: f64) -> Option<(f64, f64)> {
+    if !aws.is_finite() || !awa.is_finite() || !stw.is_finite() || aws < 0.0 || stw < 0.0 {
+        return None;
+    }
+    let angle = awa.abs().to_radians();
+    let true_forward = -aws * angle.cos() + stw;
+    let true_starboard = -aws * angle.sin();
+    let tws = true_forward.hypot(true_starboard);
+    if tws < 1e-9 {
+        return Some((0.0, 0.0));
+    }
+    let twa = (-true_starboard)
+        .atan2(-true_forward)
+        .to_degrees()
+        .abs()
+        .clamp(0.0, 180.0);
+    Some((tws, twa))
+}
+
+fn nmea_speed(value: f64, unit: &str) -> Option<f64> {
+    match unit {
+        "N" => Some(value),
+        "M" => Some(value * 1.943_844_492_440_6),
+        "K" => Some(value / 1.852),
+        _ => None,
+    }
+}
+
+fn navigation_sample(editor: &mut Editor, sentence: &str) {
+    let Some(fields) = valid_nmea(sentence) else {
+        return;
+    };
+    let kind = fields
+        .first()
+        .and_then(|value| value.get(value.len().saturating_sub(3)..));
+    match kind {
+        Some("VWT") if fields.len() >= 5 => {
+            if let (Ok(angle), Ok(raw)) = (fields[1].parse::<f64>(), fields[3].parse::<f64>()) {
+                if let Some(speed) = nmea_speed(raw, fields[4]) {
+                    editor.last_twa = Some(angle.abs().min(180.0));
+                    editor.last_tws = Some(speed);
+                }
+            }
+        }
+        Some("MWV") if fields.len() >= 6 && fields[5] == "A" => {
+            if let (Ok(angle), Ok(raw)) = (fields[1].parse::<f64>(), fields[3].parse::<f64>()) {
+                if let Some(speed) = nmea_speed(raw, fields[4]) {
+                    if fields[2] == "T" {
+                        editor.last_twa = Some(angle.min(360.0 - angle).abs().clamp(0.0, 180.0));
+                        editor.last_tws = Some(speed);
+                    } else if fields[2] == "R" {
+                        if let Some(stw) = editor.last_stw {
+                            if let Some((tws, twa)) = true_from_apparent(speed, angle, stw) {
+                                editor.last_twa = Some(twa);
+                                editor.last_tws = Some(tws);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Some("VHW") if fields.len() >= 7 => {
+            if let Ok(raw) = fields[5].parse::<f64>() {
+                editor.last_stw = nmea_speed(raw, fields[6]);
+            }
+        }
+        _ => return,
+    }
+    if !editor.capturing {
+        return;
+    }
+    let (Some(twa), Some(tws), Some(stw)) = (editor.last_twa, editor.last_tws, editor.last_stw)
+    else {
+        return;
+    };
+    retain_sample(editor, twa, tws, stw);
+}
+
+fn import_nmea_log(editor: &mut Editor, text: &str) -> (usize, usize) {
+    begin_capture(editor);
+    editor.capturing = true;
+    let mut valid = 0;
+    let mut rejected = 0;
+    for raw_line in text.lines().take(1_000_000) {
+        let Some(start) = raw_line.find('$') else {
+            rejected += 1;
+            continue;
+        };
+        let sentence = raw_line[start..].trim();
+        if valid_nmea(sentence).is_some() {
+            valid += 1;
+            navigation_sample(editor, sentence);
+        } else {
+            rejected += 1;
+        }
+    }
+    editor.capturing = false;
+    (valid, rejected)
+}
+
+fn csv_fields(line: &str) -> Vec<&str> {
+    if line.contains('\t') {
+        line.split('\t').map(str::trim).collect()
+    } else if line.contains(';') {
+        line.split(';').map(str::trim).collect()
+    } else {
+        line.split(',').map(str::trim).collect()
+    }
+}
+
+fn import_csv(editor: &mut Editor, text: &str) -> Result<(usize, usize), String> {
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let header = csv_fields(lines.next().ok_or("Observation CSV is empty.")?);
+    let names = header
+        .iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let column = |name: &str| names.iter().position(|value| value == name);
+    let tws_column = column("tws");
+    let twa_column = column("twa");
+    let aws_column = column("aws");
+    let awa_column = column("awa");
+    let stw_column = column("stw").ok_or(
+        "Observation CSV requires STW; SOG is not substituted because current changes it.",
+    )?;
+    if (tws_column.is_none() || twa_column.is_none())
+        && (aws_column.is_none() || awa_column.is_none())
+    {
+        return Err("Observation CSV requires TWS/TWA or AWS/AWA columns.".into());
+    }
+    let engine_column = column("engineon");
+    let manoeuvre_column = column("manoeuvring");
+    let steady_column = column("steady");
+    let truthy = |value: &str| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    };
+    begin_capture(editor);
+    let mut accepted = 0;
+    let mut rejected = 0;
+    for line in lines.take(1_000_000) {
+        let values = csv_fields(line);
+        let value = |index: Option<usize>| {
+            index
+                .and_then(|position| values.get(position))
+                .and_then(|text| text.parse::<f64>().ok())
+        };
+        if engine_column.is_some_and(|index| values.get(index).is_some_and(|entry| truthy(entry)))
+            || manoeuvre_column
+                .is_some_and(|index| values.get(index).is_some_and(|entry| truthy(entry)))
+            || steady_column
+                .is_some_and(|index| values.get(index).is_some_and(|entry| !truthy(entry)))
+        {
+            rejected += 1;
+            continue;
+        }
+        let Some(stw) = value(Some(stw_column)) else {
+            rejected += 1;
+            continue;
+        };
+        let wind = match (value(tws_column), value(twa_column)) {
+            (Some(tws), Some(twa)) => Some((tws, twa.abs().min(180.0))),
+            _ => match (value(aws_column), value(awa_column)) {
+                (Some(aws), Some(awa)) => true_from_apparent(aws, awa, stw),
+                _ => None,
+            },
+        };
+        if let Some((tws, twa)) = wind {
+            if retain_sample(editor, twa, tws, stw) {
+                accepted += 1;
+            } else {
+                rejected += 1;
+            }
+        } else {
+            rejected += 1;
+        }
+    }
+    Ok((accepted, rejected))
 }
 
 struct IPolars;
@@ -615,18 +775,31 @@ impl exports::opencpn::portable::plugin::Guest for IPolars {
             "capture" => {
                 let start = value.trim() == "true";
                 if start && !e.capturing {
-                    let polar = capture_polar();
-                    e.sample_counts = vec![vec![0; polar.tws.len()]; polar.twa.len()];
-                    e.document = Some(Document::Polar(polar));
-                    e.samples = 0;
-                    e.last_twa = None;
-                    e.last_tws = None;
-                    e.last_stw = None;
+                    begin_capture(&mut e);
                     e.status = "Live polar capture started.".into();
                 } else if !start {
                     e.status = "Live capture stopped; review and interpolate before saving.".into();
                 }
                 e.capturing = start;
+            }
+            "import-vdr" => {
+                let bytes = host::user_file_read(&json_string(&value)?)?;
+                let text =
+                    String::from_utf8(bytes).map_err(|_| "NMEA/VDR log is not UTF-8 text.")?;
+                let (valid, rejected) = import_nmea_log(&mut e, &text);
+                e.status = format!(
+                    "Imported NMEA/VDR log: {valid} valid sentences, {rejected} rejected lines, {} complete samples retained.",
+                    e.samples
+                );
+            }
+            "import-csv" => {
+                let bytes = host::user_file_read(&json_string(&value)?)?;
+                let text =
+                    String::from_utf8(bytes).map_err(|_| "Observation CSV is not UTF-8 text.")?;
+                let (accepted, rejected) = import_csv(&mut e, &text)?;
+                e.status = format!(
+                    "Imported observations: {accepted} accepted, {rejected} rejected. Motoring, manoeuvring, unstable, incomplete, and SOG-only rows are excluded."
+                );
             }
             "new-angle" => e.new_angle = json_string(&value)?,
             "new-wind" => e.new_wind = json_string(&value)?,

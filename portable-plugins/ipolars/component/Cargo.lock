@@ -67,7 +67,7 @@ dependencies = [
 
 [[package]]
 name = "ipolars-portable-component"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "wit-bindgen",
 ]
