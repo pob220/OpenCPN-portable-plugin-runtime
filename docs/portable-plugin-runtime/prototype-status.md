@@ -1,18 +1,19 @@
 # Portable runtime implementation status
 
-Status date: 2026-07-24. Baseline: OpenCPN Release 5.14.0 in the separate
-Test-OpenCPN build/profile. The native xGRIB library was disabled and then
-moved to Test-OpenCPN's recoverable `plugins-disabled` directory for the final
-standalone test. The modified working OpenCPN 5.15 setup was not used.
+Status date: 2026-07-24. The current deployment baseline is the separate
+RuntimeHost OpenCPN profile using stock OpenCPN Release 5.14.0 and the
+conventional Portable Plugin Manager. The earlier Test-OpenCPN core-integrated
+prototype remains historical evidence; the modified working OpenCPN 5.15
+setup is not required by the current loader architecture.
 
 This is implementation evidence, not a production compatibility or navigation
-safety claim. Both the build option and runtime preference remain off by
-default.
+safety claim. Portable support remains opt-in by installing/enabling the
+Manager and approving individual package capabilities.
 
 ## Implemented
 
-- Parallel Component Model loader using Wasmtime 46.0.1; the native loader and
-  C++ ABI remain intact.
+- Conventional native Portable Plugin Manager using Wasmtime 46.0.1; stock
+  OpenCPN's loader and C++ ABI remain intact.
 - Bounded manifest discovery, runtime/API negotiation, permission allow-list,
   component/manifest identity matching, inert ambient WASI, 256 MiB component
   memory limit, finite fuel and epoch interruption.

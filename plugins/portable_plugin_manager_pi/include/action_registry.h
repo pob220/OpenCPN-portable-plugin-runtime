@@ -20,16 +20,18 @@ struct ActionKey {
 struct Action {
   ActionKey key;
   int tool_id = -1;
+  int context_id = -1;
   bool checked = false;
   bool dispatchable = true;
 };
 
 class ActionRegistry {
  public:
-  bool Add(const ActionKey& key, int tool_id);
+  bool Add(const ActionKey& key, int tool_id, int context_id = -1);
   bool Remove(const ActionKey& key);
   std::vector<Action> RemovePackage(const std::string& package_id);
   std::optional<Action> FindByToolId(int tool_id) const;
+  std::optional<Action> FindByContextId(int context_id) const;
   Action* Find(const ActionKey& key);
   const Action* Find(const ActionKey& key) const;
   std::vector<Action> Clear();
@@ -38,6 +40,7 @@ class ActionRegistry {
  private:
   std::map<ActionKey, Action> by_key_;
   std::map<int, ActionKey> by_tool_id_;
+  std::map<int, ActionKey> by_context_id_;
 };
 
 }  // namespace ppm

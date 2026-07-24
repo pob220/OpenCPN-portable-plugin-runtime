@@ -1,0 +1,113 @@
+package opencpn:portable@0.3.0;
+
+interface diagnostics {
+  use types.{log-level};
+  log: func(level: log-level, message: string);
+}
+
+interface settings {
+  use types.{service-error};
+
+  get: func(key: string) -> result<option<string>, service-error>;
+  set: func(key: string, value: string) -> result<_, service-error>;
+}
+
+interface actions {
+  use types.{action-registration, action-state, service-error};
+
+  register: func(request: action-registration) -> result<u32, service-error>;
+  set-state: func(action-id: string, state: action-state)
+    -> result<_, service-error>;
+  unregister: func(action-id: string) -> result<_, service-error>;
+}
+
+interface surfaces {
+  use types.{service-error};
+
+  open: func(surface-id: string) -> result<_, service-error>;
+}
+
+interface navigation {
+  use types.{
+    navigation-mutation,
+    navigation-mutation-result,
+    navigation-object,
+    navigation-object-kind,
+    service-error,
+    vessel-position,
+  };
+
+  get-vessel-position: func() -> result<vessel-position, service-error>;
+  list-objects: func(kind: navigation-object-kind, limit: u32)
+    -> result<list<navigation-object>, service-error>;
+  get-object: func(kind: navigation-object-kind, id: string)
+    -> result<option<navigation-object>, service-error>;
+  mutate-with-confirmation: func(mutation: navigation-mutation)
+    -> result<navigation-mutation-result, service-error>;
+}
+
+interface user-files {
+  use types.{service-error};
+
+  read: func(grant-token: string) -> result<list<u8>, service-error>;
+  write: func(grant-token: string, value: list<u8>)
+    -> result<_, service-error>;
+}
+
+interface scenes {
+  use types.{scene-update, service-error};
+
+  submit: func(update: scene-update) -> result<_, service-error>;
+  clear: func(scene-id: string) -> result<_, service-error>;
+}
+
+interface private-storage {
+  use types.{service-error};
+
+  read: func(name: string) -> result<list<u8>, service-error>;
+  write-atomic: func(name: string, value: list<u8>)
+    -> result<_, service-error>;
+  list-names: func(prefix: string) -> result<list<string>, service-error>;
+  delete: func(name: string) -> result<bool, service-error>;
+}
+
+interface timers {
+  use types.{service-error};
+
+  schedule: func(
+    timer-id: string,
+    delay-milliseconds: u32,
+    repeat-milliseconds: option<u32>,
+  ) -> result<_, service-error>;
+  cancel: func(timer-id: string) -> result<bool, service-error>;
+}
+
+interface navigation-output {
+  use types.{service-error};
+  send-nmea0183: func(sentence: string) -> result<_, service-error>;
+}
+
+interface plugin-messages {
+  use types.{service-error};
+
+  send: func(message-id: string, message-body: string)
+    -> result<_, service-error>;
+}
+
+interface plugin-rpc {
+  use types.{rpc-request, rpc-response, service-error};
+
+  register-service: func(service: string) -> result<_, service-error>;
+  unregister-service: func(service: string) -> result<_, service-error>;
+  request: func(target-package: string, request: rpc-request)
+    -> result<_, service-error>;
+  respond: func(target-package: string, response: rpc-response)
+    -> result<_, service-error>;
+}
+
+interface event-subscriptions {
+  use types.{service-error, subscription};
+
+  subscribe: func(request: subscription) -> result<u64, service-error>;
+  unsubscribe: func(subscription-id: u64) -> result<_, service-error>;
+}

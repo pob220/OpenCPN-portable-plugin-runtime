@@ -4,6 +4,9 @@
 #include <wx/dcmemory.h>
 #include <wx/filename.h>
 #include <wx/image.h>
+#include <wx/jsonreader.h>
+#include <wx/jsonval.h>
+#include <wx/jsonwriter.h>
 #include <wx/log.h>
 #include <wx/msgdlg.h>
 #include <wx/utils.h>
@@ -11,6 +14,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <iterator>
+#include <limits>
 #include <new>
 #include <utility>
 #include <vector>
@@ -215,6 +220,208 @@ bool RenderEnvironmentWithDesktopGl(PortableEnvironmentHost* workbench,
   return true;
 }
 
+wxColour SceneColour(const ppm::OverlayColor& value) {
+  return wxColour(value.red, value.green, value.blue, value.alpha);
+}
+
+std::vector<std::pair<const ppm::OverlayScene*, const ppm::OverlayLayer*>>
+OrderedSceneLayers(const std::vector<ppm::OverlayScene>& scenes) {
+  std::vector<
+      std::pair<const ppm::OverlayScene*, const ppm::OverlayLayer*>>
+      layers;
+  for (const auto& scene : scenes) {
+    for (const auto& layer : scene.layers)
+      if (layer.visible) layers.push_back({&scene, &layer});
+  }
+  std::stable_sort(
+      layers.begin(), layers.end(), [](const auto& left, const auto& right) {
+        return left.second->z_index < right.second->z_index;
+      });
+  return layers;
+}
+
+bool RenderPortableScenes(const std::vector<ppm::OverlayScene>& scenes,
+                          wxDC& dc, PlugIn_ViewPort* viewport) {
+  if (!viewport) return false;
+  bool rendered = false;
+  for (const auto& scene : scenes) {
+    if (scene.points.size() < 2) continue;
+    dc.SetPen(wxPen(wxColour(scene.red, scene.green, scene.blue, scene.alpha),
+                    std::max(1, static_cast<int>(scene.width_pixels))));
+    wxPoint previous;
+    GetCanvasPixLL(viewport, &previous, scene.points.front().latitude,
+                   scene.points.front().longitude);
+    for (std::size_t index = 1; index < scene.points.size(); ++index) {
+      wxPoint next;
+      GetCanvasPixLL(viewport, &next, scene.points[index].latitude,
+                     scene.points[index].longitude);
+      dc.DrawLine(previous, next);
+      previous = next;
+    }
+    rendered = true;
+  }
+
+  for (const auto& [scene, layer] : OrderedSceneLayers(scenes)) {
+    (void)scene;
+    for (const auto& primitive : layer->primitives) {
+      std::vector<wxPoint> points;
+      points.reserve(primitive.points.size());
+      for (const auto& value : primitive.points) {
+        wxPoint point;
+        GetCanvasPixLL(viewport, &point, value.latitude, value.longitude);
+        points.push_back(point);
+      }
+      const auto set_style = [&]() {
+        dc.SetPen(primitive.style.has_stroke
+                      ? wxPen(SceneColour(primitive.style.stroke),
+                              std::max(
+                                  1, static_cast<int>(
+                                         std::lround(
+                                             primitive.style.width_pixels))))
+                      : *wxTRANSPARENT_PEN);
+        dc.SetBrush(primitive.style.has_fill
+                        ? wxBrush(SceneColour(primitive.style.fill))
+                        : *wxTRANSPARENT_BRUSH);
+      };
+      switch (primitive.kind) {
+        case ppm::OverlayPrimitiveKind::kPolyline:
+          set_style();
+          if (points.size() >= 2)
+            dc.DrawLines(static_cast<int>(points.size()), points.data());
+          break;
+        case ppm::OverlayPrimitiveKind::kPolygon:
+          set_style();
+          if (points.size() >= 3)
+            dc.DrawPolygon(static_cast<int>(points.size()), points.data());
+          break;
+        case ppm::OverlayPrimitiveKind::kCircle: {
+          set_style();
+          wxPoint centre;
+          wxPoint edge;
+          GetCanvasPixLL(viewport, &centre, primitive.centre.latitude,
+                         primitive.centre.longitude);
+          GetCanvasPixLL(
+              viewport, &edge,
+              std::min(90.0, primitive.centre.latitude +
+                                  primitive.radius_metres / 111'320.0),
+              primitive.centre.longitude);
+          const int radius =
+              std::max(1, static_cast<int>(std::lround(std::hypot(
+                              static_cast<double>(edge.x - centre.x),
+                              static_cast<double>(edge.y - centre.y)))));
+          dc.DrawCircle(centre, radius);
+          break;
+        }
+        case ppm::OverlayPrimitiveKind::kIcon: {
+          wxPoint centre;
+          GetCanvasPixLL(viewport, &centre, primitive.centre.latitude,
+                         primitive.centre.longitude);
+          wxImage image(wxString::FromUTF8(primitive.resource_path));
+          if (!image.IsOk()) break;
+          const int width =
+              std::max(1, static_cast<int>(
+                              std::lround(primitive.width_pixels)));
+          const int height =
+              std::max(1, static_cast<int>(
+                              std::lround(primitive.height_pixels)));
+          image.Rescale(width, height, wxIMAGE_QUALITY_HIGH);
+          dc.DrawBitmap(wxBitmap(image), centre.x - width / 2,
+                        centre.y - height / 2, true);
+          break;
+        }
+        case ppm::OverlayPrimitiveKind::kText: {
+          wxPoint position;
+          GetCanvasPixLL(viewport, &position, primitive.centre.latitude,
+                         primitive.centre.longitude);
+          const wxFont previous = dc.GetFont();
+          wxFont font = previous;
+          font.SetPixelSize(
+              wxSize(0, std::max(6, static_cast<int>(
+                                     std::lround(primitive.size_pixels)))));
+          dc.SetFont(font);
+          dc.SetTextForeground(SceneColour(primitive.text_color));
+          dc.DrawText(wxString::FromUTF8(primitive.text), position);
+          dc.SetFont(previous);
+          break;
+        }
+      }
+      rendered = true;
+    }
+  }
+  return rendered;
+}
+
+bool RenderPortableScenesWithDesktopGl(
+    const std::vector<ppm::OverlayScene>& scenes,
+    PlugIn_ViewPort* viewport) {
+  if (!viewport || scenes.empty() || viewport->pix_width <= 0 ||
+      viewport->pix_height <= 0)
+    return false;
+  constexpr int kMaximumCanvasDimension = 8'192;
+  constexpr std::uint64_t kMaximumCanvasPixels = 16'777'216;
+  const std::uint64_t width = viewport->pix_width;
+  const std::uint64_t height = viewport->pix_height;
+  if (viewport->pix_width > kMaximumCanvasDimension ||
+      viewport->pix_height > kMaximumCanvasDimension ||
+      width * height > kMaximumCanvasPixels)
+    return false;
+
+  constexpr unsigned char kKeyRed = 1;
+  constexpr unsigned char kKeyGreen = 2;
+  constexpr unsigned char kKeyBlue = 3;
+  wxBitmap bitmap(viewport->pix_width, viewport->pix_height, 32);
+  if (!bitmap.IsOk()) return false;
+  bitmap.UseAlpha();
+  wxMemoryDC dc;
+  dc.SelectObject(bitmap);
+  dc.SetBackground(wxBrush(wxColour(kKeyRed, kKeyGreen, kKeyBlue, 255)));
+  dc.Clear();
+  const bool rendered = RenderPortableScenes(scenes, dc, viewport);
+  dc.SelectObject(wxNullBitmap);
+  if (!rendered) return false;
+
+  wxImage image = bitmap.ConvertToImage();
+  if (!image.IsOk() || !image.GetData()) return false;
+  const unsigned char* rgb = image.GetData();
+  const unsigned char* alpha = image.HasAlpha() ? image.GetAlpha() : nullptr;
+  std::vector<unsigned char> rgba;
+  try {
+    rgba.resize(width * height * 4);
+  } catch (const std::bad_alloc&) {
+    return false;
+  }
+  for (std::uint64_t index = 0; index < width * height; ++index) {
+    const unsigned char red = rgb[index * 3];
+    const unsigned char green = rgb[index * 3 + 1];
+    const unsigned char blue = rgb[index * 3 + 2];
+    const bool background =
+        red == kKeyRed && green == kKeyGreen && blue == kKeyBlue;
+    rgba[index * 4] = red;
+    rgba[index * 4 + 1] = green;
+    rgba[index * 4 + 2] = blue;
+    rgba[index * 4 + 3] =
+        background ? 0 : (alpha && alpha[index] ? alpha[index] : 255);
+  }
+  glPushAttrib(GL_COLOR_BUFFER_BIT | GL_CURRENT_BIT | GL_ENABLE_BIT |
+               GL_PIXEL_MODE_BIT);
+  glDisable(GL_DEPTH_TEST);
+  glDisable(GL_TEXTURE_2D);
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  glColor4f(1.0F, 1.0F, 1.0F, 1.0F);
+  GLint unpack_alignment = 4;
+  glGetIntegerv(GL_UNPACK_ALIGNMENT, &unpack_alignment);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  glRasterPos2i(0, 0);
+  glPixelZoom(1.0F, -1.0F);
+  glDrawPixels(viewport->pix_width, viewport->pix_height, GL_RGBA,
+               GL_UNSIGNED_BYTE, rgba.data());
+  glPixelZoom(1.0F, 1.0F);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, unpack_alignment);
+  glPopAttrib();
+  return true;
+}
+
 }  // namespace
 
 extern "C" DECL_EXP opencpn_plugin* create_pi(void* manager) {
@@ -238,7 +445,8 @@ int PortablePluginManagerPi::Init() {
     return WANTS_TOOLBAR_CALLBACK | INSTALLS_TOOLBAR_TOOL | WANTS_CONFIG |
            WANTS_NMEA_EVENTS | WANTS_NMEA_SENTENCES | WANTS_OVERLAY_CALLBACK |
            WANTS_OPENGL_OVERLAY_CALLBACK | WANTS_CURSOR_LATLON |
-           WANTS_PLUGIN_MESSAGING;
+           WANTS_PLUGIN_MESSAGING | INSTALLS_CONTEXTMENU_ITEMS |
+           WANTS_MOUSE_EVENTS | WANTS_KEYBOARD_EVENTS | WANTS_AIS_SENTENCES;
   }
   initialized_ = true;
   storage_root_ = ResolveStorageRoot();
@@ -319,6 +527,12 @@ int PortablePluginManagerPi::Init() {
         ::SendPluginMessage(wxString::FromUTF8(message_id),
                             wxString::FromUTF8(message_body));
       });
+  runtime_engine_->SetAuthorUiRequestCallback(
+      [this](const std::string& package_id, const std::string& operation,
+             const std::string& request_json, std::string* response_json) {
+        return HandleAuthorUiRequest(package_id, operation, request_json,
+                                     response_json);
+      });
   if (!runtime_engine_->LoadInstalled(developer_mode_)) {
     wxLogWarning(
         "PPM event=runtime-engine-load-completed-with-package-failures");
@@ -364,14 +578,36 @@ int PortablePluginManagerPi::Init() {
       }
     }
   }
+  static constexpr std::uint32_t kPortableNmea2000Pgns[] = {
+      127245, 127250, 127257, 128259, 128267, 128275,
+      129025, 129026, 129029, 129540, 130306, 130310, 130313};
+  nmea2000_handler_ = std::make_unique<wxEvtHandler>();
+  nmea2000_listeners_.reserve(std::size(kPortableNmea2000Pgns));
+  nmea2000_event_types_.reserve(std::size(kPortableNmea2000Pgns));
+  for (const std::uint32_t pgn : kPortableNmea2000Pgns) {
+    const wxEventType event_type = wxNewEventType();
+    nmea2000_event_types_.push_back(event_type);
+    nmea2000_listeners_.push_back(
+        GetListener(NMEA2000Id(static_cast<int>(pgn)), event_type,
+                    nmea2000_handler_.get()));
+    nmea2000_handler_->Bind(
+        wxEventTypeTag<ObservedEvt>(event_type),
+        [this, pgn](ObservedEvt event) {
+          HandleNmea2000(pgn, std::move(event));
+        });
+  }
   return WANTS_TOOLBAR_CALLBACK | INSTALLS_TOOLBAR_TOOL | WANTS_CONFIG |
          WANTS_NMEA_EVENTS | WANTS_NMEA_SENTENCES | WANTS_OVERLAY_CALLBACK |
          WANTS_OPENGL_OVERLAY_CALLBACK | WANTS_CURSOR_LATLON |
-         WANTS_PLUGIN_MESSAGING;
+         WANTS_PLUGIN_MESSAGING | INSTALLS_CONTEXTMENU_ITEMS |
+         WANTS_MOUSE_EVENTS | WANTS_KEYBOARD_EVENTS | WANTS_AIS_SENTENCES;
 }
 
 bool PortablePluginManagerPi::DeInit() {
   if (!initialized_) return true;
+  nmea2000_listeners_.clear();
+  nmea2000_event_types_.clear();
+  nmea2000_handler_.reset();
   if (manager_dialog_) {
     manager_dialog_->Hide();
     manager_dialog_->Destroy();
@@ -440,30 +676,42 @@ int PortablePluginManagerPi::RegisterPortableAction(
   int tool_id = -1;
   const wxString label = wxString::FromUTF8(action.label);
   const wxString tooltip = wxString::FromUTF8(action.tooltip);
-  if (!action.icon_path.empty()) {
-    const wxString icon = wxString::FromUTF8(action.icon_path);
-    tool_id = InsertPlugInToolSVG(label, icon, icon, icon, wxITEM_NORMAL,
-                                  tooltip, tooltip, nullptr, -1, 0, this);
-  } else {
-    tool_id =
-        InsertPlugInTool(label, &plugin_bitmap_, &plugin_bitmap_, wxITEM_NORMAL,
-                         tooltip, tooltip, nullptr, -1, 0, this);
+  if (action.toolbar) {
+    if (!action.icon_path.empty()) {
+      const wxString icon = wxString::FromUTF8(action.icon_path);
+      tool_id = InsertPlugInToolSVG(label, icon, icon, icon, wxITEM_NORMAL,
+                                    tooltip, tooltip, nullptr, -1, 0, this);
+    } else {
+      tool_id = InsertPlugInTool(label, &plugin_bitmap_, &plugin_bitmap_,
+                                 wxITEM_NORMAL, tooltip, tooltip, nullptr, -1,
+                                 0, this);
+    }
   }
-  if (!actions_.Add(key, tool_id)) {
+  int context_id = -1;
+  if (action.context_menu) {
+    auto* item = new wxMenuItem(nullptr, wxID_ANY, label, tooltip);
+    context_id = AddCanvasContextMenuItem(item, this);
+  }
+  if (!actions_.Add(key, tool_id, context_id)) {
     if (tool_id >= 0) RemovePlugInTool(tool_id);
+    if (context_id >= 0) RemoveCanvasContextMenuItem(context_id);
     return -2;
   }
-  SetToolbarToolViz(tool_id, true);
-  *host_action_id = static_cast<std::uint32_t>(tool_id);
+  if (tool_id >= 0) SetToolbarToolViz(tool_id, true);
+  *host_action_id =
+      static_cast<std::uint32_t>(tool_id >= 0 ? tool_id : context_id);
   wxLogMessage(
-      "PPM event=package-action-registered package=%s action=%s tool=%d",
-      action.package_id, action.action_id, tool_id);
+      "PPM event=package-action-registered package=%s action=%s tool=%d "
+      "context=%d",
+      action.package_id, action.action_id, tool_id, context_id);
   return 0;
 }
 
 void PortablePluginManagerPi::RemoveAllActions() {
   for (const auto& action : actions_.Clear()) {
-    RemovePlugInTool(action.tool_id);
+    if (action.tool_id >= 0) RemovePlugInTool(action.tool_id);
+    if (action.context_id >= 0)
+      RemoveCanvasContextMenuItem(action.context_id);
     wxLogMessage("PPM event=action-removed package=%s action=%s tool=%d",
                  action.key.package_id, action.key.action_id, action.tool_id);
   }
@@ -472,7 +720,9 @@ void PortablePluginManagerPi::RemoveAllActions() {
 void PortablePluginManagerPi::RemovePackageActions(
     const std::string& package_id) {
   for (const auto& action : actions_.RemovePackage(package_id)) {
-    RemovePlugInTool(action.tool_id);
+    if (action.tool_id >= 0) RemovePlugInTool(action.tool_id);
+    if (action.context_id >= 0)
+      RemoveCanvasContextMenuItem(action.context_id);
     wxLogMessage("PPM event=action-removed package=%s action=%s tool=%d",
                  action.key.package_id, action.key.action_id, action.tool_id);
   }
@@ -490,6 +740,17 @@ void PortablePluginManagerPi::OnToolbarToolCallback(int id) {
     runtime_engine_->HandleAction(action->key.package_id,
                                   action->key.action_id);
   }
+}
+
+void PortablePluginManagerPi::OnContextMenuItemCallback(int id) {
+  const auto action = actions_.FindByContextId(id);
+  if (!action || !action->dispatchable) {
+    wxLogWarning("PPM event=unmapped-or-blocked-context-command item=%d", id);
+    return;
+  }
+  if (runtime_engine_)
+    runtime_engine_->HandleAction(action->key.package_id,
+                                  action->key.action_id);
 }
 
 void PortablePluginManagerPi::ShowPreferencesDialog(wxWindow* parent) {
@@ -1167,6 +1428,8 @@ void PortablePluginManagerPi::SetCursorLatLon(double latitude,
     cursor_longitude_ = longitude;
     if (environment_workbench_)
       environment_workbench_->SetCursorPosition(latitude, longitude);
+    if (runtime_engine_)
+      runtime_engine_->SetCursorPosition(latitude, longitude);
   }
 }
 
@@ -1256,6 +1519,342 @@ bool PortablePluginManagerPi::CreateOpenCpnRoute(
   return true;
 }
 
+int PortablePluginManagerPi::HandleAuthorUiRequest(
+    const std::string& package_id, const std::string& operation,
+    const std::string& request_json, std::string* response_json) {
+  if (!response_json) return -1;
+  wxJSONValue request;
+  wxJSONReader reader;
+  if (reader.Parse(wxString::FromUTF8(request_json), &request) != 0 ||
+      !request.IsObject()) {
+    return -2;
+  }
+  auto encode = [response_json](const wxJSONValue& value) {
+    wxString encoded;
+    wxJSONWriter writer;
+    writer.Write(value, encoded);
+    *response_json = encoded.ToStdString();
+  };
+  auto error = [&](const wxString& code, const wxString& message) {
+    wxJSONValue value;
+    value["error"]["code"] = code;
+    value["error"]["message"] = message;
+    value["error"]["retryable"] = false;
+    encode(value);
+    return -3;
+  };
+
+  if (operation == "actions.set-state") {
+    const ActionKey key{package_id,
+                        request["action_id"].AsString().ToStdString()};
+    Action* action = actions_.Find(key);
+    if (!action) return error("not-found", "The command is not registered.");
+    action->checked = request["checked"].AsBool();
+    action->dispatchable = request["enabled"].AsBool();
+    const bool visible = request["visible"].AsBool();
+    if (action->tool_id >= 0) {
+      SetToolbarToolViz(action->tool_id, visible);
+      if (request["checkable"].AsBool())
+        SetToolbarItemState(action->tool_id, action->checked);
+    }
+    if (action->context_id >= 0) {
+      SetCanvasContextMenuItemViz(action->context_id, visible);
+      SetCanvasContextMenuItemGrey(action->context_id,
+                                   !action->dispatchable);
+    }
+    encode(wxJSONValue(wxJSONTYPE_OBJECT));
+    return 0;
+  }
+  if (operation == "actions.unregister") {
+    const ActionKey key{package_id,
+                        request["action_id"].AsString().ToStdString()};
+    const Action* found = actions_.Find(key);
+    if (!found) return error("not-found", "The command is not registered.");
+    const Action action = *found;
+    if (action.tool_id >= 0) RemovePlugInTool(action.tool_id);
+    if (action.context_id >= 0)
+      RemoveCanvasContextMenuItem(action.context_id);
+    actions_.Remove(key);
+    encode(wxJSONValue(wxJSONTYPE_OBJECT));
+    return 0;
+  }
+
+  auto point_json = [](const PlugIn_Waypoint& point) {
+    wxJSONValue value;
+    value["id"] = point.m_GUID;
+    value["name"] = point.m_MarkName;
+    value["latitude"] = point.m_lat;
+    value["longitude"] = point.m_lon;
+    value["description"] = point.m_MarkDescription;
+    if (point.m_CreateTime.IsValid())
+      value["unix_time"] =
+          static_cast<wxLongLong_t>(point.m_CreateTime.GetTicks());
+    else
+      value["unix_time"] = wxJSONValue(wxJSONTYPE_NULL);
+    return value;
+  };
+  auto append_points = [&point_json](Plugin_WaypointList* points,
+                                     wxJSONValue* destination) {
+    if (!points || !destination) return;
+    for (auto node = points->GetFirst();
+         node && destination->Size() < 20'000; node = node->GetNext()) {
+      const PlugIn_Waypoint* point = node->GetData();
+      if (point && std::isfinite(point->m_lat) &&
+          std::isfinite(point->m_lon) && std::abs(point->m_lat) <= 90.0 &&
+          std::abs(point->m_lon) <= 180.0) {
+        destination->Append(point_json(*point));
+      }
+    }
+  };
+  auto waypoint_object = [&point_json](const PlugIn_Waypoint& point) {
+    wxJSONValue value;
+    value["id"] = point.m_GUID;
+    value["kind"] = "waypoint";
+    value["name"] = point.m_MarkName;
+    value["description"] = point.m_MarkDescription;
+    value["points"].Append(point_json(point));
+    return value;
+  };
+  auto route_object = [&append_points](const PlugIn_Route& route) {
+    wxJSONValue value;
+    value["id"] = route.m_GUID;
+    value["kind"] = "route";
+    value["name"] = route.m_NameString;
+    value["description"] = "";
+    append_points(route.pWaypointList, &value["points"]);
+    return value;
+  };
+  auto track_object = [&append_points](const PlugIn_Track& track) {
+    wxJSONValue value;
+    value["id"] = track.m_GUID;
+    value["kind"] = "track";
+    value["name"] = track.m_NameString;
+    value["description"] = "";
+    append_points(track.pWaypointList, &value["points"]);
+    return value;
+  };
+
+  if (operation == "navigation.list" || operation == "navigation.get") {
+    const wxString kind = request["kind"].AsString();
+    const wxString requested_id = request["id"].AsString();
+    if (operation == "navigation.get" && requested_id.empty())
+      return error("invalid-id", "A navigation object identifier is required.");
+    const std::size_t limit =
+        operation == "navigation.get"
+            ? 1
+            : std::clamp<std::size_t>(
+                  static_cast<std::size_t>(request["limit"].AsLong()), 1,
+                  10'000);
+    wxJSONValue result(operation == "navigation.list" ? wxJSONTYPE_ARRAY
+                                                       : wxJSONTYPE_NULL);
+    auto accept = [&](const wxString& id, wxJSONValue value) {
+      if (operation == "navigation.get") {
+        if (id == requested_id) result = std::move(value);
+      } else if (static_cast<std::size_t>(result.Size()) < limit) {
+        result.Append(std::move(value));
+      }
+    };
+    if (kind == "waypoint") {
+      const wxArrayString ids = GetWaypointGUIDArray();
+      for (const auto& id : ids) {
+        if (operation == "navigation.get" && id != requested_id) continue;
+        const auto point = GetWaypoint_Plugin(id);
+        if (point) accept(id, waypoint_object(*point));
+        if ((operation == "navigation.get" && !result.IsNull()) ||
+            (result.IsArray() &&
+             static_cast<std::size_t>(result.Size()) >= limit))
+          break;
+      }
+    } else if (kind == "route") {
+      const wxArrayString ids = GetRouteGUIDArray();
+      for (const auto& id : ids) {
+        if (operation == "navigation.get" && id != requested_id) continue;
+        const auto route = GetRoute_Plugin(id);
+        if (route) accept(id, route_object(*route));
+        if ((operation == "navigation.get" && !result.IsNull()) ||
+            (result.IsArray() &&
+             static_cast<std::size_t>(result.Size()) >= limit))
+          break;
+      }
+    } else if (kind == "track") {
+      const wxArrayString ids = GetTrackGUIDArray();
+      for (const auto& id : ids) {
+        if (operation == "navigation.get" && id != requested_id) continue;
+        const auto track = GetTrack_Plugin(id);
+        if (track) accept(id, track_object(*track));
+        if ((operation == "navigation.get" && !result.IsNull()) ||
+            (result.IsArray() &&
+             static_cast<std::size_t>(result.Size()) >= limit))
+          break;
+      }
+    } else {
+      return error("invalid-kind", "Unknown navigation object kind.");
+    }
+    encode(result);
+    return 0;
+  }
+
+  if (operation == "navigation.mutate") {
+    const wxString mutation = request["operation"].AsString();
+    const wxString kind =
+        mutation == "delete" ? request["kind"].AsString()
+                             : request["object"]["kind"].AsString();
+    const wxString id =
+        mutation == "delete" ? request["id"].AsString()
+                             : request["object"]["id"].AsString();
+    const wxString name =
+        mutation == "delete" ? id : request["object"]["name"].AsString();
+    if ((mutation != "create" && mutation != "update" &&
+         mutation != "delete") ||
+        (kind != "waypoint" && kind != "route" && kind != "track") ||
+        (mutation != "create" && id.empty())) {
+      return error("invalid-mutation",
+                   "The navigation object mutation is invalid.");
+    }
+    const wxString prompt = wxString::Format(
+        "Portable plugin “%s” requests permission to %s the %s “%s”.\n\n"
+        "Apply this change to OpenCPN?",
+        wxString::FromUTF8(package_id), wxString::FromUTF8(mutation),
+        kind, name);
+    if (wxMessageBox(prompt, "Confirm navigation change",
+                     wxYES_NO | wxNO_DEFAULT | wxICON_WARNING,
+                     GetOCPNCanvasWindow()) != wxYES) {
+      return error("user-declined",
+                   "The user declined the navigation object change.");
+    }
+
+    bool changed = false;
+    wxString result_id = id;
+    if (mutation == "delete") {
+      wxString mutable_id = id;
+      if (kind == "waypoint")
+        changed = DeleteSingleWaypoint(mutable_id);
+      else if (kind == "route")
+        changed = DeletePlugInRoute(mutable_id);
+      else
+        changed = DeletePlugInTrack(mutable_id);
+    } else {
+      wxJSONValue object = request["object"];
+      wxJSONValue points = object["points"];
+      if (!points.IsArray() || points.Size() == 0 ||
+          points.Size() > 20'000) {
+        return error("invalid-points",
+                     "The navigation object has an invalid point list.");
+      }
+      auto make_point = [](wxJSONValue value) {
+        const double latitude = value["latitude"].AsDouble();
+        const double longitude = value["longitude"].AsDouble();
+        if (!std::isfinite(latitude) || !std::isfinite(longitude) ||
+            std::abs(latitude) > 90.0 || std::abs(longitude) > 180.0) {
+          return std::unique_ptr<PlugIn_Waypoint>{};
+        }
+        auto point = std::make_unique<PlugIn_Waypoint>(
+            latitude, longitude, "circle", value["name"].AsString(),
+            value["id"].AsString());
+        point->m_MarkDescription = value["description"].AsString();
+        if (value["unix_time"].IsInt() || value["unix_time"].IsUInt() ||
+            value["unix_time"].IsLong()) {
+          point->m_CreateTime.Set(
+              static_cast<time_t>(value["unix_time"].AsLong()));
+        }
+        return point;
+      };
+      if (kind == "waypoint") {
+        if (points.Size() != 1)
+          return error("invalid-points",
+                       "A waypoint must contain exactly one point.");
+        auto point = make_point(points[0]);
+        if (!point) return error("invalid-points", "Waypoint position is invalid.");
+        point->m_GUID = id;
+        changed = mutation == "create" ? AddSingleWaypoint(point.get(), true)
+                                        : UpdateSingleWaypoint(point.get());
+        result_id = point->m_GUID;
+      } else if (kind == "route") {
+        if (points.Size() < 2)
+          return error("invalid-points",
+                       "A route must contain at least two points.");
+        PlugIn_Route route;
+        route.m_GUID = id;
+        route.m_NameString = object["name"].AsString();
+        for (int index = 0; index < points.Size(); ++index) {
+          auto point = make_point(points[index]);
+          if (!point)
+            return error("invalid-points", "Route position is invalid.");
+          route.pWaypointList->Append(point.release());
+        }
+        route.m_StartString = route.pWaypointList->GetFirst()
+                                  ->GetData()
+                                  ->m_MarkName;
+        route.m_EndString =
+            route.pWaypointList->GetLast()->GetData()->m_MarkName;
+        changed = mutation == "create" ? AddPlugInRoute(&route, true)
+                                        : UpdatePlugInRoute(&route);
+        result_id = route.m_GUID;
+      } else {
+        PlugIn_Track track;
+        track.m_GUID = id;
+        track.m_NameString = object["name"].AsString();
+        for (int index = 0; index < points.Size(); ++index) {
+          auto point = make_point(points[index]);
+          if (!point)
+            return error("invalid-points", "Track position is invalid.");
+          track.pWaypointList->Append(point.release());
+        }
+        changed = mutation == "create" ? AddPlugInTrack(&track, true)
+                                        : UpdatePlugInTrack(&track);
+        result_id = track.m_GUID;
+      }
+    }
+    if (!changed)
+      return error("opencpn-rejected",
+                   "OpenCPN rejected the navigation object change.");
+    wxJSONValue response;
+    response["id"] = result_id;
+    response["diagnostic"] = "OpenCPN accepted the user-confirmed change.";
+    encode(response);
+    return 0;
+  }
+
+  if (operation == "navigation.send-nmea0183") {
+    wxString sentence = request["sentence"].AsString();
+    sentence.Replace("\r", "");
+    sentence.Replace("\n", "");
+    if (sentence.length() < 2 || sentence.length() > 1021 ||
+        (sentence[0] != '$' && sentence[0] != '!'))
+      return error("invalid-sentence", "The NMEA 0183 sentence is invalid.");
+    const int marker = sentence.Find('*');
+    unsigned char checksum = 0;
+    const int checksum_end =
+        marker == wxNOT_FOUND ? static_cast<int>(sentence.length()) : marker;
+    for (int index = 1; index < checksum_end; ++index)
+      checksum ^= static_cast<unsigned char>(sentence[index].GetValue());
+    const wxString expected = wxString::Format("%02X", checksum);
+    if (marker == wxNOT_FOUND) {
+      sentence += "*" + expected;
+    } else if (marker + 2 >= static_cast<int>(sentence.length()) ||
+               sentence.Mid(marker + 1, 2).Upper() != expected) {
+      return error("invalid-checksum",
+                   "The NMEA 0183 checksum is invalid.");
+    }
+    const auto now = std::chrono::steady_clock::now();
+    auto& history = nmea_output_history_[package_id];
+    while (!history.empty() &&
+           now - history.front() > std::chrono::seconds(10))
+      history.pop_front();
+    if (history.size() >= 50)
+      return error("rate-limited",
+                   "The package exceeded the NMEA output rate limit.");
+    history.push_back(now);
+    sentence += "\r\n";
+    PushNMEABuffer(sentence);
+    encode(wxJSONValue(wxJSONTYPE_OBJECT));
+    return 0;
+  }
+
+  return error("unsupported-operation",
+               "This OpenCPN author operation is unavailable.");
+}
+
 void PortablePluginManagerPi::SetNMEASentence(wxString& sentence) {
   if (!runtime_engine_) return;
   const wxScopedCharBuffer value = sentence.utf8_str();
@@ -1264,19 +1863,196 @@ void PortablePluginManagerPi::SetNMEASentence(wxString& sentence) {
         std::string(value.data(), value.length()));
 }
 
+void PortablePluginManagerPi::SetAISSentence(wxString& sentence) {
+  if (!runtime_engine_) return;
+  const wxScopedCharBuffer value = sentence.utf8_str();
+  if (value)
+    runtime_engine_->DeliverAisSentence(
+        std::string(value.data(), value.length()));
+}
+
+void PortablePluginManagerPi::HandleNmea2000(std::uint32_t pgn,
+                                             ObservedEvt event) {
+  if (!runtime_engine_) return;
+  const NMEA2000Id id(static_cast<int>(pgn));
+  runtime_engine_->DeliverNmea2000(pgn, GetN2000Source(id, event),
+                                   GetN2000Payload(id, event));
+}
+
+void PortablePluginManagerPi::SetActiveLegInfo(
+    Plugin_Active_Leg_Info& leg_info) {
+  if (!runtime_engine_) return;
+  const wxScopedCharBuffer name = leg_info.wp_name.utf8_str();
+  runtime_engine_->SetActiveLeg(
+      leg_info.Xte, leg_info.Btw, leg_info.Dtw,
+      name ? std::string(name.data(), name.length()) : std::string(),
+      leg_info.arrival);
+}
+
+void PortablePluginManagerPi::RefreshSceneHitRegions(
+    PlugIn_ViewPort* viewport, int canvas_index) {
+  scene_hit_regions_.erase(
+      std::remove_if(scene_hit_regions_.begin(), scene_hit_regions_.end(),
+                     [&](const SceneHitRegion& value) {
+                       return value.canvas_index == canvas_index;
+                     }),
+      scene_hit_regions_.end());
+  if (!runtime_engine_ || !viewport) return;
+  constexpr int kHitSlop = 6;
+  for (const auto& scene : runtime_engine_->Scenes()) {
+    for (const auto& layer : scene.layers) {
+      if (!layer.visible) continue;
+      for (const auto& primitive : layer.primitives) {
+        if (!primitive.interactive) continue;
+        SceneHitRegion region;
+        region.package_id = scene.package_id;
+        region.scene_id = scene.scene_id;
+        region.primitive_id = primitive.primitive_id;
+        region.canvas_index = canvas_index;
+        region.z_index = layer.z_index;
+        int left = std::numeric_limits<int>::max();
+        int top = std::numeric_limits<int>::max();
+        int right = std::numeric_limits<int>::min();
+        int bottom = std::numeric_limits<int>::min();
+        const auto include = [&](const wxPoint& point) {
+          left = std::min(left, point.x);
+          top = std::min(top, point.y);
+          right = std::max(right, point.x);
+          bottom = std::max(bottom, point.y);
+        };
+        if (primitive.kind == OverlayPrimitiveKind::kPolyline ||
+            primitive.kind == OverlayPrimitiveKind::kPolygon) {
+          for (const auto& value : primitive.points) {
+            wxPoint point;
+            GetCanvasPixLL(viewport, &point, value.latitude, value.longitude);
+            include(point);
+          }
+        } else {
+          wxPoint centre;
+          GetCanvasPixLL(viewport, &centre, primitive.centre.latitude,
+                         primitive.centre.longitude);
+          include(centre);
+          int horizontal = kHitSlop;
+          int vertical = kHitSlop;
+          if (primitive.kind == OverlayPrimitiveKind::kCircle) {
+            wxPoint edge;
+            GetCanvasPixLL(
+                viewport, &edge,
+                std::min(90.0, primitive.centre.latitude +
+                                    primitive.radius_metres / 111'320.0),
+                primitive.centre.longitude);
+            horizontal = vertical =
+                std::max(kHitSlop, static_cast<int>(std::lround(std::hypot(
+                                        edge.x - centre.x,
+                                        edge.y - centre.y))));
+          } else if (primitive.kind == OverlayPrimitiveKind::kIcon) {
+            horizontal = static_cast<int>(
+                std::ceil(primitive.width_pixels / 2.0F));
+            vertical = static_cast<int>(
+                std::ceil(primitive.height_pixels / 2.0F));
+          } else if (primitive.kind == OverlayPrimitiveKind::kText) {
+            horizontal = static_cast<int>(std::ceil(
+                primitive.size_pixels * 0.6F * primitive.text.size()));
+            vertical =
+                static_cast<int>(std::ceil(primitive.size_pixels));
+          }
+          left -= horizontal;
+          right += horizontal;
+          top -= vertical;
+          bottom += vertical;
+        }
+        if (left > right || top > bottom) continue;
+        region.left = left - kHitSlop;
+        region.top = top - kHitSlop;
+        region.right = right + kHitSlop;
+        region.bottom = bottom + kHitSlop;
+        scene_hit_regions_.push_back(std::move(region));
+      }
+    }
+  }
+  std::stable_sort(scene_hit_regions_.begin(), scene_hit_regions_.end(),
+                   [](const SceneHitRegion& left,
+                      const SceneHitRegion& right) {
+                     return left.z_index > right.z_index;
+                   });
+}
+
+bool PortablePluginManagerPi::MouseEventHook(wxMouseEvent& event) {
+  if (!runtime_engine_) return false;
+  std::uint32_t kind = 0;
+  if (event.LeftDown() || event.MiddleDown() || event.RightDown())
+    kind = 1;
+  else if (event.LeftUp() || event.MiddleUp() || event.RightUp())
+    kind = 2;
+  else if (event.LeftDClick() || event.MiddleDClick() || event.RightDClick())
+    kind = 3;
+  else if (event.GetWheelRotation() != 0)
+    kind = 4;
+  std::uint32_t button = 0;
+  if (event.LeftDown() || event.LeftUp() || event.LeftDClick())
+    button = 1;
+  else if (event.MiddleDown() || event.MiddleUp() || event.MiddleDClick())
+    button = 2;
+  else if (event.RightDown() || event.RightUp() || event.RightDClick())
+    button = 3;
+  std::uint32_t modifiers = 0;
+  if (event.ShiftDown()) modifiers |= 1;
+  if (event.ControlDown()) modifiers |= 2;
+  if (event.AltDown()) modifiers |= 4;
+  if (event.MetaDown()) modifiers |= 8;
+  const int canvas_index = std::max(0, GetCanvasIndexUnderMouse());
+  std::string hit_package;
+  std::string hit_scene;
+  std::string hit_primitive;
+  for (const auto& region : scene_hit_regions_) {
+    if (region.canvas_index == canvas_index && event.GetX() >= region.left &&
+        event.GetX() <= region.right && event.GetY() >= region.top &&
+        event.GetY() <= region.bottom) {
+      hit_package = region.package_id;
+      hit_scene = region.scene_id;
+      hit_primitive = region.primitive_id;
+      break;
+    }
+  }
+  return runtime_engine_->DeliverPointerEvent(
+      kind, button,
+      static_cast<std::uint32_t>(canvas_index),
+      event.GetX(), event.GetY(), cursor_latitude_, cursor_longitude_,
+      cursor_position_valid_, event.GetWheelRotation(), modifiers, hit_package,
+      hit_scene, hit_primitive);
+}
+
+bool PortablePluginManagerPi::KeyboardEventHook(wxKeyEvent& event) {
+  if (!runtime_engine_) return false;
+  std::uint32_t modifiers = 0;
+  if (event.ShiftDown()) modifiers |= 1;
+  if (event.ControlDown()) modifiers |= 2;
+  if (event.AltDown()) modifiers |= 4;
+  if (event.MetaDown()) modifiers |= 8;
+  const int unicode = event.GetUnicodeKey();
+  return runtime_engine_->DeliverKeyEvent(
+      static_cast<std::uint32_t>(std::max(0, event.GetKeyCode())),
+      unicode == WXK_NONE ? 0U : static_cast<std::uint32_t>(unicode),
+      unicode != WXK_NONE, event.GetEventType() != wxEVT_KEY_UP, false,
+      modifiers);
+}
+
 void PortablePluginManagerPi::SetPluginMessage(wxString& message_id,
                                                wxString& message_body) {
   if (!runtime_engine_) return;
   const wxScopedCharBuffer id = message_id.utf8_str();
   const wxScopedCharBuffer body = message_body.utf8_str();
   if (!id || !body) return;
+  if (message_id == "OCPN_CORE_SIGNALK")
+    runtime_engine_->DeliverSignalK(
+        std::string(body.data(), body.length()));
   runtime_engine_->DeliverPluginMessage(
       std::string(id.data(), id.length()),
       std::string(body.data(), body.length()));
 }
 
 bool PortablePluginManagerPi::RenderOverlayMultiCanvas(
-    wxDC& dc, PlugIn_ViewPort* viewport, int, int priority) {
+    wxDC& dc, PlugIn_ViewPort* viewport, int canvas_index, int priority) {
   if (!runtime_engine_ || !viewport || priority != 0) return false;
   view_bounds_valid_ =
       viewport->bValid && std::isfinite(viewport->lon_min) &&
@@ -1288,6 +2064,9 @@ bool PortablePluginManagerPi::RenderOverlayMultiCanvas(
     view_south_ = viewport->lat_min;
     view_east_ = viewport->lon_max;
     view_north_ = viewport->lat_max;
+    runtime_engine_->SetViewport(
+        view_west_, view_south_, view_east_, view_north_,
+        viewport->view_scale_ppm, viewport->rotation, canvas_index);
   }
   bool rendered =
       weather_routing_host_ &&
@@ -1295,22 +2074,9 @@ bool PortablePluginManagerPi::RenderOverlayMultiCanvas(
   const bool environment_rendered =
       environment_workbench_ && environment_workbench_->Render(dc, viewport);
   rendered = environment_rendered || rendered;
-  for (const auto& scene : runtime_engine_->Scenes()) {
-    if (scene.points.size() < 2) continue;
-    dc.SetPen(wxPen(wxColour(scene.red, scene.green, scene.blue, scene.alpha),
-                    std::max(1, static_cast<int>(scene.width_pixels))));
-    wxPoint previous;
-    GetCanvasPixLL(viewport, &previous, scene.points.front().latitude,
-                   scene.points.front().longitude);
-    for (std::size_t index = 1; index < scene.points.size(); ++index) {
-      wxPoint next;
-      GetCanvasPixLL(viewport, &next, scene.points[index].latitude,
-                     scene.points[index].longitude);
-      dc.DrawLine(previous, next);
-      previous = next;
-    }
-    rendered = true;
-  }
+  const auto scenes = runtime_engine_->Scenes();
+  rendered = RenderPortableScenes(scenes, dc, viewport) || rendered;
+  RefreshSceneHitRegions(viewport, canvas_index);
   if (developer_mode_ && environment_rendered &&
       !developer_software_overlay_logged_) {
     wxString dataset_error;
@@ -1325,7 +2091,7 @@ bool PortablePluginManagerPi::RenderOverlayMultiCanvas(
 }
 
 bool PortablePluginManagerPi::RenderGLOverlayMultiCanvas(
-    wxGLContext*, PlugIn_ViewPort* viewport, int, int priority) {
+    wxGLContext*, PlugIn_ViewPort* viewport, int canvas_index, int priority) {
   if (!runtime_engine_ || !viewport || priority != 0) return false;
   view_bounds_valid_ =
       viewport->bValid && std::isfinite(viewport->lon_min) &&
@@ -1337,6 +2103,9 @@ bool PortablePluginManagerPi::RenderGLOverlayMultiCanvas(
     view_south_ = viewport->lat_min;
     view_east_ = viewport->lon_max;
     view_north_ = viewport->lat_max;
+    runtime_engine_->SetViewport(
+        view_west_, view_south_, view_east_, view_north_,
+        viewport->view_scale_ppm, viewport->rotation, canvas_index);
   }
   bool rendered =
       weather_routing_host_ && weather_routing_host_->RenderGL(viewport);
@@ -1344,24 +2113,9 @@ bool PortablePluginManagerPi::RenderGLOverlayMultiCanvas(
       environment_workbench_ &&
       RenderEnvironmentWithDesktopGl(environment_workbench_.get(), viewport);
   rendered = environment_rendered || rendered;
-  for (const auto& scene : runtime_engine_->Scenes()) {
-    if (scene.points.size() < 2) continue;
-    glPushAttrib(GL_COLOR_BUFFER_BIT | GL_ENABLE_BIT | GL_LINE_BIT);
-    glDisable(GL_TEXTURE_2D);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glColor4ub(scene.red, scene.green, scene.blue, scene.alpha);
-    glLineWidth(scene.width_pixels);
-    glBegin(GL_LINE_STRIP);
-    for (const auto& point : scene.points) {
-      wxPoint pixel;
-      GetCanvasPixLL(viewport, &pixel, point.latitude, point.longitude);
-      glVertex2i(pixel.x, pixel.y);
-    }
-    glEnd();
-    glPopAttrib();
-    rendered = true;
-  }
+  const auto scenes = runtime_engine_->Scenes();
+  rendered = RenderPortableScenesWithDesktopGl(scenes, viewport) || rendered;
+  RefreshSceneHitRegions(viewport, canvas_index);
   if (developer_mode_ && environment_rendered &&
       !developer_opengl_overlay_logged_) {
     wxString dataset_error;

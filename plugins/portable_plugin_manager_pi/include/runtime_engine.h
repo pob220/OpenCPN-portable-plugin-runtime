@@ -21,6 +21,8 @@ struct RuntimeAction {
   std::string label;
   std::string tooltip;
   std::string icon_path;
+  bool toolbar = true;
+  bool context_menu = false;
 };
 
 struct PackageSnapshot {
@@ -45,9 +47,59 @@ struct OverlayPoint {
   double longitude = 0.0;
 };
 
+struct OverlayColor {
+  unsigned char red = 255;
+  unsigned char green = 255;
+  unsigned char blue = 255;
+  unsigned char alpha = 255;
+};
+
+struct OverlayStyle {
+  bool has_stroke = true;
+  OverlayColor stroke;
+  bool has_fill = false;
+  OverlayColor fill;
+  float width_pixels = 1.0F;
+};
+
+enum class OverlayPrimitiveKind {
+  kPolyline,
+  kPolygon,
+  kCircle,
+  kIcon,
+  kText,
+};
+
+struct OverlayPrimitive {
+  std::string primitive_id;
+  OverlayPrimitiveKind kind = OverlayPrimitiveKind::kPolyline;
+  std::vector<OverlayPoint> points;
+  OverlayPoint centre;
+  double radius_metres = 0.0;
+  OverlayStyle style;
+  std::string resource_path;
+  std::string text;
+  float width_pixels = 0.0F;
+  float height_pixels = 0.0F;
+  float size_pixels = 0.0F;
+  OverlayColor text_color;
+  bool interactive = false;
+};
+
+struct OverlayLayer {
+  std::string layer_id;
+  int z_index = 0;
+  bool visible = true;
+  std::vector<OverlayPrimitive> primitives;
+};
+
 struct OverlayScene {
   std::string package_id;
   std::string scene_id;
+  std::uint64_t revision = 0;
+  std::vector<OverlayLayer> layers;
+
+  // API 0.1/0.2 compatibility representation.
   std::vector<OverlayPoint> points;
   unsigned char red = 255;
   unsigned char green = 255;
@@ -76,6 +128,9 @@ public:
                          const std::string&)>;
   using PluginMessageSender =
       std::function<void(const std::string&, const std::string&)>;
+  using AuthorUiRequest = std::function<int(
+      const std::string&, const std::string&, const std::string&,
+      std::string*)>;
 
   RuntimeEngine(std::string storage_root, RegisterAction register_action,
                 RemoveActions remove_actions, StateChanged state_changed,
@@ -91,6 +146,7 @@ public:
   void SetRoutingProgressCallback(RoutingProgress callback);
   void SetRoutingCompletedCallback(RoutingCompleted callback);
   void SetPluginMessageSender(PluginMessageSender callback);
+  void SetAuthorUiRequestCallback(AuthorUiRequest callback);
   bool RefreshPackage(const std::string& package_id, bool developer_mode,
                       std::string* diagnostic);
   bool Enable(const std::string& package_id, std::string* diagnostic);
@@ -134,7 +190,29 @@ public:
   bool WaitForIdle(const std::string& package_id,
                    std::chrono::milliseconds timeout);
   void SetPositionFix(const PlugIn_Position_Fix_Ex& fix);
+  void SetCursorPosition(double latitude, double longitude);
+  void SetViewport(double west, double south, double east, double north,
+                   double scale_ppm, double rotation, int canvas_index);
+  void SetActiveLeg(double cross_track_error_nm, double bearing_degrees,
+                    double distance_nm, const std::string& waypoint_name,
+                    bool arrival);
   void DeliverNavigationSentence(const std::string& sentence);
+  void DeliverNmea2000(std::uint32_t pgn, const std::string& source,
+                       const std::vector<std::uint8_t>& payload);
+  void DeliverAisSentence(const std::string& sentence);
+  void DeliverSignalK(const std::string& payload);
+  bool DeliverPointerEvent(std::uint32_t kind, std::uint32_t button,
+                           std::uint32_t canvas_index, std::int32_t x_pixels,
+                           std::int32_t y_pixels, double latitude,
+                           double longitude, bool has_position,
+                           std::int32_t wheel_rotation,
+                           std::uint32_t modifiers,
+                           const std::string& hit_package_id,
+                           const std::string& hit_scene_id,
+                           const std::string& hit_primitive_id);
+  bool DeliverKeyEvent(std::uint32_t key_code, std::uint32_t unicode,
+                       bool has_unicode, bool pressed, bool repeat,
+                       std::uint32_t modifiers);
   void DeliverPluginMessage(const std::string& message_id,
                             const std::string& message_body);
   std::vector<PackageSnapshot> Packages() const;

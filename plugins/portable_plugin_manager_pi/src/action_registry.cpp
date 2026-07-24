@@ -11,20 +11,24 @@ bool ActionKey::operator==(const ActionKey& other) const {
   return package_id == other.package_id && action_id == other.action_id;
 }
 
-bool ActionRegistry::Add(const ActionKey& key, int tool_id) {
-  if (tool_id < 0 || by_key_.count(key) != 0 ||
-      by_tool_id_.count(tool_id) != 0) {
+bool ActionRegistry::Add(const ActionKey& key, int tool_id, int context_id) {
+  if ((tool_id < 0 && context_id < 0) || by_key_.count(key) != 0 ||
+      (tool_id >= 0 && by_tool_id_.count(tool_id) != 0) ||
+      (context_id >= 0 && by_context_id_.count(context_id) != 0)) {
     return false;
   }
-  by_key_.emplace(key, Action{key, tool_id, false, true});
-  by_tool_id_.emplace(tool_id, key);
+  by_key_.emplace(key, Action{key, tool_id, context_id, false, true});
+  if (tool_id >= 0) by_tool_id_.emplace(tool_id, key);
+  if (context_id >= 0) by_context_id_.emplace(context_id, key);
   return true;
 }
 
 bool ActionRegistry::Remove(const ActionKey& key) {
   const auto item = by_key_.find(key);
   if (item == by_key_.end()) return false;
-  by_tool_id_.erase(item->second.tool_id);
+  if (item->second.tool_id >= 0) by_tool_id_.erase(item->second.tool_id);
+  if (item->second.context_id >= 0)
+    by_context_id_.erase(item->second.context_id);
   by_key_.erase(item);
   return true;
 }
@@ -38,7 +42,9 @@ std::vector<Action> ActionRegistry::RemovePackage(
       continue;
     }
     removed.push_back(item->second);
-    by_tool_id_.erase(item->second.tool_id);
+    if (item->second.tool_id >= 0) by_tool_id_.erase(item->second.tool_id);
+    if (item->second.context_id >= 0)
+      by_context_id_.erase(item->second.context_id);
     item = by_key_.erase(item);
   }
   return removed;
@@ -47,6 +53,14 @@ std::vector<Action> ActionRegistry::RemovePackage(
 std::optional<Action> ActionRegistry::FindByToolId(int tool_id) const {
   const auto id_item = by_tool_id_.find(tool_id);
   if (id_item == by_tool_id_.end()) return std::nullopt;
+  const auto key_item = by_key_.find(id_item->second);
+  if (key_item == by_key_.end()) return std::nullopt;
+  return key_item->second;
+}
+
+std::optional<Action> ActionRegistry::FindByContextId(int context_id) const {
+  const auto id_item = by_context_id_.find(context_id);
+  if (id_item == by_context_id_.end()) return std::nullopt;
   const auto key_item = by_key_.find(id_item->second);
   if (key_item == by_key_.end()) return std::nullopt;
   return key_item->second;
@@ -68,6 +82,7 @@ std::vector<Action> ActionRegistry::Clear() {
   for (const auto& item : by_key_) actions.push_back(item.second);
   by_key_.clear();
   by_tool_id_.clear();
+  by_context_id_.clear();
   return actions;
 }
 

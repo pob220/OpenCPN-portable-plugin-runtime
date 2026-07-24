@@ -70,7 +70,8 @@ const char* CapabilityEventPermission(CapabilityEventKind kind) {
 }
 
 bool CapabilityEventBroker::Subscribe(
-    const CapabilityEventSubscription& subscription, std::string* diagnostic) {
+    const CapabilityEventSubscription& subscription, std::string* diagnostic,
+    std::uint64_t* subscription_id) {
   if (!SafePackageId(subscription.package_id)) {
     if (diagnostic) *diagnostic = "event subscription package id is invalid";
     return false;
@@ -96,7 +97,26 @@ bool CapabilityEventBroker::Subscribe(
     if (diagnostic) *diagnostic = "event subscription is duplicated";
     return false;
   }
-  subscriptions.push_back(subscription);
+  CapabilityEventSubscription stored = subscription;
+  stored.id = next_subscription_id_++;
+  subscriptions.push_back(stored);
+  if (subscription_id) *subscription_id = stored.id;
+  return true;
+}
+
+bool CapabilityEventBroker::Unsubscribe(const std::string& package_id,
+                                        std::uint64_t subscription_id) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto package = packages_.find(package_id);
+  if (package == packages_.end()) return false;
+  auto& subscriptions = package->second.subscriptions;
+  const auto item =
+      std::find_if(subscriptions.begin(), subscriptions.end(),
+                   [subscription_id](const auto& subscription) {
+                     return subscription.id == subscription_id;
+                   });
+  if (item == subscriptions.end()) return false;
+  subscriptions.erase(item);
   return true;
 }
 

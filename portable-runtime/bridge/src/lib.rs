@@ -10,6 +10,8 @@ use std::sync::{
 use std::thread;
 use std::time::Duration;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use serde_json::{Value, json};
 use wasmtime::component::ResourceTable;
 use wasmtime::component::{Component, HasSelf, Linker};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap};
@@ -90,9 +92,55 @@ mod api_v02_routing {
     });
 }
 
-const HOST_ABI_VERSION: u32 = 14;
+mod api_v03_imports {
+    wasmtime::component::bindgen!({
+        path: "../contracts/0.3",
+        interfaces: "
+            import opencpn:portable/types@0.3.0;
+            import opencpn:portable/diagnostics@0.3.0;
+            import opencpn:portable/settings@0.3.0;
+            import opencpn:portable/actions@0.3.0;
+            import opencpn:portable/surfaces@0.3.0;
+            import opencpn:portable/navigation@0.3.0;
+            import opencpn:portable/scenes@0.3.0;
+            import opencpn:portable/private-storage@0.3.0;
+            import opencpn:portable/user-files@0.3.0;
+            import opencpn:portable/timers@0.3.0;
+            import opencpn:portable/navigation-output@0.3.0;
+            import opencpn:portable/plugin-messages@0.3.0;
+            import opencpn:portable/plugin-rpc@0.3.0;
+            import opencpn:portable/event-subscriptions@0.3.0;
+        ",
+    });
+}
+
+mod api_v03 {
+    wasmtime::component::bindgen!({
+        path: "../contracts/0.3",
+        world: "plugin-world",
+        with: {
+            "opencpn:portable/types@0.3.0": crate::api_v03_imports::opencpn::portable::types,
+            "opencpn:portable/diagnostics@0.3.0": crate::api_v03_imports::opencpn::portable::diagnostics,
+            "opencpn:portable/settings@0.3.0": crate::api_v03_imports::opencpn::portable::settings,
+            "opencpn:portable/actions@0.3.0": crate::api_v03_imports::opencpn::portable::actions,
+            "opencpn:portable/surfaces@0.3.0": crate::api_v03_imports::opencpn::portable::surfaces,
+            "opencpn:portable/navigation@0.3.0": crate::api_v03_imports::opencpn::portable::navigation,
+            "opencpn:portable/scenes@0.3.0": crate::api_v03_imports::opencpn::portable::scenes,
+            "opencpn:portable/private-storage@0.3.0": crate::api_v03_imports::opencpn::portable::private_storage,
+            "opencpn:portable/user-files@0.3.0": crate::api_v03_imports::opencpn::portable::user_files,
+            "opencpn:portable/timers@0.3.0": crate::api_v03_imports::opencpn::portable::timers,
+            "opencpn:portable/navigation-output@0.3.0": crate::api_v03_imports::opencpn::portable::navigation_output,
+            "opencpn:portable/plugin-messages@0.3.0": crate::api_v03_imports::opencpn::portable::plugin_messages,
+            "opencpn:portable/plugin-rpc@0.3.0": crate::api_v03_imports::opencpn::portable::plugin_rpc,
+            "opencpn:portable/event-subscriptions@0.3.0": crate::api_v03_imports::opencpn::portable::event_subscriptions,
+        },
+    });
+}
+
+const HOST_ABI_VERSION: u32 = 15;
 const PORTABLE_API_V01: u32 = 1;
 const PORTABLE_API_V02: u32 = 2;
+const PORTABLE_API_V03: u32 = 3;
 const PORTABLE_WORLD_PLUGIN: u32 = 0;
 const PORTABLE_WORLD_WEATHER_ROUTING: u32 = 1;
 const ROUTE_POINT_LIMIT: usize = 20_000;
@@ -111,6 +159,8 @@ const USER_FILE_LIMIT: usize = 8 * 1024 * 1024;
 const NAVIGATION_SENTENCE_LIMIT: usize = 1024;
 const PLUGIN_MESSAGE_ID_LIMIT: usize = 256;
 const PLUGIN_MESSAGE_BODY_LIMIT: usize = 64 * 1024;
+const AUTHOR_REQUEST_LIMIT: usize = 16 * 1024 * 1024;
+const AUTHOR_RESPONSE_LIMIT: usize = 16 * 1024 * 1024;
 const EPOCH_TICK: Duration = Duration::from_millis(100);
 const CALL_EPOCH_DEADLINE: u64 = 50;
 const ROUTING_BASE_FUEL: u64 = 2_000_000_000;
@@ -439,6 +489,18 @@ pub struct HostCallbacks {
             usize,
         ) -> i32,
     >,
+    author_service_call: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            *const c_char,
+            usize,
+            *const c_char,
+            usize,
+            *mut c_char,
+            usize,
+            *mut usize,
+        ) -> i32,
+    >,
 }
 
 unsafe impl Send for HostCallbacks {}
@@ -478,12 +540,14 @@ enum ApiKind {
     V01,
     V02,
     V02WeatherRouting,
+    V03,
 }
 
 enum RuntimeBindings {
     V01(PluginWorld),
     V02(api_v02::PluginWorld),
     V02WeatherRouting(api_v02_routing::WeatherRoutingPluginWorld),
+    V03(api_v03::PluginWorld),
 }
 
 pub struct Runtime {
@@ -521,6 +585,9 @@ fn instantiate_runtime(
                 |state| state,
             )?;
         }
+        ApiKind::V03 => {
+            api_v03::PluginWorld::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)?;
+        }
     }
 
     let limits = StoreLimitsBuilder::new()
@@ -554,6 +621,9 @@ fn instantiate_runtime(
                 &mut store, &component, &linker,
             )?,
         ),
+        ApiKind::V03 => RuntimeBindings::V03(api_v03::PluginWorld::instantiate(
+            &mut store, &component, &linker,
+        )?),
     };
     Ok(Runtime {
         engine,
@@ -568,6 +638,12 @@ fn instantiate_runtime(
 
 fn v02_guest_error(
     error: api_v02_imports::opencpn::portable::types::ServiceError,
+) -> anyhow::Error {
+    anyhow::anyhow!("{}: {}", error.code, error.message)
+}
+
+fn v03_guest_error(
+    error: api_v03_imports::opencpn::portable::types::ServiceError,
 ) -> anyhow::Error {
     anyhow::anyhow!("{}: {}", error.code, error.message)
 }
@@ -1520,6 +1596,689 @@ impl api_v02_imports::opencpn::portable::plugin_messages::Host for HostState {
     }
 }
 
+use api_v03_imports::opencpn::portable::types as v03_types;
+
+fn v03_error(code: &str, message: impl Into<String>, retryable: bool) -> v03_types::ServiceError {
+    v03_types::ServiceError {
+        code: code.to_string(),
+        message: message.into(),
+        retryable,
+    }
+}
+
+fn json_text(value: &Value, key: &str) -> Result<String, v03_types::ServiceError> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            v03_error(
+                "invalid-host-response",
+                format!("missing string field {key}"),
+                false,
+            )
+        })
+}
+
+fn json_u64(value: &Value, key: &str) -> Result<u64, v03_types::ServiceError> {
+    value.get(key).and_then(Value::as_u64).ok_or_else(|| {
+        v03_error(
+            "invalid-host-response",
+            format!("missing integer field {key}"),
+            false,
+        )
+    })
+}
+
+impl HostState {
+    fn author_call(
+        &mut self,
+        operation: &str,
+        request: Value,
+    ) -> Result<Value, v03_types::ServiceError> {
+        let callback = self.callbacks.author_service_call.ok_or_else(|| {
+            v03_error(
+                "service-unavailable",
+                "API 0.3 author service transport is unavailable",
+                false,
+            )
+        })?;
+        let request = serde_json::to_vec(&request)
+            .map_err(|error| v03_error("invalid-request", error.to_string(), false))?;
+        if request.len() > AUTHOR_REQUEST_LIMIT {
+            return Err(v03_error(
+                "request-too-large",
+                "author service request exceeds policy",
+                false,
+            ));
+        }
+        let capacity = match operation {
+            "storage.read" => 12 * 1024 * 1024,
+            "navigation.list" => AUTHOR_RESPONSE_LIMIT,
+            _ => 256 * 1024,
+        };
+        let mut response = vec![0u8; capacity];
+        let mut actual = 0usize;
+        let code = unsafe {
+            callback(
+                self.callbacks.user_data,
+                operation.as_ptr().cast(),
+                operation.len(),
+                request.as_ptr().cast(),
+                request.len(),
+                response.as_mut_ptr().cast(),
+                response.len(),
+                &mut actual,
+            )
+        };
+        if actual > response.len() {
+            return Err(v03_error(
+                "invalid-host-response",
+                "author service returned an oversized response",
+                false,
+            ));
+        }
+        response.truncate(actual);
+        let value = if response.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice::<Value>(&response).map_err(|error| {
+                v03_error(
+                    "invalid-host-response",
+                    format!("author service returned invalid JSON: {error}"),
+                    false,
+                )
+            })?
+        };
+        if code != 0 {
+            let error = value.get("error").unwrap_or(&value);
+            return Err(v03_error(
+                error
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("host-service-failed"),
+                error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("API 0.3 host service failed"),
+                error
+                    .get("retryable")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            ));
+        }
+        Ok(value)
+    }
+}
+
+fn color_json(color: &v03_types::Color) -> Value {
+    json!({
+        "red": color.red,
+        "green": color.green,
+        "blue": color.blue,
+        "alpha": color.alpha,
+    })
+}
+
+fn geo_json(point: &v03_types::GeoPoint) -> Value {
+    json!({"latitude": point.latitude, "longitude": point.longitude})
+}
+
+fn navigation_kind_name(kind: v03_types::NavigationObjectKind) -> &'static str {
+    match kind {
+        v03_types::NavigationObjectKind::Waypoint => "waypoint",
+        v03_types::NavigationObjectKind::Route => "route",
+        v03_types::NavigationObjectKind::Track => "track",
+    }
+}
+
+fn navigation_object_json(value: &v03_types::NavigationObject) -> Value {
+    json!({
+        "id": value.id,
+        "kind": navigation_kind_name(value.kind),
+        "name": value.name,
+        "description": value.description,
+        "points": value.points.iter().map(|point| json!({
+            "id": point.id,
+            "name": point.name,
+            "latitude": point.latitude,
+            "longitude": point.longitude,
+            "unix_time": point.unix_time,
+            "description": point.description,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn parse_navigation_object(
+    value: &Value,
+) -> Result<v03_types::NavigationObject, v03_types::ServiceError> {
+    let kind = match value.get("kind").and_then(Value::as_str) {
+        Some("waypoint") => v03_types::NavigationObjectKind::Waypoint,
+        Some("route") => v03_types::NavigationObjectKind::Route,
+        Some("track") => v03_types::NavigationObjectKind::Track,
+        _ => {
+            return Err(v03_error(
+                "invalid-host-response",
+                "invalid navigation object kind",
+                false,
+            ));
+        }
+    };
+    let points = value
+        .get("points")
+        .and_then(Value::as_array)
+        .ok_or_else(|| v03_error("invalid-host-response", "missing navigation points", false))?
+        .iter()
+        .map(|point| {
+            Ok(v03_types::NavigationPoint {
+                id: json_text(point, "id")?,
+                name: json_text(point, "name")?,
+                latitude: point
+                    .get("latitude")
+                    .and_then(Value::as_f64)
+                    .ok_or_else(|| {
+                        v03_error(
+                            "invalid-host-response",
+                            "invalid navigation latitude",
+                            false,
+                        )
+                    })?,
+                longitude: point
+                    .get("longitude")
+                    .and_then(Value::as_f64)
+                    .ok_or_else(|| {
+                        v03_error(
+                            "invalid-host-response",
+                            "invalid navigation longitude",
+                            false,
+                        )
+                    })?,
+                unix_time: point.get("unix_time").and_then(Value::as_i64),
+                description: json_text(point, "description")?,
+            })
+        })
+        .collect::<Result<Vec<_>, v03_types::ServiceError>>()?;
+    Ok(v03_types::NavigationObject {
+        id: json_text(value, "id")?,
+        kind,
+        name: json_text(value, "name")?,
+        description: json_text(value, "description")?,
+        points,
+    })
+}
+
+fn scene_style_json(style: &v03_types::SceneStyle) -> Value {
+    json!({
+        "stroke": style.stroke.as_ref().map(color_json),
+        "fill": style.fill.as_ref().map(color_json),
+        "width_pixels": style.width_pixels,
+    })
+}
+
+fn scene_primitive_json(primitive: &v03_types::ScenePrimitive) -> Value {
+    match primitive {
+        v03_types::ScenePrimitive::Polyline(value) => json!({
+            "kind": "polyline",
+            "primitive_id": value.primitive_id,
+            "points": value.points.iter().map(geo_json).collect::<Vec<_>>(),
+            "style": scene_style_json(&value.style),
+            "interactive": value.interactive,
+        }),
+        v03_types::ScenePrimitive::Polygon(value) => json!({
+            "kind": "polygon",
+            "primitive_id": value.primitive_id,
+            "points": value.points.iter().map(geo_json).collect::<Vec<_>>(),
+            "style": scene_style_json(&value.style),
+            "interactive": value.interactive,
+        }),
+        v03_types::ScenePrimitive::Circle(value) => json!({
+            "kind": "circle",
+            "primitive_id": value.primitive_id,
+            "centre": geo_json(&value.centre),
+            "radius_metres": value.radius_metres,
+            "style": scene_style_json(&value.style),
+            "interactive": value.interactive,
+        }),
+        v03_types::ScenePrimitive::Icon(value) => json!({
+            "kind": "icon",
+            "primitive_id": value.primitive_id,
+            "position": geo_json(&value.position),
+            "resource_name": value.resource_name,
+            "width_pixels": value.width_pixels,
+            "height_pixels": value.height_pixels,
+            "interactive": value.interactive,
+        }),
+        v03_types::ScenePrimitive::Text(value) => json!({
+            "kind": "text",
+            "primitive_id": value.primitive_id,
+            "position": geo_json(&value.position),
+            "value": value.value,
+            "color": color_json(&value.color),
+            "size_pixels": value.size_pixels,
+            "interactive": value.interactive,
+        }),
+    }
+}
+
+impl api_v03_imports::opencpn::portable::types::Host for HostState {}
+
+impl api_v03_imports::opencpn::portable::diagnostics::Host for HostState {
+    fn log(&mut self, level: v03_types::LogLevel, message: String) {
+        let level = match level {
+            v03_types::LogLevel::Debug => opencpn::portable::host::LogLevel::Debug,
+            v03_types::LogLevel::Info => opencpn::portable::host::LogLevel::Info,
+            v03_types::LogLevel::Warning => opencpn::portable::host::LogLevel::Warning,
+            v03_types::LogLevel::Error => opencpn::portable::host::LogLevel::Error,
+        };
+        <Self as opencpn::portable::host::Host>::log(self, level, message);
+    }
+}
+
+impl api_v03_imports::opencpn::portable::settings::Host for HostState {
+    fn get(&mut self, key: String) -> Result<Option<String>, v03_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::setting_get(self, key)
+            .map_err(|message| v03_error("host-service-failed", message, false))
+    }
+
+    fn set(&mut self, key: String, value: String) -> Result<(), v03_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::setting_set(self, key, value)
+            .map_err(|message| v03_error("host-service-failed", message, false))
+    }
+}
+
+impl api_v03_imports::opencpn::portable::actions::Host for HostState {
+    fn register(
+        &mut self,
+        request: v03_types::ActionRegistration,
+    ) -> Result<u32, v03_types::ServiceError> {
+        let locations = request
+            .locations
+            .into_iter()
+            .map(|location| match location {
+                v03_types::ActionLocation::Toolbar => "toolbar",
+                v03_types::ActionLocation::ChartContextMenu => "chart-context-menu",
+            })
+            .collect::<Vec<_>>();
+        let value = self.author_call(
+            "actions.register",
+            json!({
+                "action_id": request.action_id,
+                "label": request.label,
+                "tooltip": request.tooltip,
+                "icon_resource": request.icon_resource,
+                "locations": locations,
+            }),
+        )?;
+        Ok(json_u64(&value, "host_action_id")? as u32)
+    }
+
+    fn set_state(
+        &mut self,
+        action_id: String,
+        state: v03_types::ActionState,
+    ) -> Result<(), v03_types::ServiceError> {
+        self.author_call(
+            "actions.set-state",
+            json!({
+                "action_id": action_id,
+                "visible": state.visible,
+                "enabled": state.enabled,
+                "checkable": state.checkable,
+                "checked": state.checked,
+            }),
+        )?;
+        Ok(())
+    }
+
+    fn unregister(&mut self, action_id: String) -> Result<(), v03_types::ServiceError> {
+        self.author_call("actions.unregister", json!({"action_id": action_id}))?;
+        Ok(())
+    }
+}
+
+impl api_v03_imports::opencpn::portable::surfaces::Host for HostState {
+    fn open(&mut self, surface_id: String) -> Result<(), v03_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::open_surface(self, surface_id)
+            .map_err(|message| v03_error("host-service-failed", message, false))
+    }
+}
+
+impl api_v03_imports::opencpn::portable::navigation::Host for HostState {
+    fn get_vessel_position(
+        &mut self,
+    ) -> Result<v03_types::VesselPosition, v03_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::get_vessel_position(self)
+            .map(|position| v03_types::VesselPosition {
+                latitude: position.latitude,
+                longitude: position.longitude,
+                course_over_ground: position.course_over_ground,
+                speed_over_ground: position.speed_over_ground,
+            })
+            .map_err(|message| v03_error("host-service-failed", message, false))
+    }
+
+    fn list_objects(
+        &mut self,
+        kind: v03_types::NavigationObjectKind,
+        limit: u32,
+    ) -> Result<Vec<v03_types::NavigationObject>, v03_types::ServiceError> {
+        let value = self.author_call(
+            "navigation.list",
+            json!({
+                "kind": navigation_kind_name(kind),
+                "limit": limit,
+            }),
+        )?;
+        value
+            .as_array()
+            .ok_or_else(|| {
+                v03_error(
+                    "invalid-host-response",
+                    "navigation list is not an array",
+                    false,
+                )
+            })?
+            .iter()
+            .map(parse_navigation_object)
+            .collect()
+    }
+
+    fn get_object(
+        &mut self,
+        kind: v03_types::NavigationObjectKind,
+        id: String,
+    ) -> Result<Option<v03_types::NavigationObject>, v03_types::ServiceError> {
+        let value = self.author_call(
+            "navigation.get",
+            json!({
+                "kind": navigation_kind_name(kind),
+                "id": id,
+            }),
+        )?;
+        if value.is_null() {
+            Ok(None)
+        } else {
+            parse_navigation_object(&value).map(Some)
+        }
+    }
+
+    fn mutate_with_confirmation(
+        &mut self,
+        mutation: v03_types::NavigationMutation,
+    ) -> Result<v03_types::NavigationMutationResult, v03_types::ServiceError> {
+        let request = match mutation {
+            v03_types::NavigationMutation::Create(value) => {
+                json!({"operation": "create", "object": navigation_object_json(&value)})
+            }
+            v03_types::NavigationMutation::Update(value) => {
+                json!({"operation": "update", "object": navigation_object_json(&value)})
+            }
+            v03_types::NavigationMutation::Delete(value) => json!({
+                "operation": "delete",
+                "kind": navigation_kind_name(value.kind),
+                "id": value.id,
+            }),
+        };
+        let value = self.author_call("navigation.mutate", request)?;
+        Ok(v03_types::NavigationMutationResult {
+            id: json_text(&value, "id")?,
+            diagnostic: json_text(&value, "diagnostic")?,
+        })
+    }
+}
+
+impl api_v03_imports::opencpn::portable::scenes::Host for HostState {
+    fn submit(&mut self, update: v03_types::SceneUpdate) -> Result<(), v03_types::ServiceError> {
+        let layers = update.layers.iter().map(|layer| json!({
+            "layer_id": layer.layer_id,
+            "z_index": layer.z_index,
+            "visible": layer.visible,
+            "primitives": layer.primitives.iter().map(scene_primitive_json).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>();
+        self.author_call(
+            "scenes.submit",
+            json!({
+                "scene_id": update.scene_id,
+                "revision": update.revision,
+                "replace": update.replace,
+                "layers": layers,
+            }),
+        )?;
+        Ok(())
+    }
+
+    fn clear(&mut self, scene_id: String) -> Result<(), v03_types::ServiceError> {
+        self.author_call("scenes.clear", json!({"scene_id": scene_id}))?;
+        Ok(())
+    }
+}
+
+impl api_v03_imports::opencpn::portable::private_storage::Host for HostState {
+    fn read(&mut self, name: String) -> Result<Vec<u8>, v03_types::ServiceError> {
+        let value = self.author_call("storage.read", json!({"name": name}))?;
+        BASE64
+            .decode(json_text(&value, "base64")?)
+            .map_err(|error| v03_error("invalid-host-response", error.to_string(), false))
+    }
+
+    fn write_atomic(
+        &mut self,
+        name: String,
+        value: Vec<u8>,
+    ) -> Result<(), v03_types::ServiceError> {
+        self.author_call(
+            "storage.write-atomic",
+            json!({
+                "name": name,
+                "base64": BASE64.encode(value),
+            }),
+        )?;
+        Ok(())
+    }
+
+    fn list_names(&mut self, prefix: String) -> Result<Vec<String>, v03_types::ServiceError> {
+        let value = self.author_call("storage.list", json!({"prefix": prefix}))?;
+        value
+            .as_array()
+            .ok_or_else(|| {
+                v03_error(
+                    "invalid-host-response",
+                    "storage list is not an array",
+                    false,
+                )
+            })?
+            .iter()
+            .map(|name| {
+                name.as_str().map(ToOwned::to_owned).ok_or_else(|| {
+                    v03_error("invalid-host-response", "storage name is not text", false)
+                })
+            })
+            .collect()
+    }
+
+    fn delete(&mut self, name: String) -> Result<bool, v03_types::ServiceError> {
+        let value = self.author_call("storage.delete", json!({"name": name}))?;
+        value
+            .get("deleted")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| v03_error("invalid-host-response", "missing deleted result", false))
+    }
+}
+
+impl api_v03_imports::opencpn::portable::user_files::Host for HostState {
+    fn read(&mut self, grant_token: String) -> Result<Vec<u8>, v03_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::user_file_read(self, grant_token)
+            .map_err(|message| v03_error("host-service-failed", message, false))
+    }
+
+    fn write(
+        &mut self,
+        grant_token: String,
+        value: Vec<u8>,
+    ) -> Result<(), v03_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::user_file_write(self, grant_token, value)
+            .map_err(|message| v03_error("host-service-failed", message, false))
+    }
+}
+
+impl api_v03_imports::opencpn::portable::timers::Host for HostState {
+    fn schedule(
+        &mut self,
+        timer_id: String,
+        delay_milliseconds: u32,
+        repeat_milliseconds: Option<u32>,
+    ) -> Result<(), v03_types::ServiceError> {
+        self.author_call(
+            "timers.schedule",
+            json!({
+                "timer_id": timer_id,
+                "delay_milliseconds": delay_milliseconds,
+                "repeat_milliseconds": repeat_milliseconds,
+            }),
+        )?;
+        Ok(())
+    }
+
+    fn cancel(&mut self, timer_id: String) -> Result<bool, v03_types::ServiceError> {
+        let value = self.author_call("timers.cancel", json!({"timer_id": timer_id}))?;
+        value
+            .get("cancelled")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| {
+                v03_error(
+                    "invalid-host-response",
+                    "missing timer cancellation result",
+                    false,
+                )
+            })
+    }
+}
+
+impl api_v03_imports::opencpn::portable::navigation_output::Host for HostState {
+    fn send_nmea0183(&mut self, sentence: String) -> Result<(), v03_types::ServiceError> {
+        self.author_call("navigation.send-nmea0183", json!({"sentence": sentence}))?;
+        Ok(())
+    }
+}
+
+impl api_v03_imports::opencpn::portable::plugin_messages::Host for HostState {
+    fn send(
+        &mut self,
+        message_id: String,
+        message_body: String,
+    ) -> Result<(), v03_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::send_plugin_message(self, message_id, message_body)
+            .map_err(|message| v03_error("host-service-failed", message, false))
+    }
+}
+
+fn rpc_request_json(request: &v03_types::RpcRequest) -> Value {
+    json!({
+        "correlation_id": request.correlation_id,
+        "service": request.service,
+        "method": request.method,
+        "content_type": request.content_type,
+        "payload_base64": BASE64.encode(&request.payload),
+        "timeout_milliseconds": request.timeout_milliseconds,
+    })
+}
+
+fn parse_rpc_response(value: &Value) -> Result<v03_types::RpcResponse, v03_types::ServiceError> {
+    Ok(v03_types::RpcResponse {
+        correlation_id: json_text(value, "correlation_id")?,
+        status: json_u64(value, "status")? as u16,
+        content_type: json_text(value, "content_type")?,
+        payload: BASE64
+            .decode(json_text(value, "payload_base64")?)
+            .map_err(|error| v03_error("invalid-host-response", error.to_string(), false))?,
+        diagnostic: json_text(value, "diagnostic")?,
+    })
+}
+
+impl api_v03_imports::opencpn::portable::plugin_rpc::Host for HostState {
+    fn register_service(&mut self, service: String) -> Result<(), v03_types::ServiceError> {
+        self.author_call("rpc.register", json!({"service": service}))?;
+        Ok(())
+    }
+
+    fn unregister_service(&mut self, service: String) -> Result<(), v03_types::ServiceError> {
+        self.author_call("rpc.unregister", json!({"service": service}))?;
+        Ok(())
+    }
+
+    fn request(
+        &mut self,
+        target_package: String,
+        request: v03_types::RpcRequest,
+    ) -> Result<(), v03_types::ServiceError> {
+        self.author_call(
+            "rpc.request",
+            json!({
+                "target_package": target_package,
+                "request": rpc_request_json(&request),
+            }),
+        )?;
+        Ok(())
+    }
+
+    fn respond(
+        &mut self,
+        target_package: String,
+        response: v03_types::RpcResponse,
+    ) -> Result<(), v03_types::ServiceError> {
+        self.author_call(
+            "rpc.respond",
+            json!({
+                "target_package": target_package,
+                "response": {
+                    "correlation_id": response.correlation_id,
+                    "status": response.status,
+                    "content_type": response.content_type,
+                    "payload_base64": BASE64.encode(response.payload),
+                    "diagnostic": response.diagnostic,
+                },
+            }),
+        )?;
+        Ok(())
+    }
+}
+
+impl api_v03_imports::opencpn::portable::event_subscriptions::Host for HostState {
+    fn subscribe(
+        &mut self,
+        request: v03_types::Subscription,
+    ) -> Result<u64, v03_types::ServiceError> {
+        let kind = match request.kind {
+            v03_types::EventKind::Nmea0183 => "navigation.nmea0183",
+            v03_types::EventKind::Nmea2000 => "navigation.nmea2000",
+            v03_types::EventKind::SignalK => "navigation.signalk",
+            v03_types::EventKind::NavigationPosition => "navigation.position",
+            v03_types::EventKind::AisTarget => "navigation.ais",
+            v03_types::EventKind::ActiveLeg => "navigation.active-leg",
+            v03_types::EventKind::Cursor => "chart.cursor",
+            v03_types::EventKind::Viewport => "chart.viewport",
+            v03_types::EventKind::PluginMessage => "opencpn.plugin-message",
+        };
+        let value = self.author_call(
+            "events.subscribe",
+            json!({
+                "kind": kind,
+                "topic_prefix": request.topic_prefix,
+                "queue_limit": request.queue_limit,
+            }),
+        )?;
+        json_u64(&value, "subscription_id")
+    }
+
+    fn unsubscribe(&mut self, subscription_id: u64) -> Result<(), v03_types::ServiceError> {
+        self.author_call(
+            "events.unsubscribe",
+            json!({"subscription_id": subscription_id}),
+        )?;
+        Ok(())
+    }
+}
+
 fn write_error(error: *mut c_char, capacity: usize, message: &str) {
     if error.is_null() || capacity == 0 {
         return;
@@ -1621,6 +2380,7 @@ pub unsafe extern "C" fn ocpn_portable_runtime_create(
             (PORTABLE_API_V01, PORTABLE_WORLD_PLUGIN) => ApiKind::V01,
             (PORTABLE_API_V02, PORTABLE_WORLD_PLUGIN) => ApiKind::V02,
             (PORTABLE_API_V02, PORTABLE_WORLD_WEATHER_ROUTING) => ApiKind::V02WeatherRouting,
+            (PORTABLE_API_V03, PORTABLE_WORLD_PLUGIN) => ApiKind::V03,
             _ => anyhow::bail!(
                 "unsupported portable API/world combination {portable_api}/{portable_world}"
             ),
@@ -1741,6 +2501,13 @@ pub unsafe extern "C" fn ocpn_portable_runtime_initialize(
                     .map_err(v02_guest_error)?;
                 (info.id, info.name, info.version)
             }
+            RuntimeBindings::V03(bindings) => {
+                let info = bindings
+                    .opencpn_portable_lifecycle()
+                    .call_initialize(&mut runtime.store)?
+                    .map_err(v03_guest_error)?;
+                (info.id, info.name, info.version)
+            }
         };
         if id != expected_id || name != expected_name || version != expected_version {
             anyhow::bail!(
@@ -1780,6 +2547,10 @@ pub unsafe extern "C" fn ocpn_portable_runtime_enable(
                 .opencpn_portable_lifecycle()
                 .call_enable(&mut runtime.store)?
                 .map_err(v02_guest_error)?,
+            RuntimeBindings::V03(bindings) => bindings
+                .opencpn_portable_lifecycle()
+                .call_enable(&mut runtime.store)?
+                .map_err(v03_guest_error)?,
         }
         Ok(())
     })();
@@ -1806,6 +2577,9 @@ pub unsafe extern "C" fn ocpn_portable_runtime_disable(
                 .opencpn_portable_lifecycle()
                 .call_disable(&mut runtime.store)?,
             RuntimeBindings::V02WeatherRouting(bindings) => bindings
+                .opencpn_portable_lifecycle()
+                .call_disable(&mut runtime.store)?,
+            RuntimeBindings::V03(bindings) => bindings
                 .opencpn_portable_lifecycle()
                 .call_disable(&mut runtime.store)?,
         }
@@ -1842,6 +2616,10 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_action(
                 .opencpn_portable_lifecycle()
                 .call_on_action(&mut runtime.store, &action_id)?
                 .map_err(v02_guest_error)?,
+            RuntimeBindings::V03(bindings) => bindings
+                .opencpn_portable_lifecycle()
+                .call_on_action(&mut runtime.store, &action_id)?
+                .map_err(v03_guest_error)?,
         }
         Ok(())
     })();
@@ -1888,6 +2666,10 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_surface_event(
                 .opencpn_portable_surface_event_sink()
                 .call_on_surface_event(&mut runtime.store, &surface_id, &control_id, &value_json)?
                 .map_err(v02_guest_error)?,
+            RuntimeBindings::V03(bindings) => bindings
+                .opencpn_portable_surface_event_sink()
+                .call_on_surface_event(&mut runtime.store, &surface_id, &control_id, &value_json)?
+                .map_err(v03_guest_error)?,
         };
         if state.len() > SETTINGS_VALUE_LIMIT {
             anyhow::bail!("surface event state exceeds the 64 KiB limit");
@@ -1969,6 +2751,9 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_job_event(
                 bindings
                     .opencpn_portable_job_event_sink()
                     .call_on_job_event(&mut runtime.store, &job_id, &event)?;
+            }
+            RuntimeBindings::V03(_) => {
+                anyhow::bail!("portable API 0.3 does not expose legacy host jobs")
             }
         }
         Ok(())
@@ -2089,6 +2874,32 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_event(
                     )?
                     .map_err(v02_guest_error)?;
             }
+            RuntimeBindings::V03(bindings) => {
+                let kind = match event_kind {
+                    0 => v03_types::EventKind::Nmea0183,
+                    1 => v03_types::EventKind::Nmea2000,
+                    2 => v03_types::EventKind::SignalK,
+                    3 => v03_types::EventKind::NavigationPosition,
+                    4 => v03_types::EventKind::AisTarget,
+                    5 => v03_types::EventKind::ActiveLeg,
+                    6 => v03_types::EventKind::Cursor,
+                    7 => v03_types::EventKind::Viewport,
+                    8 => v03_types::EventKind::PluginMessage,
+                    _ => anyhow::bail!("invalid event kind {event_kind}"),
+                };
+                bindings
+                    .opencpn_portable_event_sink()
+                    .call_on_event(
+                        &mut runtime.store,
+                        &v03_types::Event {
+                            kind,
+                            topic,
+                            payload,
+                            sequence,
+                        },
+                    )?
+                    .map_err(v03_guest_error)?;
+            }
         }
         Ok(())
     })();
@@ -2141,6 +2952,18 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_navigation_sentence(
                     .call_on_event(&mut runtime.store, &event)?
                     .map_err(v02_guest_error)?;
             }
+            RuntimeBindings::V03(bindings) => {
+                let event = v03_types::Event {
+                    kind: v03_types::EventKind::Nmea0183,
+                    topic: String::new(),
+                    payload: sentence,
+                    sequence: 0,
+                };
+                bindings
+                    .opencpn_portable_event_sink()
+                    .call_on_event(&mut runtime.store, &event)?
+                    .map_err(v03_guest_error)?;
+            }
         }
         Ok(())
     })();
@@ -2191,7 +3014,278 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_plugin_message(
                 .opencpn_portable_plugin_message_sink()
                 .call_on_plugin_message(&mut runtime.store, &message_id, &message_body)?
                 .map_err(v02_guest_error)?,
+            RuntimeBindings::V03(bindings) => {
+                let event = v03_types::Event {
+                    kind: v03_types::EventKind::PluginMessage,
+                    topic: message_id,
+                    payload: message_body,
+                    sequence: 0,
+                };
+                bindings
+                    .opencpn_portable_event_sink()
+                    .call_on_event(&mut runtime.store, &event)?
+                    .map_err(v03_guest_error)?;
+            }
         }
+        Ok(())
+    })();
+    ffi_result(result, error, error_capacity)
+}
+
+fn input_modifiers(bits: u32) -> v03_types::InputModifiers {
+    v03_types::InputModifiers {
+        shift: bits & 1 != 0,
+        control: bits & 2 != 0,
+        alt: bits & 4 != 0,
+        meta: bits & 8 != 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ocpn_portable_runtime_on_pointer_event(
+    runtime: *mut Runtime,
+    kind: u32,
+    button: u32,
+    canvas_index: u32,
+    x_pixels: i32,
+    y_pixels: i32,
+    latitude: f64,
+    longitude: f64,
+    has_position: u8,
+    wheel_rotation: i32,
+    modifiers: u32,
+    hit_scene_id: *const c_char,
+    hit_scene_id_len: usize,
+    hit_primitive_id: *const c_char,
+    hit_primitive_id_len: usize,
+    handled: *mut u8,
+    error: *mut c_char,
+    error_capacity: usize,
+) -> i32 {
+    let Some(runtime) = (unsafe { runtime.as_mut() }) else {
+        write_error(error, error_capacity, "runtime is null");
+        return -1;
+    };
+    let result = (|| -> anyhow::Result<()> {
+        prepare_call(runtime)?;
+        if handled.is_null() {
+            anyhow::bail!("handled output is null");
+        }
+        let RuntimeBindings::V03(bindings) = &runtime.bindings else {
+            anyhow::bail!("input events require portable API 0.3");
+        };
+        let kind = match kind {
+            0 => v03_types::PointerKind::Move,
+            1 => v03_types::PointerKind::Press,
+            2 => v03_types::PointerKind::Release,
+            3 => v03_types::PointerKind::DoubleClick,
+            4 => v03_types::PointerKind::Wheel,
+            _ => anyhow::bail!("invalid pointer event kind"),
+        };
+        let button = match button {
+            0 => v03_types::PointerButton::None,
+            1 => v03_types::PointerButton::Primary,
+            2 => v03_types::PointerButton::Middle,
+            3 => v03_types::PointerButton::Secondary,
+            _ => anyhow::bail!("invalid pointer button"),
+        };
+        let position = if has_position != 0 {
+            if !latitude.is_finite()
+                || !longitude.is_finite()
+                || latitude.abs() > 90.0
+                || longitude.abs() > 180.0
+            {
+                anyhow::bail!("invalid pointer chart position");
+            }
+            Some(v03_types::GeoPoint {
+                latitude,
+                longitude,
+            })
+        } else {
+            None
+        };
+        let event = v03_types::PointerEvent {
+            kind,
+            button,
+            canvas_index,
+            x_pixels,
+            y_pixels,
+            position,
+            wheel_rotation,
+            modifiers: input_modifiers(modifiers),
+            hit_scene_id: (!hit_scene_id.is_null())
+                .then(|| input_string(hit_scene_id, hit_scene_id_len))
+                .transpose()?,
+            hit_primitive_id: (!hit_primitive_id.is_null())
+                .then(|| input_string(hit_primitive_id, hit_primitive_id_len))
+                .transpose()?,
+        };
+        let value = bindings
+            .opencpn_portable_input_sink()
+            .call_on_pointer(&mut runtime.store, &event)?
+            .map_err(v03_guest_error)?;
+        unsafe { *handled = u8::from(value) };
+        Ok(())
+    })();
+    ffi_result(result, error, error_capacity)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ocpn_portable_runtime_on_key_event(
+    runtime: *mut Runtime,
+    key_code: u32,
+    unicode: u32,
+    has_unicode: u8,
+    pressed: u8,
+    repeat: u8,
+    modifiers: u32,
+    handled: *mut u8,
+    error: *mut c_char,
+    error_capacity: usize,
+) -> i32 {
+    let Some(runtime) = (unsafe { runtime.as_mut() }) else {
+        write_error(error, error_capacity, "runtime is null");
+        return -1;
+    };
+    let result = (|| -> anyhow::Result<()> {
+        prepare_call(runtime)?;
+        if handled.is_null() {
+            anyhow::bail!("handled output is null");
+        }
+        let RuntimeBindings::V03(bindings) = &runtime.bindings else {
+            anyhow::bail!("keyboard events require portable API 0.3");
+        };
+        let unicode = if has_unicode != 0 {
+            Some(char::from_u32(unicode).ok_or_else(|| anyhow::anyhow!("invalid Unicode scalar"))?)
+        } else {
+            None
+        };
+        let event = v03_types::KeyEvent {
+            key_code,
+            unicode,
+            pressed: pressed != 0,
+            repeat: repeat != 0,
+            modifiers: input_modifiers(modifiers),
+        };
+        let value = bindings
+            .opencpn_portable_input_sink()
+            .call_on_key(&mut runtime.store, event)?
+            .map_err(v03_guest_error)?;
+        unsafe { *handled = u8::from(value) };
+        Ok(())
+    })();
+    ffi_result(result, error, error_capacity)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ocpn_portable_runtime_on_timer(
+    runtime: *mut Runtime,
+    timer_id: *const c_char,
+    timer_id_len: usize,
+    scheduled_unix_milliseconds: i64,
+    fired_unix_milliseconds: i64,
+    error: *mut c_char,
+    error_capacity: usize,
+) -> i32 {
+    let Some(runtime) = (unsafe { runtime.as_mut() }) else {
+        write_error(error, error_capacity, "runtime is null");
+        return -1;
+    };
+    let result = (|| -> anyhow::Result<()> {
+        prepare_call(runtime)?;
+        let RuntimeBindings::V03(bindings) = &runtime.bindings else {
+            anyhow::bail!("timer events require portable API 0.3");
+        };
+        let event = v03_types::TimerEvent {
+            timer_id: input_string(timer_id, timer_id_len)?,
+            scheduled_unix_milliseconds,
+            fired_unix_milliseconds,
+        };
+        bindings
+            .opencpn_portable_timer_sink()
+            .call_on_timer(&mut runtime.store, &event)?
+            .map_err(v03_guest_error)?;
+        Ok(())
+    })();
+    ffi_result(result, error, error_capacity)
+}
+
+fn parse_rpc_request(value: &Value) -> Result<v03_types::RpcRequest, v03_types::ServiceError> {
+    Ok(v03_types::RpcRequest {
+        correlation_id: json_text(value, "correlation_id")?,
+        service: json_text(value, "service")?,
+        method: json_text(value, "method")?,
+        content_type: json_text(value, "content_type")?,
+        payload: BASE64
+            .decode(json_text(value, "payload_base64")?)
+            .map_err(|error| v03_error("invalid-request", error.to_string(), false))?,
+        timeout_milliseconds: json_u64(value, "timeout_milliseconds")? as u32,
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ocpn_portable_runtime_on_rpc_request(
+    runtime: *mut Runtime,
+    source_package: *const c_char,
+    source_package_len: usize,
+    request_json: *const c_char,
+    request_json_len: usize,
+    error: *mut c_char,
+    error_capacity: usize,
+) -> i32 {
+    let Some(runtime) = (unsafe { runtime.as_mut() }) else {
+        write_error(error, error_capacity, "runtime is null");
+        return -1;
+    };
+    let result = (|| -> anyhow::Result<()> {
+        prepare_call(runtime)?;
+        if request_json_len > AUTHOR_REQUEST_LIMIT {
+            anyhow::bail!("RPC request exceeds policy");
+        }
+        let RuntimeBindings::V03(bindings) = &runtime.bindings else {
+            anyhow::bail!("typed RPC requires portable API 0.3");
+        };
+        let source = input_string(source_package, source_package_len)?;
+        let json: Value = serde_json::from_str(&input_string(request_json, request_json_len)?)?;
+        let request = parse_rpc_request(&json).map_err(v03_guest_error)?;
+        bindings
+            .opencpn_portable_rpc_sink()
+            .call_on_request(&mut runtime.store, &source, &request)?
+            .map_err(v03_guest_error)?;
+        Ok(())
+    })();
+    ffi_result(result, error, error_capacity)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ocpn_portable_runtime_on_rpc_response(
+    runtime: *mut Runtime,
+    source_package: *const c_char,
+    source_package_len: usize,
+    response_json: *const c_char,
+    response_json_len: usize,
+    error: *mut c_char,
+    error_capacity: usize,
+) -> i32 {
+    let Some(runtime) = (unsafe { runtime.as_mut() }) else {
+        write_error(error, error_capacity, "runtime is null");
+        return -1;
+    };
+    let result = (|| -> anyhow::Result<()> {
+        prepare_call(runtime)?;
+        if response_json_len > AUTHOR_RESPONSE_LIMIT {
+            anyhow::bail!("RPC response exceeds policy");
+        }
+        let RuntimeBindings::V03(bindings) = &runtime.bindings else {
+            anyhow::bail!("typed RPC requires portable API 0.3");
+        };
+        let source = input_string(source_package, source_package_len)?;
+        let json: Value = serde_json::from_str(&input_string(response_json, response_json_len)?)?;
+        let response = parse_rpc_response(&json).map_err(v03_guest_error)?;
+        bindings
+            .opencpn_portable_rpc_sink()
+            .call_on_response(&mut runtime.store, &source, &response)?
+            .map_err(v03_guest_error)?;
         Ok(())
     })();
     ffi_result(result, error, error_capacity)
@@ -2504,6 +3598,9 @@ pub unsafe extern "C" fn ocpn_portable_runtime_calculate_route(
             RuntimeBindings::V02(_) => {
                 anyhow::bail!("portable API 0.2 base world does not export weather routing")
             }
+            RuntimeBindings::V03(_) => {
+                anyhow::bail!("portable API 0.3 author world does not export weather routing")
+            }
         };
         output.point_count = route.points.len();
         if route.points.len() > ROUTE_POINT_LIMIT
@@ -2690,7 +3787,9 @@ pub unsafe extern "C" fn ocpn_portable_runtime_test_trap(
             RuntimeBindings::V01(bindings) => bindings
                 .opencpn_portable_plugin()
                 .call_test_trap(&mut runtime.store)?,
-            RuntimeBindings::V02(_) | RuntimeBindings::V02WeatherRouting(_) => {
+            RuntimeBindings::V02(_)
+            | RuntimeBindings::V02WeatherRouting(_)
+            | RuntimeBindings::V03(_) => {
                 anyhow::bail!("test-trap is available only to portable API 0.1 fixtures")
             }
         }

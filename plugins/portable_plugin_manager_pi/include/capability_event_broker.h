@@ -40,6 +40,7 @@ struct CapabilityEventSubscription {
   CapabilityEventKind kind = CapabilityEventKind::kNmea0183;
   std::string topic_prefix;
   std::size_t queue_limit = 32;
+  std::uint64_t id = 0;
 };
 
 struct CapabilityEventStats {
@@ -64,7 +65,10 @@ public:
   static constexpr std::size_t kMaximumQueueLimit = 256;
 
   bool Subscribe(const CapabilityEventSubscription& subscription,
-                 std::string* diagnostic);
+                 std::string* diagnostic,
+                 std::uint64_t* subscription_id = nullptr);
+  bool Unsubscribe(const std::string& package_id,
+                   std::uint64_t subscription_id);
   void RemovePackage(const std::string& package_id);
   void ClearPending(const std::string& package_id);
 
@@ -88,6 +92,7 @@ private:
   mutable std::mutex mutex_;
   std::map<std::string, PackageQueue> packages_;
   std::uint64_t next_sequence_ = 1;
+  std::uint64_t next_subscription_id_ = 1;
 };
 
 }  // namespace ppm

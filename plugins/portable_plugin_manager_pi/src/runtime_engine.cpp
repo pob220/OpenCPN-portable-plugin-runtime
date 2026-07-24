@@ -9,21 +9,25 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <set>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 #include <openssl/rand.h>
 
 #include <wx/dir.h>
+#include <wx/base64.h>
 #include <wx/filename.h>
 #include <wx/jsonreader.h>
 #include <wx/jsonval.h>
+#include <wx/jsonwriter.h>
 #include <wx/log.h>
 #include <wx/regex.h>
 #include <wx/sstream.h>
@@ -60,6 +64,19 @@ constexpr std::size_t kRouteInspectionLineLimit = 10'000;
 constexpr std::size_t kRoutePolarLimit = 16;
 constexpr std::size_t kRoutePolarAxisLimit = 512;
 constexpr std::size_t kRoutePolarCellLimit = 256 * 1024;
+constexpr std::size_t kAuthorRequestLimit = 16 * 1024 * 1024;
+constexpr std::size_t kAuthorResponseLimit = 16 * 1024 * 1024;
+constexpr std::size_t kSceneLayerLimit = 128;
+constexpr std::size_t kScenePrimitiveLimit = 4096;
+constexpr std::size_t kScenePointLimit = 250'000;
+constexpr std::size_t kTimerLimitPerPackage = 32;
+constexpr std::uint32_t kMinimumTimerMilliseconds = 50;
+constexpr std::uint32_t kMaximumTimerMilliseconds = 24U * 60U * 60U * 1000U;
+constexpr std::size_t kRpcServiceLimitPerPackage = 64;
+constexpr std::size_t kRpcOutstandingLimitPerPackage = 128;
+constexpr std::size_t kRpcPayloadLimit = 1024 * 1024;
+constexpr std::uint32_t kRpcMinimumTimeoutMilliseconds = 100;
+constexpr std::uint32_t kRpcMaximumTimeoutMilliseconds = 60'000;
 
 std::string Text(const char* value, std::size_t length) {
   return value && length ? std::string(value, length) : std::string();
@@ -70,6 +87,29 @@ void CopyError(const std::string& value, char* output, std::size_t capacity) {
   const std::size_t copied = std::min(value.size(), capacity - 1);
   if (copied != 0) std::memcpy(output, value.data(), copied);
   output[copied] = '\0';
+}
+
+std::string JsonText(const wxJSONValue& value) {
+  wxString encoded;
+  wxJSONWriter writer;
+  writer.Write(value, encoded);
+  return encoded.ToStdString();
+}
+
+wxJSONValue AuthorError(const std::string& code, const std::string& message,
+                        bool retryable = false) {
+  wxJSONValue response;
+  response["error"]["code"] = code;
+  response["error"]["message"] = message;
+  response["error"]["retryable"] = retryable;
+  return response;
+}
+
+bool ParseAuthorRequest(const std::string& encoded, wxJSONValue* value) {
+  if (!value || encoded.size() > kAuthorRequestLimit) return false;
+  wxJSONReader reader;
+  return reader.Parse(wxString::FromUTF8(encoded), value) == 0 &&
+         value->IsObject();
 }
 
 bool IsSafeName(const std::string& value) {
@@ -121,6 +161,58 @@ std::string ReadSmallFile(const fs::path& path, std::size_t limit, bool* okay) {
   if (!input && !result.empty()) return {};
   *okay = true;
   return result;
+}
+
+bool ParseOverlayPoint(wxJSONValue value, OverlayPoint* point) {
+  if (!point || !value.IsObject() || !value["latitude"].IsDouble() ||
+      !value["longitude"].IsDouble()) {
+    return false;
+  }
+  point->latitude = value["latitude"].AsDouble();
+  point->longitude = value["longitude"].AsDouble();
+  return std::isfinite(point->latitude) &&
+         std::isfinite(point->longitude) &&
+         std::abs(point->latitude) <= 90.0 &&
+         std::abs(point->longitude) <= 180.0;
+}
+
+bool ParseOverlayColor(wxJSONValue value, OverlayColor* color) {
+  if (!color || !value.IsObject()) return false;
+  const long red = value["red"].AsLong();
+  const long green = value["green"].AsLong();
+  const long blue = value["blue"].AsLong();
+  const long alpha = value["alpha"].AsLong();
+  if (red < 0 || red > 255 || green < 0 || green > 255 || blue < 0 ||
+      blue > 255 || alpha < 0 || alpha > 255) {
+    return false;
+  }
+  *color = {static_cast<unsigned char>(red),
+            static_cast<unsigned char>(green),
+            static_cast<unsigned char>(blue),
+            static_cast<unsigned char>(alpha)};
+  return true;
+}
+
+bool ParseOverlayStyle(wxJSONValue value, OverlayStyle* style) {
+  if (!style || !value.IsObject()) return false;
+  style->has_stroke = !value["stroke"].IsNull();
+  style->has_fill = !value["fill"].IsNull();
+  if (style->has_stroke &&
+      !ParseOverlayColor(value["stroke"], &style->stroke)) {
+    return false;
+  }
+  if (style->has_fill && !ParseOverlayColor(value["fill"], &style->fill))
+    return false;
+  style->width_pixels =
+      static_cast<float>(value["width_pixels"].AsDouble());
+  return std::isfinite(style->width_pixels) &&
+         style->width_pixels >= 0.5F && style->width_pixels <= 64.0F;
+}
+
+std::int64_t UnixMillisecondsNow() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
 }
 
 bool ValidateRoutingRequest(const RoutingRequest& request,
@@ -444,6 +536,42 @@ public:
     std::map<std::string, UserFileGrant> user_file_grants;
   };
 
+  struct TimerKey {
+    std::string package_id;
+    std::string timer_id;
+
+    bool operator<(const TimerKey& other) const {
+      return std::tie(package_id, timer_id) <
+             std::tie(other.package_id, other.timer_id);
+    }
+  };
+
+  struct TimerRegistration {
+    Instance* instance = nullptr;
+    std::uint64_t generation = 0;
+    std::chrono::steady_clock::time_point due;
+    std::int64_t scheduled_unix_milliseconds = 0;
+    std::uint32_t repeat_milliseconds = 0;
+  };
+
+  struct RpcCallKey {
+    std::string source_package;
+    std::string correlation_id;
+
+    bool operator<(const RpcCallKey& other) const {
+      return std::tie(source_package, correlation_id) <
+             std::tie(other.source_package, other.correlation_id);
+    }
+  };
+
+  struct RpcCall {
+    Instance* source = nullptr;
+    std::uint64_t source_generation = 0;
+    std::string target_package;
+    std::string service;
+    std::chrono::steady_clock::time_point expires;
+  };
+
   Impl(std::string storage_root, RegisterAction register_action,
        RemoveActions remove_actions, StateChanged state_changed,
        UiDispatch ui_dispatch)
@@ -451,9 +579,19 @@ public:
         register_action(std::move(register_action)),
         remove_actions(std::move(remove_actions)),
         state_changed(std::move(state_changed)),
-        ui_dispatch(std::move(ui_dispatch)) {}
+        ui_dispatch(std::move(ui_dispatch)),
+        timer_thread([this]() { RunTimers(); }) {}
 
-  ~Impl() { Shutdown(); }
+  ~Impl() {
+    Shutdown();
+    {
+      std::lock_guard<std::mutex> lock(timer_mutex);
+      timer_stopped = true;
+      timers.clear();
+    }
+    timer_changed.notify_all();
+    if (timer_thread.joinable()) timer_thread.join();
+  }
 
   bool LoadInstalled(bool developer_mode);
   void SetSurfaceOpenedCallback(SurfaceOpened callback) {
@@ -470,6 +608,9 @@ public:
   }
   void SetPluginMessageSender(PluginMessageSender callback) {
     plugin_message_sender = std::move(callback);
+  }
+  void SetAuthorUiRequestCallback(AuthorUiRequest callback) {
+    author_ui_request = std::move(callback);
   }
   bool RefreshPackage(const std::string& package_id, bool developer_mode,
                       std::string* diagnostic);
@@ -514,6 +655,16 @@ public:
   bool WaitForIdle(const std::string& package_id,
                    std::chrono::milliseconds timeout);
   void DeliverNavigationSentence(const std::string& sentence);
+  void PublishCapabilityEvent(CapabilityEvent event) {
+    std::string diagnostic;
+    if (!events.Publish(std::move(event), &diagnostic)) {
+      if (!diagnostic.empty())
+        wxLogWarning("PPM capability-event-rejected diagnostic=%s",
+                     diagnostic);
+      return;
+    }
+    for (auto& item : instances) ScheduleEvents(*item);
+  }
   void DeliverPluginMessage(const std::string& message_id,
                             const std::string& message_body);
   void ScheduleEvents(Instance& instance);
@@ -714,7 +865,15 @@ public:
                                         std::size_t message_id_length,
                                         const char* message_body,
                                         std::size_t message_body_length);
+  static std::int32_t AuthorServiceCall(
+      void* user_data, const char* operation, std::size_t operation_length,
+      const char* request_json, std::size_t request_json_length,
+      char* response_json, std::size_t response_capacity,
+      std::size_t* response_length);
   void DeliverJobEvent(Instance* instance, const JobEvent& event);
+  void RunTimers();
+  void CancelPackageTimers(const std::string& package_id);
+  void ClearPackageRpc(const std::string& package_id);
 
   fs::path storage_root;
   RegisterAction register_action;
@@ -726,11 +885,20 @@ public:
   RoutingProgress routing_progress;
   RoutingCompleted routing_completed;
   PluginMessageSender plugin_message_sender;
+  AuthorUiRequest author_ui_request;
   JobScheduler jobs;
   CapabilityEventBroker events;
   ChartSafetyService chart_safety;
   std::vector<std::unique_ptr<Instance>> instances;
   bool stopped = false;
+  std::mutex timer_mutex;
+  std::condition_variable timer_changed;
+  std::map<TimerKey, TimerRegistration> timers;
+  bool timer_stopped = false;
+  std::thread timer_thread;
+  std::mutex rpc_mutex;
+  std::map<std::string, std::string> rpc_services;
+  std::map<RpcCallKey, RpcCall> rpc_calls;
   mutable std::mutex position_mutex;
   bool position_valid = false;
   double latitude = 0.0;
@@ -807,6 +975,143 @@ void RuntimeEngine::Impl::DeliverJobEvent(Instance* instance,
           instance->owner->PublishStateChanged();
         }
       });
+}
+
+void RuntimeEngine::Impl::CancelPackageTimers(
+    const std::string& package_id) {
+  {
+    std::lock_guard<std::mutex> lock(timer_mutex);
+    for (auto item = timers.begin(); item != timers.end();) {
+      if (item->first.package_id == package_id)
+        item = timers.erase(item);
+      else
+        ++item;
+    }
+  }
+  timer_changed.notify_all();
+}
+
+void RuntimeEngine::Impl::ClearPackageRpc(const std::string& package_id) {
+  std::lock_guard<std::mutex> lock(rpc_mutex);
+  for (auto item = rpc_services.begin(); item != rpc_services.end();) {
+    if (item->second == package_id)
+      item = rpc_services.erase(item);
+    else
+      ++item;
+  }
+  for (auto item = rpc_calls.begin(); item != rpc_calls.end();) {
+    if (item->first.source_package == package_id ||
+        item->second.target_package == package_id)
+      item = rpc_calls.erase(item);
+    else
+      ++item;
+  }
+}
+
+void RuntimeEngine::Impl::RunTimers() {
+  while (true) {
+    std::vector<std::pair<TimerKey, TimerRegistration>> due;
+    {
+      std::unique_lock<std::mutex> lock(timer_mutex);
+      if (timer_stopped) return;
+      auto wake = std::chrono::steady_clock::now() +
+                  std::chrono::milliseconds(250);
+      for (const auto& [ignored, timer] : timers)
+        wake = std::min(wake, timer.due);
+      timer_changed.wait_until(lock, wake);
+      if (timer_stopped) return;
+      const auto now = std::chrono::steady_clock::now();
+      for (auto item = timers.begin(); item != timers.end();) {
+        if (item->second.due > now) {
+          ++item;
+          continue;
+        }
+        due.push_back(*item);
+        if (item->second.repeat_milliseconds == 0) {
+          item = timers.erase(item);
+          continue;
+        }
+        const auto interval =
+            std::chrono::milliseconds(item->second.repeat_milliseconds);
+        do {
+          item->second.due += interval;
+          item->second.scheduled_unix_milliseconds +=
+              item->second.repeat_milliseconds;
+        } while (item->second.due <= now);
+        ++item;
+      }
+    }
+
+    for (const auto& [key, timer] : due) {
+      Instance* instance = timer.instance;
+      if (!instance) continue;
+      const std::int64_t fired = UnixMillisecondsNow();
+      instance->executor.Post(
+          timer.generation,
+          [instance, key, timer, fired](std::uint64_t task_generation) {
+            if (task_generation != instance->executor.Generation() ||
+                !instance->enabled || instance->failed)
+              return;
+            std::lock_guard<std::mutex> lock(instance->runtime_mutex);
+            if (!instance->runtime) return;
+            std::array<char, kErrorCapacity> error{};
+            if (ocpn_portable_runtime_on_timer(
+                    instance->runtime, key.timer_id.data(),
+                    key.timer_id.size(),
+                    timer.scheduled_unix_milliseconds, fired, error.data(),
+                    error.size()) != 0) {
+              instance->owner->Fail(
+                  *instance, "timer " + key.timer_id,
+                  error[0] ? error.data() : "portable timer handler failed");
+            }
+          });
+    }
+
+    std::vector<std::pair<RpcCallKey, RpcCall>> expired;
+    {
+      std::lock_guard<std::mutex> lock(rpc_mutex);
+      const auto now = std::chrono::steady_clock::now();
+      for (auto item = rpc_calls.begin(); item != rpc_calls.end();) {
+        if (item->second.expires > now) {
+          ++item;
+          continue;
+        }
+        expired.push_back(*item);
+        item = rpc_calls.erase(item);
+      }
+    }
+    for (const auto& [key, call] : expired) {
+      Instance* source = call.source;
+      if (!source) continue;
+      wxJSONValue response;
+      response["correlation_id"] = key.correlation_id;
+      response["status"] = 504;
+      response["content_type"] = "text/plain";
+      response["payload_base64"] = "";
+      response["diagnostic"] = "portable RPC request timed out";
+      const std::string encoded = JsonText(response);
+      source->executor.Post(
+          call.source_generation,
+          [source, provider = call.target_package,
+           encoded](std::uint64_t task_generation) {
+            if (task_generation != source->executor.Generation() ||
+                !source->enabled || source->failed)
+              return;
+            std::lock_guard<std::mutex> lock(source->runtime_mutex);
+            if (!source->runtime) return;
+            std::array<char, kErrorCapacity> error{};
+            if (ocpn_portable_runtime_on_rpc_response(
+                    source->runtime, provider.data(), provider.size(),
+                    encoded.data(), encoded.size(), error.data(),
+                    error.size()) != 0) {
+              source->owner->Fail(
+                  *source, "RPC timeout response",
+                  error[0] ? error.data()
+                           : "portable RPC response handler failed");
+            }
+          });
+    }
+  }
 }
 
 std::int32_t RuntimeEngine::Impl::OpenNamedSurface(
@@ -1669,6 +1974,791 @@ std::int32_t RuntimeEngine::Impl::StoragePrivateRead(
   return 0;
 }
 
+std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
+    void* user_data, const char* operation, std::size_t operation_length,
+    const char* request_json, std::size_t request_json_length,
+    char* response_json, std::size_t response_capacity,
+    std::size_t* response_length) {
+  auto* instance = static_cast<Instance*>(user_data);
+  const std::string operation_name = Text(operation, operation_length);
+  const std::string request_text = Text(request_json, request_json_length);
+  if (!instance || !instance->owner || !response_length ||
+      instance->portable_api != OCPN_PORTABLE_API_V03 ||
+      operation_name.empty() || operation_name.size() > 128 ||
+      request_text.size() > kAuthorRequestLimit) {
+    return -1;
+  }
+
+  wxJSONValue request;
+  if (!ParseAuthorRequest(request_text, &request)) return -2;
+
+  auto finish = [&](std::int32_t status, const wxJSONValue& value) {
+    const std::string encoded = JsonText(value);
+    *response_length = encoded.size();
+    if (encoded.size() > kAuthorResponseLimit ||
+        encoded.size() > response_capacity ||
+        (!encoded.empty() && !response_json)) {
+      return std::int32_t{-3};
+    }
+    if (!encoded.empty())
+      std::memcpy(response_json, encoded.data(), encoded.size());
+    return status;
+  };
+  auto fail = [&](std::int32_t status, const std::string& code,
+                  const std::string& message, bool retryable = false) {
+    return finish(status, AuthorError(code, message, retryable));
+  };
+
+  if (operation_name == "actions.register") {
+    if (!instance->owner->Permitted(*instance, "ui.commands"))
+      return fail(-4, "permission-denied",
+                  "command registration permission was not granted");
+    RuntimeAction action;
+    action.package_id = instance->id;
+    action.action_id = request["action_id"].AsString().ToStdString();
+    action.label = request["label"].AsString().ToStdString();
+    action.tooltip = request["tooltip"].AsString().ToStdString();
+    action.toolbar = false;
+    action.context_menu = false;
+    if (!IsSafeName(action.action_id) || action.label.empty() ||
+        action.label.size() > 256 || action.tooltip.size() > 1024 ||
+        !request["locations"].IsArray()) {
+      return fail(-5, "invalid-action", "command definition is invalid");
+    }
+    for (int index = 0; index < request["locations"].Size(); ++index) {
+      const wxString location = request["locations"][index].AsString();
+      if (location == "toolbar")
+        action.toolbar = true;
+      else if (location == "chart-context-menu")
+        action.context_menu = true;
+      else
+        return fail(-5, "invalid-action", "command location is invalid");
+    }
+    if (!action.toolbar && !action.context_menu)
+      return fail(-5, "invalid-action",
+                  "command must have at least one location");
+    if (request["icon_resource"].IsString()) {
+      const wxString resource = request["icon_resource"].AsString();
+      if (!SafeRelativePath(resource))
+        return fail(-5, "invalid-action", "command icon path is invalid");
+      action.icon_path =
+          (instance->package_root / fs::path(resource.ToStdString()))
+              .lexically_normal()
+              .string();
+      std::error_code error;
+      if (!fs::is_regular_file(action.icon_path, error))
+        return fail(-6, "not-found", "command icon resource was not found");
+    }
+    auto status = std::make_shared<std::int32_t>(-10);
+    auto host_id = std::make_shared<std::uint32_t>(0);
+    const bool completed = instance->owner->RunUiService(
+        [owner = instance->owner, action, status, host_id]() {
+          *status = owner->register_action(action, host_id.get());
+        },
+        std::chrono::seconds(5));
+    if (!completed || *status != 0)
+      return fail(completed ? *status : -11, "registration-failed",
+                  completed ? "OpenCPN rejected the command"
+                            : "OpenCPN command registration timed out",
+                  !completed);
+    instance->registered_actions.push_back(action);
+    wxJSONValue response;
+    response["host_action_id"] =
+        static_cast<wxLongLong_t>(*host_id);
+    return finish(0, response);
+  }
+
+  if (operation_name == "scenes.clear") {
+    if (!instance->owner->Permitted(*instance, "overlay.submit"))
+      return fail(-4, "permission-denied",
+                  "scene submission permission was not granted");
+    const std::string scene_id =
+        request["scene_id"].AsString().ToStdString();
+    if (!IsSafeName(scene_id))
+      return fail(-5, "invalid-scene", "scene identifier is invalid");
+    {
+      std::lock_guard<std::mutex> lock(instance->state_mutex);
+      instance->scenes.erase(scene_id);
+    }
+    instance->owner->PublishStateChanged();
+    return finish(0, wxJSONValue(wxJSONTYPE_OBJECT));
+  }
+
+  if (operation_name == "scenes.submit") {
+    if (!instance->owner->Permitted(*instance, "overlay.submit"))
+      return fail(-4, "permission-denied",
+                  "scene submission permission was not granted");
+    OverlayScene update;
+    update.package_id = instance->id;
+    update.scene_id = request["scene_id"].AsString().ToStdString();
+    update.revision =
+        static_cast<std::uint64_t>(request["revision"].AsLong());
+    if (!IsSafeName(update.scene_id) || update.revision == 0 ||
+        !request["layers"].IsArray() ||
+        static_cast<std::size_t>(request["layers"].Size()) >
+            kSceneLayerLimit) {
+      return fail(-5, "invalid-scene", "scene update is invalid");
+    }
+
+    std::size_t primitive_count = 0;
+    std::size_t point_count = 0;
+    std::set<std::string> layer_ids;
+    std::set<std::string> primitive_ids;
+    for (int layer_index = 0; layer_index < request["layers"].Size();
+         ++layer_index) {
+      wxJSONValue layer_value = request["layers"][layer_index];
+      OverlayLayer layer;
+      layer.layer_id =
+          layer_value["layer_id"].AsString().ToStdString();
+      layer.z_index = static_cast<int>(layer_value["z_index"].AsLong());
+      layer.visible = layer_value["visible"].AsBool();
+      if (!IsSafeName(layer.layer_id) ||
+          !layer_ids.insert(layer.layer_id).second ||
+          !layer_value["primitives"].IsArray()) {
+        return fail(-5, "invalid-layer",
+                    "scene layer definition is invalid");
+      }
+      primitive_count +=
+          static_cast<std::size_t>(layer_value["primitives"].Size());
+      if (primitive_count > kScenePrimitiveLimit)
+        return fail(-7, "scene-too-large",
+                    "scene exceeds the primitive limit");
+
+      for (int primitive_index = 0;
+           primitive_index < layer_value["primitives"].Size();
+           ++primitive_index) {
+        wxJSONValue primitive_value =
+            layer_value["primitives"][primitive_index];
+        OverlayPrimitive primitive;
+        primitive.primitive_id =
+            primitive_value["primitive_id"].AsString().ToStdString();
+        primitive.interactive = primitive_value["interactive"].AsBool();
+        const std::string globally_unique =
+            layer.layer_id + "/" + primitive.primitive_id;
+        if (!IsSafeName(primitive.primitive_id) ||
+            !primitive_ids.insert(globally_unique).second) {
+          return fail(-5, "invalid-primitive",
+                      "scene primitive identifier is invalid or duplicated");
+        }
+        const std::string kind =
+            primitive_value["kind"].AsString().ToStdString();
+        if (kind == "polyline" || kind == "polygon") {
+          primitive.kind = kind == "polyline"
+                               ? OverlayPrimitiveKind::kPolyline
+                               : OverlayPrimitiveKind::kPolygon;
+          if (!primitive_value["points"].IsArray() ||
+              !ParseOverlayStyle(primitive_value["style"],
+                                 &primitive.style)) {
+            return fail(-5, "invalid-primitive",
+                        "line or polygon primitive is invalid");
+          }
+          const std::size_t required =
+              kind == "polyline" ? std::size_t{2} : std::size_t{3};
+          const std::size_t count =
+              static_cast<std::size_t>(primitive_value["points"].Size());
+          if (count < required || point_count > kScenePointLimit - count)
+            return fail(-7, "scene-too-large",
+                        "scene point count is invalid or exceeds policy");
+          primitive.points.reserve(count);
+          for (int point_index = 0;
+               point_index < primitive_value["points"].Size();
+               ++point_index) {
+            OverlayPoint point;
+            if (!ParseOverlayPoint(
+                    primitive_value["points"][point_index], &point)) {
+              return fail(-5, "invalid-coordinate",
+                          "scene coordinate is invalid");
+            }
+            primitive.points.push_back(point);
+          }
+          point_count += count;
+        } else if (kind == "circle") {
+          primitive.kind = OverlayPrimitiveKind::kCircle;
+          primitive.radius_metres =
+              primitive_value["radius_metres"].AsDouble();
+          if (!ParseOverlayPoint(primitive_value["centre"],
+                                 &primitive.centre) ||
+              !ParseOverlayStyle(primitive_value["style"],
+                                 &primitive.style) ||
+              !std::isfinite(primitive.radius_metres) ||
+              primitive.radius_metres <= 0.0 ||
+              primitive.radius_metres > 2'000'000.0) {
+            return fail(-5, "invalid-circle",
+                        "circle primitive is invalid");
+          }
+        } else if (kind == "icon") {
+          primitive.kind = OverlayPrimitiveKind::kIcon;
+          primitive.width_pixels =
+              static_cast<float>(primitive_value["width_pixels"].AsDouble());
+          primitive.height_pixels =
+              static_cast<float>(primitive_value["height_pixels"].AsDouble());
+          const wxString resource_name =
+              primitive_value["resource_name"].AsString();
+          if (!ParseOverlayPoint(primitive_value["position"],
+                                 &primitive.centre) ||
+              !SafeRelativePath(resource_name) ||
+              !std::isfinite(primitive.width_pixels) ||
+              !std::isfinite(primitive.height_pixels) ||
+              primitive.width_pixels < 1.0F ||
+              primitive.height_pixels < 1.0F ||
+              primitive.width_pixels > 512.0F ||
+              primitive.height_pixels > 512.0F) {
+            return fail(-5, "invalid-icon", "icon primitive is invalid");
+          }
+          const fs::path resource =
+              (instance->package_root /
+               fs::path(resource_name.ToStdString()))
+                  .lexically_normal();
+          std::error_code error;
+          if (!fs::is_regular_file(resource, error))
+            return fail(-6, "not-found",
+                        "scene icon resource was not found");
+          primitive.resource_path = resource.string();
+        } else if (kind == "text") {
+          primitive.kind = OverlayPrimitiveKind::kText;
+          primitive.text =
+              primitive_value["value"].AsString().ToStdString();
+          primitive.size_pixels =
+              static_cast<float>(primitive_value["size_pixels"].AsDouble());
+          if (!ParseOverlayPoint(primitive_value["position"],
+                                 &primitive.centre) ||
+              !ParseOverlayColor(primitive_value["color"],
+                                 &primitive.text_color) ||
+              primitive.text.empty() || primitive.text.size() > 4096 ||
+              !std::isfinite(primitive.size_pixels) ||
+              primitive.size_pixels < 6.0F ||
+              primitive.size_pixels > 128.0F) {
+            return fail(-5, "invalid-text", "text primitive is invalid");
+          }
+        } else {
+          return fail(-5, "invalid-primitive",
+                      "scene primitive kind is invalid");
+        }
+        layer.primitives.push_back(std::move(primitive));
+      }
+      update.layers.push_back(std::move(layer));
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(instance->state_mutex);
+      const auto existing = instance->scenes.find(update.scene_id);
+      if (existing != instance->scenes.end() &&
+          update.revision <= existing->second.revision) {
+        return fail(-8, "stale-revision",
+                    "scene update revision is not newer");
+      }
+      if (!request["replace"].AsBool() &&
+          existing != instance->scenes.end()) {
+        OverlayScene merged = existing->second;
+        merged.revision = update.revision;
+        for (auto& incoming_layer : update.layers) {
+          auto layer = std::find_if(
+              merged.layers.begin(), merged.layers.end(),
+              [&](const OverlayLayer& value) {
+                return value.layer_id == incoming_layer.layer_id;
+              });
+          if (layer == merged.layers.end()) {
+            merged.layers.push_back(std::move(incoming_layer));
+            continue;
+          }
+          layer->z_index = incoming_layer.z_index;
+          layer->visible = incoming_layer.visible;
+          for (auto& incoming_primitive : incoming_layer.primitives) {
+            auto primitive = std::find_if(
+                layer->primitives.begin(), layer->primitives.end(),
+                [&](const OverlayPrimitive& value) {
+                  return value.primitive_id ==
+                         incoming_primitive.primitive_id;
+                });
+            if (primitive == layer->primitives.end())
+              layer->primitives.push_back(std::move(incoming_primitive));
+            else
+              *primitive = std::move(incoming_primitive);
+          }
+        }
+        std::size_t merged_primitive_count = 0;
+        std::size_t merged_point_count = 0;
+        if (merged.layers.size() > kSceneLayerLimit)
+          return fail(-7, "scene-too-large",
+                      "merged scene exceeds the layer limit");
+        for (const auto& layer : merged.layers) {
+          if (merged_primitive_count >
+              kScenePrimitiveLimit - layer.primitives.size())
+            return fail(-7, "scene-too-large",
+                        "merged scene exceeds the primitive limit");
+          merged_primitive_count += layer.primitives.size();
+          for (const auto& primitive : layer.primitives) {
+            if (merged_point_count >
+                kScenePointLimit - primitive.points.size())
+              return fail(-7, "scene-too-large",
+                          "merged scene exceeds the point limit");
+            merged_point_count += primitive.points.size();
+          }
+        }
+        instance->scenes[update.scene_id] = std::move(merged);
+      } else {
+        instance->scenes[update.scene_id] = std::move(update);
+      }
+    }
+    instance->owner->PublishStateChanged();
+    return finish(0, wxJSONValue(wxJSONTYPE_OBJECT));
+  }
+
+  if (operation_name.rfind("storage.", 0) == 0) {
+    if (!instance->owner->Permitted(*instance, "storage.private"))
+      return fail(-4, "permission-denied",
+                  "private storage permission was not granted");
+    const std::string name = request["name"].AsString().ToStdString();
+    if (!IsSafeName(name))
+      return fail(-5, "invalid-name", "private storage name is invalid");
+    const fs::path target = instance->private_root / name;
+
+    if (operation_name == "storage.read") {
+      bool okay = false;
+      const std::string contents =
+          ReadSmallFile(target, kPrivateReadLimit, &okay);
+      if (!okay)
+        return fail(-6, "not-found", "private storage entry was not found");
+      wxJSONValue response;
+      response["base64"] =
+          wxBase64Encode(contents.data(), contents.size());
+      return finish(0, response);
+    }
+    if (operation_name == "storage.write-atomic") {
+      if (!request["base64"].IsString())
+        return fail(-5, "invalid-value", "private storage value is missing");
+      const wxMemoryBuffer decoded = wxBase64Decode(
+          request["base64"].AsString(), wxBase64DecodeMode_Strict);
+      if (decoded.GetDataLen() > kPrivateReadLimit)
+        return fail(-7, "value-too-large",
+                    "private storage value exceeds 8 MiB");
+      std::array<unsigned char, 8> random{};
+      if (RAND_bytes(random.data(), random.size()) != 1)
+        return fail(-8, "host-failure",
+                    "could not create an atomic storage transaction");
+      static constexpr char kHex[] = "0123456789abcdef";
+      std::string suffix;
+      suffix.reserve(random.size() * 2);
+      for (const unsigned char byte : random) {
+        suffix.push_back(kHex[byte >> 4]);
+        suffix.push_back(kHex[byte & 0x0f]);
+      }
+      const fs::path temporary =
+          instance->private_root / (".write-" + suffix + ".tmp");
+      {
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        if (!output)
+          return fail(-8, "host-failure",
+                      "could not open the atomic storage transaction");
+        output.write(static_cast<const char*>(decoded.GetData()),
+                     static_cast<std::streamsize>(decoded.GetDataLen()));
+        output.flush();
+        if (!output) {
+          std::error_code ignored;
+          fs::remove(temporary, ignored);
+          return fail(-8, "host-failure",
+                      "could not write the private storage entry");
+        }
+      }
+      const wxString temporary_name = wxString::FromUTF8(temporary.string());
+      const wxString target_name = wxString::FromUTF8(target.string());
+      if (!wxRenameFile(temporary_name, target_name, true)) {
+        wxRemoveFile(temporary_name);
+        return fail(-8, "host-failure",
+                    "could not publish the private storage entry atomically");
+      }
+      return finish(0, wxJSONValue(wxJSONTYPE_OBJECT));
+    }
+    if (operation_name == "storage.delete") {
+      std::error_code error;
+      const bool deleted = fs::remove(target, error);
+      if (error)
+        return fail(-8, "host-failure",
+                    "could not delete the private storage entry");
+      wxJSONValue response;
+      response["deleted"] = deleted;
+      return finish(0, response);
+    }
+    if (operation_name == "storage.list") {
+      const std::string prefix = request["prefix"].AsString().ToStdString();
+      if ((!prefix.empty() && !IsSafeName(prefix)) || prefix.size() > 128)
+        return fail(-5, "invalid-prefix",
+                    "private storage prefix is invalid");
+      wxJSONValue response(wxJSONTYPE_ARRAY);
+      std::error_code error;
+      std::vector<std::string> names;
+      for (fs::directory_iterator item(instance->private_root, error), end;
+           !error && item != end && names.size() < 4096; item.increment(error)) {
+        if (!item->is_regular_file(error)) continue;
+        const std::string candidate = item->path().filename().string();
+        if (!IsSafeName(candidate) || candidate.rfind(prefix, 0) != 0)
+          continue;
+        names.push_back(candidate);
+      }
+      if (error)
+        return fail(-8, "host-failure",
+                    "could not enumerate private storage");
+      std::sort(names.begin(), names.end());
+      for (const auto& name_value : names)
+        response.Append(wxString::FromUTF8(name_value));
+      return finish(0, response);
+    }
+    return fail(-9, "unsupported-operation",
+                "unknown private storage operation");
+  }
+
+  if (operation_name == "events.subscribe") {
+    CapabilityEventKind kind;
+    const std::string kind_name = request["kind"].AsString().ToStdString();
+    if (!ParseCapabilityEventKind(kind_name, &kind))
+      return fail(-5, "invalid-event", "event kind is invalid");
+    const char* permission = CapabilityEventPermission(kind);
+    if (!permission || !instance->owner->Permitted(*instance, permission))
+      return fail(-4, "permission-denied",
+                  "event subscription permission was not granted");
+    CapabilityEventSubscription subscription;
+    subscription.package_id = instance->id;
+    subscription.kind = kind;
+    subscription.topic_prefix =
+        request["topic_prefix"].AsString().ToStdString();
+    subscription.queue_limit = static_cast<std::size_t>(
+        std::max<long>(1, request["queue_limit"].AsLong()));
+    std::string diagnostic;
+    std::uint64_t id = 0;
+    if (!instance->owner->events.Subscribe(subscription, &diagnostic, &id))
+      return fail(-6, "subscription-rejected", diagnostic);
+    wxJSONValue response;
+    response["subscription_id"] = static_cast<wxLongLong_t>(id);
+    return finish(0, response);
+  }
+  if (operation_name == "events.unsubscribe") {
+    const std::uint64_t id =
+        static_cast<std::uint64_t>(request["subscription_id"].AsLong());
+    if (id == 0 || !instance->owner->events.Unsubscribe(instance->id, id))
+      return fail(-6, "not-found", "event subscription was not found");
+    return finish(0, wxJSONValue(wxJSONTYPE_OBJECT));
+  }
+
+  if (operation_name == "timers.schedule" ||
+      operation_name == "timers.cancel") {
+    if (!instance->owner->Permitted(*instance, "timers.schedule"))
+      return fail(-4, "permission-denied",
+                  "timer scheduling permission was not granted");
+    const std::string timer_id =
+        request["timer_id"].AsString().ToStdString();
+    if (!IsSafeName(timer_id))
+      return fail(-5, "invalid-timer", "timer identifier is invalid");
+    const TimerKey key{instance->id, timer_id};
+    if (operation_name == "timers.cancel") {
+      bool cancelled = false;
+      {
+        std::lock_guard<std::mutex> lock(instance->owner->timer_mutex);
+        cancelled = instance->owner->timers.erase(key) != 0;
+      }
+      instance->owner->timer_changed.notify_all();
+      wxJSONValue response;
+      response["cancelled"] = cancelled;
+      return finish(0, response);
+    }
+
+    const long delay_value = request["delay_milliseconds"].AsLong();
+    const bool repeating = !request["repeat_milliseconds"].IsNull();
+    const long repeat_value =
+        repeating ? request["repeat_milliseconds"].AsLong() : 0;
+    if (delay_value < static_cast<long>(kMinimumTimerMilliseconds) ||
+        delay_value > static_cast<long>(kMaximumTimerMilliseconds) ||
+        (repeating &&
+         (repeat_value < static_cast<long>(kMinimumTimerMilliseconds) ||
+          repeat_value > static_cast<long>(kMaximumTimerMilliseconds)))) {
+      return fail(-5, "invalid-timer",
+                  "timer interval is outside the 50 ms to 24 hour policy");
+    }
+    {
+      std::lock_guard<std::mutex> lock(instance->owner->timer_mutex);
+      std::size_t owned = 0;
+      for (const auto& [candidate, ignored] : instance->owner->timers) {
+        if (candidate.package_id == instance->id) ++owned;
+      }
+      if (instance->owner->timers.count(key) == 0 &&
+          owned >= kTimerLimitPerPackage) {
+        return fail(-7, "resource-limit",
+                    "package already owns the maximum number of timers");
+      }
+      TimerRegistration timer;
+      timer.instance = instance;
+      timer.generation = instance->executor.Generation();
+      timer.due = std::chrono::steady_clock::now() +
+                  std::chrono::milliseconds(delay_value);
+      timer.scheduled_unix_milliseconds =
+          UnixMillisecondsNow() + delay_value;
+      timer.repeat_milliseconds =
+          repeating ? static_cast<std::uint32_t>(repeat_value) : 0;
+      instance->owner->timers[key] = timer;
+    }
+    instance->owner->timer_changed.notify_all();
+    return finish(0, wxJSONValue(wxJSONTYPE_OBJECT));
+  }
+
+  if (operation_name.rfind("rpc.", 0) == 0) {
+    const bool registration = operation_name == "rpc.register" ||
+                              operation_name == "rpc.unregister";
+    if (registration &&
+        !instance->owner->Permitted(*instance, "plugin.rpc.provide"))
+      return fail(-4, "permission-denied",
+                  "RPC provider permission was not granted");
+    if (operation_name == "rpc.request" &&
+        !instance->owner->Permitted(*instance, "plugin.rpc.request"))
+      return fail(-4, "permission-denied",
+                  "RPC request permission was not granted");
+    if (operation_name == "rpc.respond" &&
+        !instance->owner->Permitted(*instance, "plugin.rpc.provide"))
+      return fail(-4, "permission-denied",
+                  "RPC provider permission was not granted");
+
+    if (registration) {
+      const std::string service =
+          request["service"].AsString().ToStdString();
+      if (!IsSafeName(service))
+        return fail(-5, "invalid-service",
+                    "RPC service identifier is invalid");
+      std::lock_guard<std::mutex> lock(instance->owner->rpc_mutex);
+      if (operation_name == "rpc.unregister") {
+        const auto found = instance->owner->rpc_services.find(service);
+        if (found == instance->owner->rpc_services.end() ||
+            found->second != instance->id) {
+          return fail(-6, "not-found", "RPC service is not registered");
+        }
+        instance->owner->rpc_services.erase(found);
+        return finish(0, wxJSONValue(wxJSONTYPE_OBJECT));
+      }
+      std::size_t owned = 0;
+      for (const auto& [ignored, package] :
+           instance->owner->rpc_services) {
+        if (package == instance->id) ++owned;
+      }
+      const auto found = instance->owner->rpc_services.find(service);
+      if (found != instance->owner->rpc_services.end() &&
+          found->second != instance->id)
+        return fail(-8, "already-registered",
+                    "RPC service is owned by another package");
+      if (found == instance->owner->rpc_services.end() &&
+          owned >= kRpcServiceLimitPerPackage)
+        return fail(-7, "resource-limit",
+                    "package already provides the maximum number of services");
+      instance->owner->rpc_services[service] = instance->id;
+      return finish(0, wxJSONValue(wxJSONTYPE_OBJECT));
+    }
+
+    const std::string target_package =
+        request["target_package"].AsString().ToStdString();
+    if (!IsPackageId(wxString::FromUTF8(target_package)))
+      return fail(-5, "invalid-target", "RPC target package is invalid");
+    Instance* target = instance->owner->Find(target_package);
+    if (!target || !target->enabled || target->failed ||
+        target->portable_api != OCPN_PORTABLE_API_V03)
+      return fail(-6, "target-unavailable",
+                  "RPC target package is not enabled for API 0.3", true);
+
+    if (operation_name == "rpc.request") {
+      wxJSONValue rpc = request["request"];
+      const std::string correlation_id =
+          rpc["correlation_id"].AsString().ToStdString();
+      const std::string service =
+          rpc["service"].AsString().ToStdString();
+      const std::string method =
+          rpc["method"].AsString().ToStdString();
+      const std::string content_type =
+          rpc["content_type"].AsString().ToStdString();
+      const std::string payload =
+          rpc["payload_base64"].AsString().ToStdString();
+      const long timeout = rpc["timeout_milliseconds"].AsLong();
+      if (!IsSafeName(correlation_id) || !IsSafeName(service) ||
+          !IsSafeName(method) || content_type.empty() ||
+          content_type.size() > 128 ||
+          payload.size() > (kRpcPayloadLimit * 4 / 3 + 8) ||
+          timeout < static_cast<long>(kRpcMinimumTimeoutMilliseconds) ||
+          timeout > static_cast<long>(kRpcMaximumTimeoutMilliseconds)) {
+        return fail(-5, "invalid-request", "RPC request is invalid");
+      }
+      const RpcCallKey call_key{instance->id, correlation_id};
+      {
+        std::lock_guard<std::mutex> lock(instance->owner->rpc_mutex);
+        const auto service_owner =
+            instance->owner->rpc_services.find(service);
+        if (service_owner == instance->owner->rpc_services.end() ||
+            service_owner->second != target_package)
+          return fail(-6, "service-unavailable",
+                      "RPC target does not provide the requested service",
+                      true);
+        std::size_t outstanding = 0;
+        for (const auto& [key, ignored] : instance->owner->rpc_calls) {
+          if (key.source_package == instance->id) ++outstanding;
+        }
+        if (instance->owner->rpc_calls.count(call_key) != 0)
+          return fail(-8, "duplicate-correlation",
+                      "RPC correlation identifier is already outstanding");
+        if (outstanding >= kRpcOutstandingLimitPerPackage)
+          return fail(-7, "resource-limit",
+                      "package already has too many outstanding RPC calls");
+        instance->owner->rpc_calls.emplace(
+            call_key,
+            RpcCall{instance, instance->executor.Generation(),
+                    target_package, service,
+                    std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(timeout)});
+      }
+      const std::string encoded = JsonText(rpc);
+      const std::uint64_t generation = target->executor.Generation();
+      const auto posted = target->executor.Post(
+          generation,
+          [target, source = instance->id, encoded](std::uint64_t token) {
+            if (!target->enabled || target->failed ||
+                target->executor.Generation() != token)
+              return;
+            std::lock_guard<std::mutex> lock(target->runtime_mutex);
+            if (!target->runtime) return;
+            std::array<char, kErrorCapacity> error{};
+            if (ocpn_portable_runtime_on_rpc_request(
+                    target->runtime, source.data(), source.size(),
+                    encoded.data(), encoded.size(), error.data(),
+                    error.size()) != 0) {
+              wxLogWarning(
+                  "PPM RPC request handler failed target=%s diagnostic=%s",
+                  target->id, error.data());
+            }
+          });
+      if (posted != SerialExecutor::PostResult::kAccepted) {
+        std::lock_guard<std::mutex> lock(instance->owner->rpc_mutex);
+        instance->owner->rpc_calls.erase(call_key);
+        return fail(-10, "target-busy",
+                    "RPC target queue is unavailable", true);
+      }
+      instance->owner->timer_changed.notify_all();
+      return finish(0, wxJSONValue(wxJSONTYPE_OBJECT));
+    }
+
+    wxJSONValue rpc = request["response"];
+    const std::string correlation_id =
+        rpc["correlation_id"].AsString().ToStdString();
+    const long status = rpc["status"].AsLong();
+    const std::string content_type =
+        rpc["content_type"].AsString().ToStdString();
+    const std::string payload =
+        rpc["payload_base64"].AsString().ToStdString();
+    const std::string response_diagnostic =
+        rpc["diagnostic"].AsString().ToStdString();
+    if (!IsSafeName(correlation_id) || status < 0 || status > 65'535 ||
+        content_type.empty() || content_type.size() > 128 ||
+        payload.size() > (kRpcPayloadLimit * 4 / 3 + 8) ||
+        response_diagnostic.size() > kErrorCapacity)
+      return fail(-5, "invalid-response",
+                  "RPC response is invalid or exceeds host policy");
+    const RpcCallKey call_key{target_package, correlation_id};
+    {
+      std::lock_guard<std::mutex> lock(instance->owner->rpc_mutex);
+      const auto call = instance->owner->rpc_calls.find(call_key);
+      if (call == instance->owner->rpc_calls.end() ||
+          call->second.target_package != instance->id)
+        return fail(-6, "not-found",
+                    "matching outstanding RPC request was not found");
+      instance->owner->rpc_calls.erase(call);
+    }
+    const std::string encoded = JsonText(rpc);
+    const std::uint64_t generation = target->executor.Generation();
+    const auto posted = target->executor.Post(
+        generation,
+        [target, source = instance->id, encoded](std::uint64_t token) {
+          if (!target->enabled || target->failed ||
+              target->executor.Generation() != token)
+            return;
+          std::lock_guard<std::mutex> lock(target->runtime_mutex);
+          if (!target->runtime) return;
+          std::array<char, kErrorCapacity> error{};
+          if (ocpn_portable_runtime_on_rpc_response(
+                  target->runtime, source.data(), source.size(),
+                  encoded.data(), encoded.size(), error.data(),
+                  error.size()) != 0) {
+            wxLogWarning(
+                "PPM RPC response handler failed target=%s diagnostic=%s",
+                target->id, error.data());
+          }
+        });
+    if (posted != SerialExecutor::PostResult::kAccepted)
+      return fail(-10, "target-busy",
+                  "RPC response target queue is unavailable", true);
+    return finish(0, wxJSONValue(wxJSONTYPE_OBJECT));
+  }
+
+  const bool action_operation = operation_name.rfind("actions.", 0) == 0;
+  const bool navigation_read =
+      operation_name == "navigation.list" ||
+      operation_name == "navigation.get";
+  const bool navigation_write = operation_name == "navigation.mutate";
+  const bool navigation_output =
+      operation_name == "navigation.send-nmea0183";
+  if (action_operation &&
+      !instance->owner->Permitted(*instance, "ui.commands"))
+    return fail(-4, "permission-denied",
+                "command registration permission was not granted");
+  if (navigation_read &&
+      !instance->owner->Permitted(*instance, "navigation.objects.read"))
+    return fail(-4, "permission-denied",
+                "navigation object read permission was not granted");
+  if (navigation_write &&
+      !instance->owner->Permitted(*instance, "navigation.objects.write") &&
+      !instance->owner->Permitted(*instance, "navigation.routes.write"))
+    return fail(-4, "permission-denied",
+                "navigation object write permission was not granted");
+  if (navigation_output &&
+      !instance->owner->Permitted(*instance, "navigation.nmea.write"))
+    return fail(-4, "permission-denied",
+                "NMEA output permission was not granted");
+  if (action_operation || navigation_read || navigation_write ||
+      navigation_output) {
+    if (!instance->owner->author_ui_request)
+      return fail(-10, "service-unavailable",
+                  "the OpenCPN UI service is unavailable");
+    auto status = std::make_shared<std::int32_t>(-10);
+    auto response = std::make_shared<std::string>();
+    const bool completed = instance->owner->RunUiService(
+        [owner = instance->owner, package_id = instance->id, operation_name,
+         request_text, status, response]() {
+          *status = owner->author_ui_request(package_id, operation_name,
+                                             request_text, response.get());
+        },
+        std::chrono::seconds(30));
+    if (!completed)
+      return fail(-11, "timeout",
+                  "OpenCPN did not complete the requested UI operation",
+                  true);
+    wxJSONValue value;
+    if (response->empty()) {
+      value = wxJSONValue(wxJSONTYPE_OBJECT);
+    } else {
+      wxJSONReader reader;
+      if (reader.Parse(wxString::FromUTF8(*response), &value) != 0)
+        return fail(-12, "invalid-host-response",
+                    "OpenCPN returned invalid author-service JSON");
+    }
+    const std::int32_t host_status = *status;
+    if (host_status == 0 && operation_name == "actions.unregister") {
+      const std::string action_id =
+          request["action_id"].AsString().ToStdString();
+      instance->registered_actions.erase(
+          std::remove_if(instance->registered_actions.begin(),
+                         instance->registered_actions.end(),
+                         [&](const RuntimeAction& action) {
+                           return action.action_id == action_id;
+                         }),
+          instance->registered_actions.end());
+    }
+    return finish(host_status, value);
+  }
+
+  return fail(-9, "unsupported-operation",
+              "the requested API 0.3 author service is not implemented");
+}
+
 RuntimeEngine::Impl::Instance* RuntimeEngine::Impl::Find(
     const std::string& package_id) {
   const auto item =
@@ -1740,6 +2830,7 @@ bool RuntimeEngine::Impl::Start(Instance& instance, std::string* diagnostic) {
     callbacks.user_file_write = UserFileWrite;
     callbacks.send_plugin_message = SendPluginMessage;
     callbacks.charts_query_final_safety = ChartsQueryFinalSafety;
+    callbacks.author_service_call = AuthorServiceCall;
     instance.runtime =
         ocpn_portable_runtime_create(instance.component_path.c_str(),
                                      &callbacks, instance.portable_api,
@@ -1826,6 +2917,8 @@ bool RuntimeEngine::Impl::Stop(Instance& instance, bool destroy,
   instance.routing_cancelled = true;
   const bool was_enabled = instance.enabled.exchange(false);
   instance.executor.AdvanceGeneration();
+  CancelPackageTimers(instance.id);
+  ClearPackageRpc(instance.id);
   events.ClearPending(instance.id);
   instance.event_pump_scheduled = false;
   jobs.CancelOwner(instance.id);
@@ -1913,6 +3006,7 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
   const wxString portable_api = manifest["portable_api"].AsString();
   const bool portable_api_v01 = portable_api == ">=0.1.0 <0.2.0";
   const bool portable_api_v02 = portable_api == ">=0.2.0 <0.3.0";
+  const bool portable_api_v03 = portable_api == ">=0.3.0 <0.4.0";
   const wxString portable_world =
       manifest["portable_world"].IsString()
           ? manifest["portable_world"].AsString()
@@ -1931,9 +3025,12 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
   if (!typed || !IsPackageId(id) || name.empty() ||
       !IsSemanticVersion(version) || !SafeRelativePath(component) ||
       manifest["runtime"].AsString() != ">=0.1.0 <0.2.0" ||
-      (!portable_api_v01 && !portable_api_v02) || !supported_world ||
+      (!portable_api_v01 && !portable_api_v02 && !portable_api_v03) ||
+      !supported_world ||
       (portable_api_v01 && portable_world != "plugin") ||
-      (portable_api_v02 && !manifest["portable_world"].IsString()) ||
+      ((portable_api_v02 || portable_api_v03) &&
+       !manifest["portable_world"].IsString()) ||
+      (portable_api_v03 && portable_world != "plugin") ||
       root.filename() != id.ToStdString()) {
     if (diagnostic) *diagnostic = "incompatible installed package";
     wxLogError("PPM incompatible installed package at %s", root.string());
@@ -1950,7 +3047,10 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
       (root / component.ToStdString()).lexically_normal();
   instance->private_root = storage_root / "data" / instance->id;
   instance->portable_api =
-      portable_api_v02 ? OCPN_PORTABLE_API_V02 : OCPN_PORTABLE_API_V01;
+      portable_api_v03
+          ? OCPN_PORTABLE_API_V03
+          : (portable_api_v02 ? OCPN_PORTABLE_API_V02
+                              : OCPN_PORTABLE_API_V01);
   instance->portable_world =
       portable_world == "weather-routing-plugin"
           ? OCPN_PORTABLE_WORLD_WEATHER_ROUTING
@@ -2303,6 +3403,8 @@ void RuntimeEngine::Impl::Fail(Instance& instance, const std::string& operation,
   instance.enabled = false;
   instance.routing_cancelled = true;
   instance.executor.AdvanceGeneration();
+  CancelPackageTimers(instance.id);
+  ClearPackageRpc(instance.id);
   jobs.CancelOwner(instance.id);
   WaitForRoute(instance.id, std::chrono::seconds(10));
   {
@@ -2560,6 +3662,10 @@ void RuntimeEngine::SetPluginMessageSender(PluginMessageSender callback) {
   impl_->SetPluginMessageSender(std::move(callback));
 }
 
+void RuntimeEngine::SetAuthorUiRequestCallback(AuthorUiRequest callback) {
+  impl_->SetAuthorUiRequestCallback(std::move(callback));
+}
+
 bool RuntimeEngine::RefreshPackage(const std::string& package_id,
                                    bool developer_mode,
                                    std::string* diagnostic) {
@@ -2674,20 +3780,188 @@ bool RuntimeEngine::WaitForIdle(const std::string& package_id,
 }
 
 void RuntimeEngine::SetPositionFix(const PlugIn_Position_Fix_Ex& fix) {
-  std::lock_guard<std::mutex> lock(impl_->position_mutex);
-  impl_->position_valid = std::isfinite(fix.Lat) && std::isfinite(fix.Lon) &&
-                          fix.Lat >= -90.0 && fix.Lat <= 90.0 &&
-                          fix.Lon >= -180.0 && fix.Lon <= 180.0;
-  impl_->latitude = fix.Lat;
-  impl_->longitude = fix.Lon;
-  impl_->has_cog = std::isfinite(fix.Cog);
-  impl_->has_sog = std::isfinite(fix.Sog);
-  impl_->cog = impl_->has_cog ? fix.Cog : 0.0;
-  impl_->sog = impl_->has_sog ? fix.Sog : 0.0;
+  const bool valid = std::isfinite(fix.Lat) && std::isfinite(fix.Lon) &&
+                     fix.Lat >= -90.0 && fix.Lat <= 90.0 &&
+                     fix.Lon >= -180.0 && fix.Lon <= 180.0;
+  {
+    std::lock_guard<std::mutex> lock(impl_->position_mutex);
+    impl_->position_valid = valid;
+    impl_->latitude = fix.Lat;
+    impl_->longitude = fix.Lon;
+    impl_->has_cog = std::isfinite(fix.Cog);
+    impl_->has_sog = std::isfinite(fix.Sog);
+    impl_->cog = impl_->has_cog ? fix.Cog : 0.0;
+    impl_->sog = impl_->has_sog ? fix.Sog : 0.0;
+  }
+  if (valid) {
+    wxJSONValue payload;
+    payload["latitude"] = fix.Lat;
+    payload["longitude"] = fix.Lon;
+    if (std::isfinite(fix.Cog))
+      payload["course_over_ground"] = fix.Cog;
+    else
+      payload["course_over_ground"] = wxJSONValue(wxJSONTYPE_NULL);
+    if (std::isfinite(fix.Sog))
+      payload["speed_over_ground"] = fix.Sog;
+    else
+      payload["speed_over_ground"] = wxJSONValue(wxJSONTYPE_NULL);
+    payload["fix_unix_time"] = static_cast<wxLongLong_t>(fix.FixTime);
+    payload["satellites"] = fix.nSats;
+    impl_->PublishCapabilityEvent({CapabilityEventKind::kNavigationPosition,
+                                   "vessel", JsonText(payload)});
+  }
+}
+
+void RuntimeEngine::SetCursorPosition(double latitude, double longitude) {
+  if (!std::isfinite(latitude) || !std::isfinite(longitude) ||
+      std::abs(latitude) > 90.0 || std::abs(longitude) > 180.0)
+    return;
+  wxJSONValue payload;
+  payload["latitude"] = latitude;
+  payload["longitude"] = longitude;
+  impl_->PublishCapabilityEvent(
+      {CapabilityEventKind::kCursor, "chart", JsonText(payload)});
+}
+
+void RuntimeEngine::SetViewport(double west, double south, double east,
+                                double north, double scale_ppm,
+                                double rotation, int canvas_index) {
+  if (!std::isfinite(west) || !std::isfinite(south) ||
+      !std::isfinite(east) || !std::isfinite(north) ||
+      !std::isfinite(scale_ppm) || !std::isfinite(rotation) ||
+      west >= east || south >= north)
+    return;
+  wxJSONValue payload;
+  payload["west"] = west;
+  payload["south"] = south;
+  payload["east"] = east;
+  payload["north"] = north;
+  payload["scale_pixels_per_metre"] = scale_ppm;
+  payload["rotation_radians"] = rotation;
+  payload["canvas_index"] = canvas_index;
+  impl_->PublishCapabilityEvent(
+      {CapabilityEventKind::kViewport, std::to_string(canvas_index),
+       JsonText(payload)});
+}
+
+void RuntimeEngine::SetActiveLeg(double cross_track_error_nm,
+                                 double bearing_degrees, double distance_nm,
+                                 const std::string& waypoint_name,
+                                 bool arrival) {
+  if (!std::isfinite(cross_track_error_nm) ||
+      !std::isfinite(bearing_degrees) || !std::isfinite(distance_nm))
+    return;
+  wxJSONValue payload;
+  payload["cross_track_error_nm"] = cross_track_error_nm;
+  payload["bearing_degrees_true"] = bearing_degrees;
+  payload["distance_nm"] = distance_nm;
+  payload["waypoint_name"] = wxString::FromUTF8(waypoint_name);
+  payload["arrival"] = arrival;
+  impl_->PublishCapabilityEvent(
+      {CapabilityEventKind::kActiveLeg, waypoint_name, JsonText(payload)});
 }
 
 void RuntimeEngine::DeliverNavigationSentence(const std::string& sentence) {
   impl_->DeliverNavigationSentence(sentence);
+}
+
+void RuntimeEngine::DeliverNmea2000(
+    std::uint32_t pgn, const std::string& source,
+    const std::vector<std::uint8_t>& payload) {
+  if (pgn == 0 || payload.empty() || payload.size() > 2048 ||
+      source.size() > 256)
+    return;
+  static constexpr char kHex[] = "0123456789abcdef";
+  std::string encoded;
+  encoded.reserve(payload.size() * 2);
+  for (const std::uint8_t byte : payload) {
+    encoded.push_back(kHex[byte >> 4]);
+    encoded.push_back(kHex[byte & 0x0f]);
+  }
+  wxJSONValue value;
+  value["pgn"] = static_cast<long>(pgn);
+  value["source"] = wxString::FromUTF8(source);
+  value["payload_hex"] = wxString::FromUTF8(encoded);
+  impl_->PublishCapabilityEvent(
+      {CapabilityEventKind::kNmea2000, "pgn/" + std::to_string(pgn),
+       JsonText(value)});
+}
+
+void RuntimeEngine::DeliverAisSentence(const std::string& sentence) {
+  if (sentence.empty() || sentence.size() > 1024) return;
+  const std::size_t topic_end = sentence.find_first_of(",*");
+  impl_->PublishCapabilityEvent(
+      {CapabilityEventKind::kAisTarget,
+       sentence.substr(0, std::min(topic_end, sentence.size())), sentence});
+}
+
+void RuntimeEngine::DeliverSignalK(const std::string& payload) {
+  if (payload.empty() || payload.size() > 64 * 1024) return;
+  impl_->PublishCapabilityEvent(
+      {CapabilityEventKind::kSignalK, "OCPN_CORE_SIGNALK", payload});
+}
+
+bool RuntimeEngine::DeliverPointerEvent(
+    std::uint32_t kind, std::uint32_t button, std::uint32_t canvas_index,
+    std::int32_t x_pixels, std::int32_t y_pixels, double latitude,
+    double longitude, bool has_position, std::int32_t wheel_rotation,
+    std::uint32_t modifiers, const std::string& hit_package_id,
+    const std::string& hit_scene_id, const std::string& hit_primitive_id) {
+  for (auto& item : impl_->instances) {
+    auto& instance = *item;
+    if (!instance.enabled || instance.failed || !instance.runtime ||
+        instance.portable_api != OCPN_PORTABLE_API_V03 ||
+        !impl_->Permitted(instance, "chart.input.pointer"))
+      continue;
+    std::lock_guard<std::mutex> lock(instance.runtime_mutex);
+    std::array<char, kErrorCapacity> error{};
+    std::uint8_t handled = 0;
+    const bool owns_hit = hit_package_id == instance.id;
+    const int status = ocpn_portable_runtime_on_pointer_event(
+        instance.runtime, kind, button, canvas_index, x_pixels, y_pixels,
+        latitude, longitude, has_position ? 1U : 0U, wheel_rotation, modifiers,
+        owns_hit ? hit_scene_id.data() : nullptr,
+        owns_hit ? hit_scene_id.size() : 0,
+        owns_hit ? hit_primitive_id.data() : nullptr,
+        owns_hit ? hit_primitive_id.size() : 0, &handled, error.data(),
+        error.size());
+    if (status != 0) {
+      impl_->Fail(instance, "pointer event",
+                  error[0] ? error.data()
+                           : "portable pointer event failed");
+    } else if (handled != 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool RuntimeEngine::DeliverKeyEvent(std::uint32_t key_code,
+                                    std::uint32_t unicode, bool has_unicode,
+                                    bool pressed, bool repeat,
+                                    std::uint32_t modifiers) {
+  for (auto& item : impl_->instances) {
+    auto& instance = *item;
+    if (!instance.enabled || instance.failed || !instance.runtime ||
+        instance.portable_api != OCPN_PORTABLE_API_V03 ||
+        !impl_->Permitted(instance, "chart.input.keyboard"))
+      continue;
+    std::lock_guard<std::mutex> lock(instance.runtime_mutex);
+    std::array<char, kErrorCapacity> error{};
+    std::uint8_t handled = 0;
+    const int status = ocpn_portable_runtime_on_key_event(
+        instance.runtime, key_code, unicode, has_unicode ? 1U : 0U,
+        pressed ? 1U : 0U, repeat ? 1U : 0U, modifiers, &handled,
+        error.data(), error.size());
+    if (status != 0) {
+      impl_->Fail(instance, "keyboard event",
+                  error[0] ? error.data()
+                           : "portable keyboard event failed");
+    } else if (handled != 0) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void RuntimeEngine::DeliverPluginMessage(const std::string& message_id,

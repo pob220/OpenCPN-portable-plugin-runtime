@@ -1,0 +1,30 @@
+{
+  "format_version": 1,
+  "id": "org.opencpn.portable-template",
+  "name": "Portable Plugin Template",
+  "version": "0.1.0",
+  "description": "Minimal API 0.3 portable plugin author template",
+  "component": "component/portable-plugin-template.wasm",
+  "runtime": ">=0.1.0 <0.2.0",
+  "portable_api": ">=0.3.0 <0.4.0",
+  "portable_world": "plugin",
+  "surfaces": {
+    "template.main": "ui/template.ui.json"
+  },
+  "event_subscriptions": [],
+  "permissions": [
+    "ui.commands",
+    "settings.read-write",
+    "storage.private",
+    "overlay.submit",
+    "timers.schedule",
+    "plugin.rpc.provide"
+  ],
+  "resources": [
+    "ui/template.ui.json"
+  ],
+  "licenses": [
+    "GPL-2.0-or-later"
+  ],
+  "development": true
+}

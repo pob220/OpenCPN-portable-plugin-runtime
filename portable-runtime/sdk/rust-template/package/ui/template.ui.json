@@ -1,0 +1,24 @@
+{
+  "schema": "org.opencpn.portable-ui/0.2",
+  "surface": "template.main",
+  "role": "portable-plugin-template",
+  "kind": "modeless-window",
+  "title": "Portable Plugin Template",
+  "controls": [
+    {
+      "id": "template-status",
+      "type": "status",
+      "label": "Status"
+    },
+    {
+      "id": "hello",
+      "type": "button",
+      "label": "Exercise surface callback"
+    },
+    {
+      "id": "refresh",
+      "type": "button",
+      "label": "Refresh"
+    }
+  ]
+}

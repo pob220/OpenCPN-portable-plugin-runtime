@@ -11,10 +11,12 @@ Most packages select `plugin-world`; route engines select the strictly larger
 `weather-routing-plugin-world`. The runtime's bounded capability event broker
 feeds both the `0.1` compatibility adapter and the typed `0.2` sinks.
 
-Subscriptions remain signed manifest declarations. `events.wit` reserves the
-shape of a future dynamic subscription service, but it is intentionally not
-imported by either current world until ownership, revocation and shutdown
-semantics are finalised.
+`0.3` is the general plugin-author profile. It adds stateful toolbar and chart
+context actions, host-owned declarative surfaces, scoped files, bounded
+navigation-object access, retained multi-primitive scenes, pointer/key input,
+timers, validated NMEA output, dynamic subscriptions and asynchronous typed
+plugin RPC. Dynamic subscriptions are owned by the enabled package generation
+and are revoked on disable, failure or unload.
 
 `chart-safety` is a host-owned, renderer-independent service. Portable route
 engines submit value-only segment geometry and vessel clearance requirements;
@@ -23,5 +25,8 @@ coverage assessments. A coastline fallback is explicitly distinguishable
 from authoritative vector/CM93 chart semantics.
 
 The complete versioned WIT directory is shipped in each reference package.
-Installed manifests select either `>=0.1.0 <0.2.0` or
-`>=0.2.0 <0.3.0`; API 0.2 manifests must also declare their world.
+Installed manifests select exactly one compatible major-minor range:
+`>=0.1.0 <0.2.0`, `>=0.2.0 <0.3.0`, or `>=0.3.0 <0.4.0`. API `0.2` and
+`0.3` manifests must declare their world. The bridge keeps all three versions
+side by side; adding `0.3` does not reinterpret an installed `0.1` or `0.2`
+component.

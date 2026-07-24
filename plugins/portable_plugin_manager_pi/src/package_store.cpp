@@ -585,6 +585,7 @@ bool ValidateManifestFields(ValidatedArchive* validated,
   const wxString portable_api = manifest["portable_api"].AsString();
   const bool portable_api_v01 = portable_api == ">=0.1.0 <0.2.0";
   const bool portable_api_v02 = portable_api == ">=0.2.0 <0.3.0";
+  const bool portable_api_v03 = portable_api == ">=0.3.0 <0.4.0";
   const wxString portable_world =
       manifest["portable_world"].IsString()
           ? manifest["portable_world"].AsString()
@@ -597,9 +598,12 @@ bool ValidateManifestFields(ValidatedArchive* validated,
       !IsSemanticVersion(validated->version) || validated->name.empty() ||
       validated->name.size() > 256 ||
       manifest["runtime"].AsString() != ">=0.1.0 <0.2.0" ||
-      (!portable_api_v01 && !portable_api_v02) || !valid_world ||
+      (!portable_api_v01 && !portable_api_v02 && !portable_api_v03) ||
+      !valid_world ||
       (portable_api_v01 && portable_world != "plugin") ||
-      (portable_api_v02 && !manifest["portable_world"].IsString()) ||
+      ((portable_api_v02 || portable_api_v03) &&
+       !manifest["portable_world"].IsString()) ||
+      (portable_api_v03 && portable_world != "plugin") ||
       !CheckedArchivePath(manifest["component"].AsString().utf8_str(),
                           &component, diagnostic) ||
       validated->entries.count(component) == 0 ||

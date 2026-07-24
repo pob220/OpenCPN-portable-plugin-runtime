@@ -147,6 +147,44 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  add_test(NAME ppm_portable_sdk_tooling
+           COMMAND "${Python3_EXECUTABLE}"
+                   "${PPM_RUNTIME_SOURCE_DIR}/sdk/tests/tooling_test.py")
+
+  set(PPM_SDK_TEMPLATE_DIR
+      "${PPM_RUNTIME_SOURCE_DIR}/sdk/rust-template")
+  set(PPM_SDK_TEMPLATE_TARGET_DIR
+      "${CMAKE_CURRENT_BINARY_DIR}/sdk-template-target")
+  set(PPM_SDK_TEMPLATE_COMPONENT
+      "${PPM_SDK_TEMPLATE_TARGET_DIR}/wasm32-wasip2/release/portable_plugin_template.wasm")
+  file(GLOB_RECURSE PPM_SDK_TEMPLATE_SOURCES CONFIGURE_DEPENDS
+    "${PPM_SDK_TEMPLATE_DIR}/src/*.rs"
+    "${PPM_RUNTIME_SOURCE_DIR}/contracts/0.3/*.wit")
+  add_custom_command(
+    OUTPUT "${PPM_SDK_TEMPLATE_COMPONENT}"
+    COMMAND ${CMAKE_COMMAND} -E env
+            "CARGO_TARGET_DIR=${PPM_SDK_TEMPLATE_TARGET_DIR}"
+            "${PPM_CARGO_EXECUTABLE}" build --locked --offline --release
+            --target wasm32-wasip2
+            --manifest-path "${PPM_SDK_TEMPLATE_DIR}/Cargo.toml"
+    DEPENDS ${PPM_SDK_TEMPLATE_SOURCES}
+            "${PPM_SDK_TEMPLATE_DIR}/Cargo.toml"
+            "${PPM_SDK_TEMPLATE_DIR}/Cargo.lock"
+    COMMENT "Building the standalone API 0.3 author template"
+    VERBATIM)
+  add_custom_target(ppm_sdk_template_build
+                    DEPENDS "${PPM_SDK_TEMPLATE_COMPONENT}")
+  add_executable(ppm_portable_fake_host
+    "${PPM_RUNTIME_SOURCE_DIR}/sdk/fake-host/main.cpp")
+  target_include_directories(ppm_portable_fake_host PRIVATE
+    "${PPM_RUNTIME_SOURCE_DIR}/bridge/include")
+  target_link_libraries(ppm_portable_fake_host PRIVATE
+    ppm_runtime_bridge Threads::Threads ${CMAKE_DL_LIBS})
+  add_dependencies(ppm_portable_fake_host ppm_sdk_template_build)
+  add_test(NAME ppm_portable_api_v03_fake_host
+           COMMAND ppm_portable_fake_host "${PPM_SDK_TEMPLATE_COMPONENT}")
+
   add_executable(ppm_cm93_semantic_reader_test
     src/cm93_semantic_reader.cpp
     tests/cm93_semantic_reader_test.cpp
@@ -649,7 +687,7 @@ if(BUILD_TESTING)
     tests/runtime_engine_test.cpp
   )
   add_dependencies(ppm_runtime_engine_test ppm_test_igrib_component
-                   ppm_test_iweather_component)
+                   ppm_test_iweather_component ppm_sdk_template_build)
   target_include_directories(ppm_runtime_engine_test PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/include"
     "${OPENCPN_SOURCE_DIR}/include"
@@ -659,7 +697,9 @@ if(BUILD_TESTING)
     PPM_TEST_IGRIB_WASM="${PPM_TEST_IGRIB_WASM}"
     PPM_TEST_IGRIB_UI="${OPENCPN_SOURCE_DIR}/portable-plugins/igrib/package/igrib-viewer.ui.json"
     PPM_TEST_IWEATHER_WASM="${PPM_TEST_IWEATHER_WASM}"
-    PPM_TEST_IWEATHER_UI="${OPENCPN_SOURCE_DIR}/portable-plugins/iweather-routing/package/iweather-routing.ui.json")
+    PPM_TEST_IWEATHER_UI="${OPENCPN_SOURCE_DIR}/portable-plugins/iweather-routing/package/iweather-routing.ui.json"
+    PPM_TEST_API_V03_WASM="${PPM_SDK_TEMPLATE_COMPONENT}"
+    PPM_TEST_API_V03_UI="${PPM_RUNTIME_SOURCE_DIR}/sdk/rust-template/package/ui/template.ui.json")
   target_link_libraries(ppm_runtime_engine_test PRIVATE
     ${wxWidgets_LIBRARIES}
     ocpn::wxjson

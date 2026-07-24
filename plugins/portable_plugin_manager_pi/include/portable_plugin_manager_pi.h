@@ -3,7 +3,11 @@
 
 #include <memory>
 #include <atomic>
+#include <chrono>
+#include <deque>
 #include <map>
+#include <string>
+#include <vector>
 
 #include <wx/bitmap.h>
 
@@ -41,12 +45,17 @@ class PortablePluginManagerPi final : public opencpn_plugin_121 {
   wxString GetShortDescription() override;
   wxString GetLongDescription() override;
   void OnToolbarToolCallback(int id) override;
+  void OnContextMenuItemCallback(int id) override;
   void ShowPreferencesDialog(wxWindow* parent) override;
   void SetPositionFixEx(PlugIn_Position_Fix_Ex& fix) override;
   void SetNMEASentence(wxString& sentence) override;
+  void SetAISSentence(wxString& sentence) override;
+  void SetActiveLegInfo(Plugin_Active_Leg_Info& leg_info) override;
   void SetPluginMessage(wxString& message_id,
                         wxString& message_body) override;
   void SetCursorLatLon(double latitude, double longitude) override;
+  bool MouseEventHook(wxMouseEvent& event) override;
+  bool KeyboardEventHook(wxKeyEvent& event) override;
   bool RenderOverlayMultiCanvas(wxDC& dc, PlugIn_ViewPort* viewport,
                                 int canvas_index, int priority) override;
   bool RenderGLOverlayMultiCanvas(wxGLContext* context,
@@ -89,6 +98,24 @@ class PortablePluginManagerPi final : public opencpn_plugin_121 {
       const wxString& name,
       const std::vector<PortableNavigationPosition>& points,
       wxString* diagnostic);
+  int HandleAuthorUiRequest(const std::string& package_id,
+                            const std::string& operation,
+                            const std::string& request_json,
+                            std::string* response_json);
+  void HandleNmea2000(std::uint32_t pgn, ObservedEvt event);
+  void RefreshSceneHitRegions(PlugIn_ViewPort* viewport, int canvas_index);
+
+  struct SceneHitRegion {
+    std::string package_id;
+    std::string scene_id;
+    std::string primitive_id;
+    int canvas_index = 0;
+    int left = 0;
+    int top = 0;
+    int right = 0;
+    int bottom = 0;
+    int z_index = 0;
+  };
 
   ActionRegistry actions_;
   wxBitmap plugin_bitmap_;
@@ -117,6 +144,13 @@ class PortablePluginManagerPi final : public opencpn_plugin_121 {
   bool developer_opengl_overlay_logged_ = false;
   bool developer_mode_ = false;
   bool initialized_ = false;
+  std::map<std::string,
+           std::deque<std::chrono::steady_clock::time_point>>
+      nmea_output_history_;
+  std::vector<SceneHitRegion> scene_hit_regions_;
+  std::vector<std::shared_ptr<ObservableListener>> nmea2000_listeners_;
+  std::vector<wxEventType> nmea2000_event_types_;
+  std::unique_ptr<wxEvtHandler> nmea2000_handler_;
 };
 
 }  // namespace ppm

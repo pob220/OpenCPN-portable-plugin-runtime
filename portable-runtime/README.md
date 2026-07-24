@@ -1,12 +1,17 @@
 # Experimental OpenCPN portable-plugin runtime
 
-This directory implements the hybrid Component Model runtime, standalone
-iGRIB environmental provider and iWeatherRouting consumer for OpenCPN 5.14.0.
-It is compiled only with
-`OCPN_ENABLE_PORTABLE_PLUGINS=ON`; both the build flag and independent runtime
-setting default off. The existing native loader is unchanged.
+This directory contains the Component Model runtime, contracts, author SDK and
+reference portable packages used by the **Portable Plugin Manager**. The
+Manager is a conventional native OpenCPN plugin loaded by an otherwise stock
+OpenCPN 5.14.0 build. Portable support is therefore opt-in without modifying
+or replacing OpenCPN's native plugin loader.
 
-The proof embeds Wasmtime, negotiates a typed WIT world and provides actions,
+The earlier core-integrated prototype is retained in repository history and
+some historical test documents. The current runtime-host build and isolated
+profile procedure is documented in `tools/runtime-host/README.md`.
+
+The Manager embeds Wasmtime, negotiates versioned typed WIT worlds and
+provides actions,
 position values, namespaced settings/private storage, host HTTP, cancellable
 jobs, batched chart coverage, retained overlays and a host-rendered
 environmental UI. iWeatherRouting runs a bounded forward-isocrone,
@@ -53,18 +58,13 @@ cargo fetch --locked --manifest-path portable-runtime/bridge/Cargo.toml
 cargo fetch --locked --manifest-path portable-plugins/igrib/component/Cargo.toml
 cargo fetch --locked --manifest-path \
   portable-plugins/iweather-routing/component/Cargo.toml
-cmake -S . -B build-portable \
-  -DOCPN_ENABLE_PORTABLE_PLUGINS=ON \
-  -DOCPN_BUILD_TEST=ON \
-  -DOCPN_IGRIB_GENERATOR_HELPER=/path/to/environmental-grib
-cmake --build build-portable --parallel
-ctest --test-dir build-portable --output-on-failure -R '^portable_'
+tools/runtime-host/build-linux.sh
 ```
 
-The deterministic signed development packages are written below
-`build-portable/portable-runtime/packages/` as
-`org.opencpn.igrib-0.1.0.ocpnp` and
-`org.opencpn.iweather-routing-0.1.0.ocpnp`.
+The runtime-host workflow verifies that the OpenCPN source base is stock,
+builds the Manager and reference components, runs the conformance suites and
+installs deterministic development packages into the isolated RuntimeHost
+profile.
 
 ## Development install/update
 

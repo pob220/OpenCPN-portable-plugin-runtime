@@ -42,6 +42,11 @@ The following checks were run from the implementation worktree on 23 July
 | Weather route | Holyhead–Dún Laoghaire completes through reverse-isocrone recovery and independent chronological replay | runtime-tested |
 | Toolbar integration | Manager, iGRIB, iPolars and iWeatherRouting actions registered in a real stock OpenCPN session | GUI-tested |
 | Renderer integration | real iGRIB dataset overlay exercised through the dedicated OpenGL callback on 5.14 and the public wxDC/Vulkan presentation path on the separate 5.15 working build | GUI-tested |
+| API 0.3 author profile | SDK template runs through the production bridge fake host and real Manager lifecycle with actions, settings, surface state, retained scene, timer, storage and RPC registration | runtime-tested |
+
+The additional author-profile validation on 24 July 2026 completed all 20
+Portable Plugin Manager CTest cases, the three Rust bridge tests, SDK template
+build/lint and the three standalone SDK tooling tests.
 
 `tools/runtime-host/build-linux.sh` rebuilds stock OpenCPN, all reference
 packages and the independently owned Manager, runs native tests and installs

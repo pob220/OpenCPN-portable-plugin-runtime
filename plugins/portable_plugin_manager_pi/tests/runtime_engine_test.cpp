@@ -554,7 +554,108 @@ int main() {
     services.Shutdown();
   }
 
+  const std::string author_package_id = "org.opencpn.portable-template";
+  const fs::path author_root =
+      fs::temp_directory_path() /
+      fs::path("ppm api v03 author " + std::to_string(stamp));
+  const fs::path author_package_root =
+      author_root / "packages" / author_package_id;
+  fs::create_directories(author_package_root / "component", error);
+  CHECK(!error);
+  fs::copy_file(PPM_TEST_API_V03_WASM,
+                author_package_root / "component" /
+                    "portable-plugin-template.wasm",
+                fs::copy_options::overwrite_existing, error);
+  CHECK(!error);
+  fs::create_directories(author_package_root / "ui", error);
+  CHECK(!error);
+  fs::copy_file(PPM_TEST_API_V03_UI,
+                author_package_root / "ui" / "template.ui.json",
+                fs::copy_options::overwrite_existing, error);
+  CHECK(!error);
+  CHECK(Write(
+      author_package_root / "manifest.json",
+      "{"
+      "\"format_version\":1,"
+      "\"id\":\"org.opencpn.portable-template\","
+      "\"name\":\"Portable Plugin Template\","
+      "\"version\":\"0.1.0\","
+      "\"component\":\"component/portable-plugin-template.wasm\","
+      "\"runtime\":\">=0.1.0 <0.2.0\","
+      "\"portable_api\":\">=0.3.0 <0.4.0\","
+      "\"portable_world\":\"plugin\","
+      "\"surfaces\":{\"template.main\":\"ui/template.ui.json\"},"
+      "\"permissions\":[\"ui.commands\",\"settings.read-write\","
+      "\"storage.private\",\"overlay.submit\",\"timers.schedule\","
+      "\"plugin.rpc.provide\"],"
+      "\"development\":true"
+      "}"));
+  actions.clear();
+  std::atomic_int author_surfaces{0};
+  std::atomic_int author_responses{0};
+  {
+    ppm::RuntimeEngine author(author_root.string(), register_action,
+                              remove_actions, []() {},
+                              [&](std::function<void()> task) {
+                                ui_loop.Post(std::move(task));
+                              });
+    author.SetSurfaceOpenedCallback(
+        [&](const std::string& id,
+            const ppm::DeclarativeSurface& surface) {
+          if (id == author_package_id && surface.id == "template.main")
+            ++author_surfaces;
+        });
+    author.SetSurfaceResponseCallback(
+        [&](const std::string& id, const std::string& surface,
+            const std::string& control, const std::string& state,
+            const std::string&) {
+          if (id == author_package_id && surface == "template.main" &&
+              control == "hello" &&
+              state.find("API 0.3 surface callback is working") !=
+                  std::string::npos)
+            ++author_responses;
+        });
+    author.SetAuthorUiRequestCallback(
+        [&](const std::string& id, const std::string& operation,
+            const std::string&, std::string* response) {
+          if (id != author_package_id ||
+              (operation != "actions.set-state" &&
+               operation != "actions.unregister"))
+            return -1;
+          *response = "{}";
+          return 0;
+        });
+    CHECK(author.LoadInstalled(true));
+    std::string diagnostic;
+    CHECK(author.SetGrantedPermissions(
+        author_package_id, author.RequestedPermissions(author_package_id),
+        &diagnostic));
+    CHECK(author.Enable(author_package_id, &diagnostic));
+    CHECK(author.IsEnabled(author_package_id));
+    CHECK(actions.size() == 1);
+    const auto scenes = author.Scenes();
+    CHECK(scenes.size() == 1);
+    CHECK(scenes[0].layers.size() == 1);
+    CHECK(scenes[0].layers[0].primitives.size() == 1);
+    CHECK(scenes[0].layers[0].primitives[0].interactive);
+    CHECK(author.HandleAction(author_package_id, "template.hello"));
+    CHECK(author.WaitForIdle(author_package_id, std::chrono::seconds(2)));
+    CHECK(ui_loop.WaitIdle(std::chrono::seconds(2)));
+    CHECK(author_surfaces == 1);
+    CHECK(author.HandleSurfaceEvent(author_package_id, "template.main",
+                                    "hello", "{}"));
+    CHECK(author.WaitForIdle(author_package_id, std::chrono::seconds(2)));
+    CHECK(ui_loop.WaitIdle(std::chrono::seconds(2)));
+    CHECK(author_responses == 1);
+    CHECK(author.Disable(author_package_id, &diagnostic));
+    CHECK(!author.IsEnabled(author_package_id));
+    CHECK(author.Scenes().empty());
+    CHECK(actions.empty());
+    author.Shutdown();
+  }
+
   fs::remove_all(test_root, error);
   fs::remove_all(dependency_root, error);
+  fs::remove_all(author_root, error);
   return 0;
 }

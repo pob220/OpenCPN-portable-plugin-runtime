@@ -1,0 +1,253 @@
+package opencpn:portable@0.3.0;
+
+interface types {
+  record service-error {
+    code: string,
+    message: string,
+    retryable: bool,
+  }
+
+  enum log-level {
+    debug,
+    info,
+    warning,
+    error,
+  }
+
+  record vessel-position {
+    latitude: f64,
+    longitude: f64,
+    course-over-ground: option<f64>,
+    speed-over-ground: option<f64>,
+  }
+
+  record geo-point {
+    latitude: f64,
+    longitude: f64,
+  }
+
+  record color {
+    red: u8,
+    green: u8,
+    blue: u8,
+    alpha: u8,
+  }
+
+  enum action-location {
+    toolbar,
+    chart-context-menu,
+  }
+
+  record action-registration {
+    action-id: string,
+    label: string,
+    tooltip: string,
+    icon-resource: option<string>,
+    locations: list<action-location>,
+  }
+
+  record action-state {
+    visible: bool,
+    enabled: bool,
+    checkable: bool,
+    checked: bool,
+  }
+
+  enum navigation-object-kind {
+    waypoint,
+    route,
+    track,
+  }
+
+  record navigation-point {
+    id: string,
+    name: string,
+    latitude: f64,
+    longitude: f64,
+    unix-time: option<s64>,
+    description: string,
+  }
+
+  record navigation-object {
+    id: string,
+    kind: navigation-object-kind,
+    name: string,
+    description: string,
+    points: list<navigation-point>,
+  }
+
+  record navigation-object-ref {
+    kind: navigation-object-kind,
+    id: string,
+  }
+
+  variant navigation-mutation {
+    create(navigation-object),
+    update(navigation-object),
+    delete(navigation-object-ref),
+  }
+
+  record navigation-mutation-result {
+    id: string,
+    diagnostic: string,
+  }
+
+  record scene-style {
+    stroke: option<color>,
+    fill: option<color>,
+    width-pixels: f32,
+  }
+
+  record polyline-primitive {
+    primitive-id: string,
+    points: list<geo-point>,
+    style: scene-style,
+    interactive: bool,
+  }
+
+  record polygon-primitive {
+    primitive-id: string,
+    points: list<geo-point>,
+    style: scene-style,
+    interactive: bool,
+  }
+
+  record circle-primitive {
+    primitive-id: string,
+    centre: geo-point,
+    radius-metres: f64,
+    style: scene-style,
+    interactive: bool,
+  }
+
+  record icon-primitive {
+    primitive-id: string,
+    position: geo-point,
+    resource-name: string,
+    width-pixels: f32,
+    height-pixels: f32,
+    interactive: bool,
+  }
+
+  record text-primitive {
+    primitive-id: string,
+    position: geo-point,
+    value: string,
+    color: color,
+    size-pixels: f32,
+    interactive: bool,
+  }
+
+  variant scene-primitive {
+    polyline(polyline-primitive),
+    polygon(polygon-primitive),
+    circle(circle-primitive),
+    icon(icon-primitive),
+    text(text-primitive),
+  }
+
+  record scene-layer {
+    layer-id: string,
+    z-index: s32,
+    visible: bool,
+    primitives: list<scene-primitive>,
+  }
+
+  record scene-update {
+    scene-id: string,
+    revision: u64,
+    replace: bool,
+    layers: list<scene-layer>,
+  }
+
+  enum pointer-kind {
+    move,
+    press,
+    release,
+    double-click,
+    wheel,
+  }
+
+  enum pointer-button {
+    none,
+    primary,
+    middle,
+    secondary,
+  }
+
+  record input-modifiers {
+    shift: bool,
+    control: bool,
+    alt: bool,
+    meta: bool,
+  }
+
+  record pointer-event {
+    kind: pointer-kind,
+    button: pointer-button,
+    canvas-index: u32,
+    x-pixels: s32,
+    y-pixels: s32,
+    position: option<geo-point>,
+    wheel-rotation: s32,
+    modifiers: input-modifiers,
+    hit-scene-id: option<string>,
+    hit-primitive-id: option<string>,
+  }
+
+  record key-event {
+    key-code: u32,
+    unicode: option<char>,
+    pressed: bool,
+    repeat: bool,
+    modifiers: input-modifiers,
+  }
+
+  record timer-event {
+    timer-id: string,
+    scheduled-unix-milliseconds: s64,
+    fired-unix-milliseconds: s64,
+  }
+
+  record rpc-request {
+    correlation-id: string,
+    service: string,
+    method: string,
+    content-type: string,
+    payload: list<u8>,
+    timeout-milliseconds: u32,
+  }
+
+  record rpc-response {
+    correlation-id: string,
+    status: u16,
+    content-type: string,
+    payload: list<u8>,
+    diagnostic: string,
+  }
+
+  enum event-kind {
+    nmea0183,
+    nmea2000,
+    signal-k,
+    navigation-position,
+    ais-target,
+    active-leg,
+    cursor,
+    viewport,
+    plugin-message,
+  }
+
+  record event {
+    kind: event-kind,
+    topic: string,
+    payload: string,
+    sequence: u64,
+  }
+
+  record subscription {
+    kind: event-kind,
+    topic-prefix: string,
+    queue-limit: u16,
+  }
+}
