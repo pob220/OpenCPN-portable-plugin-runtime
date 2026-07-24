@@ -241,7 +241,7 @@ int main() {
     CHECK(engine.SetGrantedPermissions(package_id, requested, &diagnostic));
     CHECK(engine.Enable(package_id, &diagnostic));
     CHECK(engine.IsEnabled(package_id));
-    CHECK(actions.size() == 3);
+    CHECK(actions.size() == 1);
 
     CHECK(engine.HandleAction(package_id, "igrib.toggle"));
     CHECK(engine.WaitForIdle(package_id, std::chrono::seconds(2)));
@@ -266,7 +266,7 @@ int main() {
 
     CHECK(engine.Enable(package_id, &diagnostic));
     CHECK(engine.IsEnabled(package_id));
-    CHECK(actions.size() == 3);
+    CHECK(actions.size() == 1);
 
     CHECK(engine.HandleAction(package_id, "igrib.toggle"));
     bool running_job_seen = false;
@@ -289,7 +289,7 @@ int main() {
 
     CHECK(engine.Enable(package_id, &diagnostic));
     CHECK(engine.IsEnabled(package_id));
-    CHECK(actions.size() == 3);
+    CHECK(actions.size() == 1);
 
     CHECK(engine.HandleAction(package_id, "igrib.failure-test"));
     CHECK(engine.WaitForIdle(package_id, std::chrono::seconds(2)));
@@ -301,7 +301,7 @@ int main() {
     diagnostic.clear();
     CHECK(engine.Enable(package_id, &diagnostic));
     CHECK(engine.IsEnabled(package_id));
-    CHECK(actions.size() == 3);
+    CHECK(actions.size() == 1);
 
     CHECK(engine.Unload(package_id, &diagnostic));
     CHECK(engine.RefreshPackage(package_id, true, &diagnostic));
@@ -311,7 +311,7 @@ int main() {
         package_id, engine.RequestedPermissions(package_id), &diagnostic));
     CHECK(engine.Enable(package_id, &diagnostic));
     CHECK(Snapshot(engine.Packages(), package_id)->state == "Enabled");
-    CHECK(actions.size() == 3);
+    CHECK(actions.size() == 1);
     engine.Shutdown();
     CHECK(actions.empty());
     CHECK(state_changes >= 8);
@@ -486,6 +486,11 @@ int main() {
         0.0, 0.0,  0.0,  0.0,  0.0, 0.0, 3.86, 5.47, 3.92, 3.76,
         0.0, 3.98, 6.18, 5.30, 4.90, 0.0, 2.33, 3.99, 3.60, 3.33};
     request.polars.push_back(std::move(polar));
+    CHECK(!services.CancelRoute("org.opencpn.iweather-routing"));
+    diagnostic.clear();
+    CHECK(services.BeginRouteAttempt("org.opencpn.iweather-routing",
+                                     &diagnostic));
+    CHECK(diagnostic.empty());
     CHECK(services.StartRoute("org.opencpn.iweather-routing",
                               std::move(request), &diagnostic));
     CHECK(services.WaitForRoute("org.opencpn.iweather-routing",

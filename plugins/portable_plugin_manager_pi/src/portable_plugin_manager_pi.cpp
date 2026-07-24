@@ -623,6 +623,15 @@ void PortablePluginManagerPi::OpenPackageSurface(
                    runtime_engine_->CalculateRouteBlocking(
                        package_id, std::move(request), outcome, diagnostic);
           },
+          [this, package_id](wxString* diagnostic) {
+            std::string error;
+            const bool okay =
+                runtime_engine_ &&
+                runtime_engine_->BeginRouteAttempt(package_id, &error);
+            if (!okay && diagnostic)
+              *diagnostic = wxString::FromUTF8(error);
+            return okay;
+          },
           [this, package_id]() {
             if (runtime_engine_) runtime_engine_->CancelRoute(package_id);
           },

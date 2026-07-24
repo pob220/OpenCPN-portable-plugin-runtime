@@ -37,9 +37,11 @@ int main(int argc, char** argv) {
       if (item.checkable) ++checkable;
     }
   }
-  if (menus.size() != 5 || actions.size() != 16 || separators != 3 ||
+  if (menus.size() != 5 || actions.size() != 18 || separators != 3 ||
       checkable != 5 || !actions.count("close") ||
       !actions.count("refresh-positions") || !actions.count("new-routing") ||
+      !actions.count("delete-routing") ||
+      !actions.count("reset-routing") ||
       !actions.count("show-configuration") || !actions.count("about") ||
       menus.front().items.front().separator ||
       menus.front().items.front().checkable) {

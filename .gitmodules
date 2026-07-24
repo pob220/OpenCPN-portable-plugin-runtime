@@ -2,6 +2,3 @@
 	path = flatpak/org.opencpn.OpenCPN
 	url = https://github.com/flathub/org.opencpn.OpenCPN.git
 	branch = beta
-[submodule "portable-runtime/vendor/environmental-grib-generator"]
-	path = portable-runtime/vendor/environmental-grib-generator
-	url = https://github.com/pob220/environmental-grib-generator.git

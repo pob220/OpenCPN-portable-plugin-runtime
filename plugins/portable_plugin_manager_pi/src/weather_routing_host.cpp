@@ -620,7 +620,8 @@ void DrawRouteWindBarb(wxDC& dc, const wxPoint& origin, double east_knots,
 class PortableWeatherRoutingHost::Impl {
 public:
   Impl(wxWindow* parent_value, wxFileConfig* config_value,
-       CalculateRoute route_calculator, std::function<void()> route_canceller,
+       CalculateRoute route_calculator, BeginRouteAttempt route_starter,
+       std::function<void()> route_canceller,
        wxString package_root_value, wxString plugin_id_value,
        wxString surface_resource_value, std::function<wxString()> summary,
        std::function<std::vector<PortableNavigationPosition>()> waypoints,
@@ -639,6 +640,7 @@ public:
       : parent(parent_value),
         config(config_value),
         calculate_route(std::move(route_calculator)),
+        begin_route_attempt(std::move(route_starter)),
         cancel_routes(std::move(route_canceller)),
         package_root(std::move(package_root_value)),
         plugin_id(std::move(plugin_id_value)),
@@ -667,6 +669,10 @@ private:
   void ShowEditor(size_t tab = 0);
   void PopulateManagerPositions();
   void PopulateManagerRouting(const wxString& state = "Ready");
+  void ClearRoutingResults(const wxString& diagnostic);
+  void DeleteRouting();
+  void ResetRouting();
+  void UpdateRoutingActionState();
   void DispatchSurfaceAction(const wxString& action);
   wxPanel* CreateRoutePanel(wxNotebook* book);
   wxPanel* CreateSafetyPanel(wxNotebook* book);
@@ -699,6 +705,7 @@ private:
   wxWindow* parent = nullptr;
   wxFileConfig* config = nullptr;
   CalculateRoute calculate_route;
+  BeginRouteAttempt begin_route_attempt;
   std::function<void()> cancel_routes;
   wxString package_root;
   wxString plugin_id;
@@ -733,7 +740,8 @@ private:
   wxNotebook* notebook = nullptr;
   wxListCtrl *manager_positions = nullptr, *manager_routings = nullptr;
   wxButton *manager_compute = nullptr, *manager_edit = nullptr,
-           *manager_export = nullptr, *manager_stop = nullptr;
+           *manager_delete = nullptr, *manager_export = nullptr,
+           *manager_stop = nullptr;
   std::map<wxString, wxMenuItem*> surface_menu_items;
   wxScrolledWindow* route_panel = nullptr;
   wxTextCtrl *start_lat = nullptr, *start_lon = nullptr, *dest_lat = nullptr,
@@ -791,6 +799,8 @@ private:
   std::atomic<unsigned> departure_runs{1};
   std::atomic<unsigned> departures_completed{0};
   std::thread worker;
+  bool routing_exists = true;
+  bool calculation_running = false;
   std::vector<ocpn_portable_route_point> route;
   std::vector<ocpn_portable_route_environment_point> route_environment;
   std::vector<std::vector<ocpn_portable_route_point>> alternative_routes;
@@ -1652,6 +1662,7 @@ void PortableWeatherRoutingHost::Impl::LoadSettings() {
   }
   const wxString old_path = config->GetPath();
   config->SetPath("/PortablePlugins/" + plugin_id + "/Routing");
+  routing_exists = config->ReadBool("routingExists", true);
   const wxString performance_path =
       config->Read("vesselPerformancePath", bundled_polar);
   vessel_performance_file->SetPath(performance_path);
@@ -1792,6 +1803,7 @@ void PortableWeatherRoutingHost::Impl::SaveSettings() {
   const wxString old_path = config->GetPath();
   config->SetPath("/PortablePlugins/" + plugin_id + "/Routing");
   config->Write("settingsSchema", 6L);
+  config->Write("routingExists", routing_exists);
   if (vessel_performance_file)
     config->Write("vesselPerformancePath", vessel_performance_file->GetPath());
   config->Write("departureTimeZone",
@@ -1972,6 +1984,11 @@ void PortableWeatherRoutingHost::Impl::PopulateManagerRouting(
     const wxString& state) {
   if (!manager_routings || !start_source || !dest_source) return;
   manager_routings->DeleteAllItems();
+  if (!routing_exists) {
+    for (int column = 0; column < manager_routings->GetColumnCount(); ++column)
+      manager_routings->SetColumnWidth(column, wxLIST_AUTOSIZE_USEHEADER);
+    return;
+  }
   auto position_name = [this](bool start) {
     wxChoice* source = start ? start_source : dest_source;
     wxChoice* waypoint = start ? start_waypoint : dest_waypoint;
@@ -2012,6 +2029,80 @@ void PortableWeatherRoutingHost::Impl::PopulateManagerRouting(
     manager_routings->SetColumnWidth(column, wxLIST_AUTOSIZE_USEHEADER);
 }
 
+void PortableWeatherRoutingHost::Impl::ClearRoutingResults(
+    const wxString& diagnostic) {
+  route.clear();
+  route_environment.clear();
+  alternative_routes.clear();
+  isochrones.clear();
+  traces.clear();
+  departure_result_rows.clear();
+  selected_departure_result = std::numeric_limits<size_t>::max();
+  best_departure_result = std::numeric_limits<size_t>::max();
+  nominal_departure_unix_time = 0;
+  if (departure_results) departure_results->DeleteAllItems();
+  if (route_schedule) route_schedule->DeleteAllItems();
+  if (validation_diagnostics) validation_diagnostics->SetValue(diagnostic);
+  if (metrics) metrics->SetLabel("No route calculated");
+  if (gauge) gauge->SetValue(0);
+  if (parent) parent->Refresh();
+}
+
+void PortableWeatherRoutingHost::Impl::UpdateRoutingActionState() {
+  const bool idle_routing = routing_exists && !calculation_running;
+  const bool have_result = idle_routing && !route.empty();
+  auto enable_menu = [this](const wxString& action, bool enabled) {
+    const auto item = surface_menu_items.find(action);
+    if (item != surface_menu_items.end()) item->second->Enable(enabled);
+  };
+  enable_menu("new-routing", !calculation_running);
+  enable_menu("edit-routing", idle_routing);
+  enable_menu("delete-routing", idle_routing);
+  enable_menu("compute-routing", idle_routing);
+  enable_menu("stop-routing", calculation_running);
+  enable_menu("reset-routing", idle_routing);
+  enable_menu("export-gpx", have_result);
+  enable_menu("send-to-opencpn", have_result);
+  enable_menu("show-results", routing_exists);
+  if (manager_compute) manager_compute->Enable(idle_routing);
+  if (manager_edit) manager_edit->Enable(idle_routing);
+  if (manager_delete) manager_delete->Enable(idle_routing);
+  if (manager_stop) manager_stop->Enable(calculation_running);
+  if (manager_export) manager_export->Enable(have_result);
+  if (calculate) calculate->Enable(idle_routing);
+  if (cancel) cancel->Enable(calculation_running);
+  if (export_gpx) export_gpx->Enable(have_result);
+  if (send_to_opencpn) send_to_opencpn->Enable(have_result);
+  if (vessel_performance_file)
+    vessel_performance_file->Enable(!calculation_running);
+}
+
+void PortableWeatherRoutingHost::Impl::DeleteRouting() {
+  if (!routing_exists || calculation_running) return;
+  if (wxMessageBox(
+          "Delete the selected portable routing and its calculated results?\n\n"
+          "This does not delete any route previously sent to OpenCPN.",
+          "Delete routing", wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION,
+          frame) != wxYES)
+    return;
+  routing_exists = false;
+  ClearRoutingResults("No routing is selected.");
+  PopulateManagerRouting();
+  if (editor) editor->Hide();
+  if (status) status->SetLabel("Routing deleted");
+  SaveSettings();
+  UpdateRoutingActionState();
+}
+
+void PortableWeatherRoutingHost::Impl::ResetRouting() {
+  if (!routing_exists || calculation_running) return;
+  ClearRoutingResults(
+      "Routing results were reset. The configuration is ready to compute.");
+  PopulateManagerRouting("Not computed");
+  if (status) status->SetLabel("Routing reset; configuration retained");
+  UpdateRoutingActionState();
+}
+
 void PortableWeatherRoutingHost::Impl::DispatchSurfaceAction(
     const wxString& action) {
   if (action == "close") {
@@ -2019,21 +2110,29 @@ void PortableWeatherRoutingHost::Impl::DispatchSurfaceAction(
   } else if (action == "refresh-positions") {
     RefreshNavigationPositions();
   } else if (action == "new-routing") {
+    routing_exists = true;
+    ClearRoutingResults("New routing has not been computed.");
     SetDepartureUnixTime(
         ((static_cast<int64_t>(wxDateTime::Now().GetTicks()) + 899) / 900) *
         900);
     ShowEditor(0);
     PopulateManagerRouting("Not computed");
+    SaveSettings();
+    UpdateRoutingActionState();
   } else if (action == "edit-routing" || action == "show-configuration") {
-    ShowEditor(0);
+    if (routing_exists) ShowEditor(0);
   } else if (action == "show-results") {
-    ShowEditor(3);
+    if (routing_exists) ShowEditor(3);
+  } else if (action == "delete-routing") {
+    DeleteRouting();
   } else if (action == "compute-routing") {
     Start();
   } else if (action == "stop-routing") {
     cancelled.store(true);
     if (cancel_routes) cancel_routes();
     if (status) status->SetLabel("Cancelling…");
+  } else if (action == "reset-routing") {
+    ResetRouting();
   } else if (action == "export-gpx") {
     ExportGpx();
   } else if (action == "send-to-opencpn") {
@@ -2134,7 +2233,7 @@ void PortableWeatherRoutingHost::Impl::CreateFrame() {
   manager_routings->Bind(wxEVT_LIST_ITEM_ACTIVATED,
                          [this](wxListEvent&) { ShowEditor(0); });
   routings_root->Add(manager_routings, 1, wxEXPAND | wxALL, 5);
-  auto* actions = new wxBoxSizer(wxHORIZONTAL);
+  auto* actions = new wxGridSizer(3, 6, 6);
   for (int index = 0;
        index < surface_definition["manager"]["actions"].Size(); ++index) {
     wxJSONValue action_definition =
@@ -2146,9 +2245,10 @@ void PortableWeatherRoutingHost::Impl::CreateFrame() {
                  [this, action](wxCommandEvent&) {
                    DispatchSurfaceAction(action);
                  });
-    actions->Add(button, 0, wxRIGHT, 6);
+    actions->Add(button, 1, wxEXPAND);
     if (action == "compute-routing") manager_compute = button;
     if (action == "edit-routing") manager_edit = button;
+    if (action == "delete-routing") manager_delete = button;
     if (action == "export-gpx") manager_export = button;
   }
   manager_stop = new wxButton(routings_panel, wxID_ANY, "&Stop");
@@ -2156,7 +2256,7 @@ void PortableWeatherRoutingHost::Impl::CreateFrame() {
   manager_stop->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
     DispatchSurfaceAction("stop-routing");
   });
-  actions->Add(manager_stop, 0, wxRIGHT, 6);
+  actions->Add(manager_stop, 1, wxEXPAND);
   routings_root->Add(actions, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
   routings_panel->SetSizer(routings_root);
   splitter->SplitVertically(positions_panel, routings_panel,
@@ -2189,7 +2289,8 @@ void PortableWeatherRoutingHost::Impl::CreateFrame() {
     const auto item = surface_menu_items.find(action);
     if (item != surface_menu_items.end()) item->second->Check(toggle->GetValue());
   }
-  if (manager_export) manager_export->Enable(false);
+  if (!routing_exists) status->SetLabel("No routing configured; choose New");
+  UpdateRoutingActionState();
   frame->Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent& event) {
     SaveSettings();
     if (worker.joinable()) {
@@ -2228,6 +2329,10 @@ bool PortableWeatherRoutingHost::Impl::Show(wxString* error) {
 
 void PortableWeatherRoutingHost::Impl::Start() {
   if (worker.joinable()) return;
+  if (!routing_exists) {
+    if (status) status->SetLabel("Choose New before calculating a routing");
+    return;
+  }
   const bool use_route = use_opencpn_route && use_opencpn_route->GetValue();
   if (!use_route &&
       (!ApplyPositionSource(true) || !ApplyPositionSource(false)))
@@ -2445,29 +2550,18 @@ void PortableWeatherRoutingHost::Impl::Start() {
     departure_times.push_back(request.departure_unix_time +
                               static_cast<int64_t>(run) *
                                   departure_step_seconds);
+  wxString begin_error;
+  if (!begin_route_attempt || !begin_route_attempt(&begin_error)) {
+    status->SetLabel("Could not start routing: " +
+                     (begin_error.empty() ? wxString("routing runtime is unavailable")
+                                          : begin_error));
+    return;
+  }
   SaveSettings();
   cancelled.store(false);
-  calculate->Enable(false);
-  cancel->Enable(true);
-  if (manager_compute) manager_compute->Enable(false);
-  if (manager_stop) manager_stop->Enable(true);
-  if (manager_export) manager_export->Enable(false);
-  vessel_performance_file->Enable(false);
-  export_gpx->Enable(false);
-  if (send_to_opencpn) send_to_opencpn->Enable(false);
-  route.clear();
-  route_environment.clear();
-  alternative_routes.clear();
-  isochrones.clear();
-  traces.clear();
-  departure_result_rows.clear();
-  selected_departure_result = std::numeric_limits<size_t>::max();
-  best_departure_result = std::numeric_limits<size_t>::max();
-  if (departure_results) departure_results->DeleteAllItems();
-  if (route_schedule) route_schedule->DeleteAllItems();
-  if (validation_diagnostics)
-    validation_diagnostics->SetValue("Calculation in progress…");
-  gauge->SetValue(0);
+  calculation_running = true;
+  ClearRoutingResults("Calculation in progress…");
+  UpdateRoutingActionState();
   status->SetLabel("Checking iGRIB coverage for requested departures…");
   PopulateManagerRouting("Calculating");
   departure_runs.store(run_count);
@@ -2622,11 +2716,7 @@ void PortableWeatherRoutingHost::Impl::Start() {
 void PortableWeatherRoutingHost::Impl::Finish(
     std::vector<DepartureResult> results, int64_t nominal_departure) {
   if (worker.joinable()) worker.join();
-  calculate->Enable(true);
-  cancel->Enable(false);
-  if (manager_compute) manager_compute->Enable(true);
-  if (manager_stop) manager_stop->Enable(false);
-  vessel_performance_file->Enable(true);
+  calculation_running = false;
   departure_result_rows = std::move(results);
   nominal_departure_unix_time = nominal_departure;
   best_departure_result = std::numeric_limits<size_t>::max();
@@ -2645,6 +2735,7 @@ void PortableWeatherRoutingHost::Impl::Finish(
   }
   PopulateDepartureResults();
   if (best_departure_result == std::numeric_limits<size_t>::max()) {
+    UpdateRoutingActionState();
     status->SetLabel("Failed: " + last_error);
     metrics->SetLabel("No successful departure route");
     PopulateManagerRouting("Failed");
@@ -2773,9 +2864,7 @@ void PortableWeatherRoutingHost::Impl::SelectDepartureResult(size_t index) {
       selected.distance_nautical_miles, selected.duration_seconds / 3600.0,
       selected.states_examined, FormatRoutingTime(selected.departure_unix_time),
       propulsion_metrics));
-  export_gpx->Enable(!route.empty());
-  if (send_to_opencpn) send_to_opencpn->Enable(!route.empty());
-  if (manager_export) manager_export->Enable(!route.empty());
+  UpdateRoutingActionState();
   PopulateManagerRouting(index == best_departure_result ? "Best" : "Selected");
   if (departure_results) {
     updating_departure_selection = true;
@@ -3229,8 +3318,9 @@ void PortableWeatherRoutingHost::Impl::Shutdown() {
 
 PortableWeatherRoutingHost::PortableWeatherRoutingHost(
     wxWindow* parent, wxFileConfig* config, CalculateRoute calculate_route,
-    std::function<void()> cancel_routes, const wxString& package_root,
-    const wxString& plugin_id, const wxString& surface_resource,
+    BeginRouteAttempt begin_route_attempt, std::function<void()> cancel_routes,
+    const wxString& package_root, const wxString& plugin_id,
+    const wxString& surface_resource,
     std::function<wxString()> summary,
     std::function<std::vector<PortableNavigationPosition>()> list_waypoints,
     std::function<std::vector<PortableNavigationRoute>()> list_routes,
@@ -3246,8 +3336,9 @@ PortableWeatherRoutingHost::PortableWeatherRoutingHost(
         preflight_environment,
     double latitude, double longitude)
     : m_impl(std::make_unique<Impl>(
-          parent, config, std::move(calculate_route), std::move(cancel_routes),
-          package_root, plugin_id, surface_resource,
+          parent, config, std::move(calculate_route),
+          std::move(begin_route_attempt), std::move(cancel_routes), package_root,
+          plugin_id, surface_resource,
           std::move(summary), std::move(list_waypoints),
           std::move(list_routes),
           std::move(create_route),

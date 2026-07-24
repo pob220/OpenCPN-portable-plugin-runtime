@@ -10,7 +10,6 @@ stage_root="${OCPN_BETA_STAGE_ROOT:-$build_root/stage}"
 jobs="${OCPN_BETA_JOBS:-$(nproc)}"
 cmake_generator="${OCPN_BETA_CMAKE_GENERATOR:-Ninja}"
 generator_source="$repo_root/portable-runtime/vendor/environmental-grib-generator"
-generator_commit="f7311bb340f6c942080b5ad18061c1a8b6b5f000"
 generator_binary="$generator_build/environmental-grib"
 igrib_package="$opencpn_build/portable-runtime/packages/org.opencpn.igrib-0.1.0.ocpnp"
 iwr_package="$opencpn_build/portable-runtime/packages/org.opencpn.iweather-routing-0.1.0.ocpnp"
@@ -73,17 +72,7 @@ for module in eccodes jsoncpp netcdf libcurl qhull_r blosc libzip; do
 done
 
 if [[ ! -f "$generator_source/CMakeLists.txt" ]]; then
-  printf 'Initialising the pinned environmental generator submodule...\n'
-  git -C "$repo_root" submodule update --init --recursive \
-    portable-runtime/vendor/environmental-grib-generator
-fi
-
-actual_generator_commit="$(git -C "$generator_source" rev-parse HEAD)"
-if [[ "$actual_generator_commit" != "$generator_commit" ]]; then
-  printf 'Environmental generator is not at the tested commit.\n' >&2
-  printf 'Expected: %s\nFound:    %s\n' \
-    "$generator_commit" "$actual_generator_commit" >&2
-  printf 'Run: git submodule update --init --recursive\n' >&2
+  printf 'The vendored environmental generator source is missing.\n' >&2
   exit 1
 fi
 
@@ -166,7 +155,7 @@ mkdir -p "$stage_root/home" "$stage_root/xdg-config" "$stage_root/xdg-data" \
   else
     printf 'source_dirty=no\n'
   fi
-  printf 'generator_commit=%s\n' "$(git -C "$generator_source" rev-parse HEAD)"
+  printf 'generator_source=vendored\n'
   printf 'opencpn_sha256=%s\n' "$(sha256sum "$stage_root/app/bin/opencpn" | awk '{print $1}')"
   printf 'igrib_package_sha256=%s\n' "$(sha256sum "$igrib_package" | awk '{print $1}')"
   printf 'iweather_routing_package_sha256=%s\n' "$(sha256sum "$iwr_package" | awk '{print $1}')"

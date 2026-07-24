@@ -327,14 +327,10 @@ bool NormalLifecycle(const char* component_path) {
                                sizeof(error)),
                            "on-action", error);
 
-  ok = ok && state.actions.size() == 3;
+  ok = ok && state.actions.size() == 1;
   ok = ok && state.actions[0] == "igrib.toggle";
-  ok = ok && state.actions[1] == "igrib.failure-test";
-  ok = ok && state.actions[2] == "igrib.http-test";
-  ok = ok && state.action_icons.size() == 3;
+  ok = ok && state.action_icons.size() == 1;
   ok = ok && state.action_icons[0] == "resources/igrib.svg";
-  ok = ok && state.action_icons[1] == "resources/fault-test.svg";
-  ok = ok && state.action_icons[2] == "resources/http-download.svg";
   ok = ok && state.settings["activation-count"] == "1";
   ok = ok && state.scene_id == "igrib.weather-window";
   ok = ok && state.points.size() == 5;

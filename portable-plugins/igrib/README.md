@@ -21,6 +21,10 @@ The current proof implements:
 - GFS/UKMO environmental generation plus optional waves and authenticated
   Copernicus Marine North-West Shelf or global current
   inputs through the signed `environmental-grib` helper;
+- concurrent weather, wave and current acquisition with deterministic final
+  merging, collision-proof temporary workspaces and one shared job-wide
+  download budget; the persisted generator setting accepts 1–8 concurrent
+  requests, defaults to four and supports a one-request low-resource mode;
 - explicit **Local GRIB file…** weather and current source choices whose
   selected inputs replace the corresponding online source and are validated
   and merged into one output;
@@ -30,8 +34,10 @@ The current proof implements:
   permission-controlled host HTTP client;
 - retained geographic overlays, batched chart-coverage queries, settings,
   cancellable jobs and deliberate-trap containment;
-- package-owned weather, fault-containment and HTTP-download toolbar icons,
-  decoded by the host without exposing a native toolbar or graphics object;
+- a package-owned weather toolbar icon decoded by the host without exposing a
+  native toolbar or graphics object; fault-containment and HTTP-download
+  developer action handlers remain available to automated tests without
+  cluttering the user toolbar;
 - deterministic `.ocpnp` packaging, Ed25519 developer signing, strict archive
   verification, atomic update and retained rollback copies.
 

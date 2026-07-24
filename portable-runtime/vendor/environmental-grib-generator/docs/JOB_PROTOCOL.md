@@ -1,0 +1,78 @@
+# Native helper job protocol
+
+The OpenCPN plugin invokes `environmental-grib` as a separate native helper.
+This keeps provider and format dependencies outside the OpenCPN process. The
+protocol is versioned independently of the command-line convenience commands.
+
+## Invocation
+
+```sh
+environmental-grib run-job --job request.json --result result.json
+```
+
+The result file is written atomically. It is first created with `status` set to
+`running`, then replaced with a `complete` or `failed` result. Standard output
+contains one compact JSON object per line. Event types are `started`,
+`progress`, `complete`, and `failed`.
+
+## Request schema version 1
+
+```json
+{
+  "schemaVersion": 1,
+  "operation": "generateEnvironment",
+  "request": {
+    "bbox": {"west": -8.5, "south": 50.5, "east": -2.5, "north": 56.5},
+    "start": "2026-07-12T00:00:00Z",
+    "hours": 72,
+    "stepHours": 3,
+    "weatherProvider": "ukmo_ukv",
+    "extendForecast": true,
+    "fallbackWeatherProvider": "gfs",
+    "fallbackWaveProvider": "gfs_wave",
+    "fallbackCurrentSource": "offline-tidal",
+    "weatherPreset": "routing",
+    "includeWaves": true,
+    "waveProvider": "gfs_wave",
+    "currentSource": "tpxo-cache",
+    "inputCache": "/path/to/cache.tpxocache",
+    "tpxoModelDirectory": "/path/to/tide-models",
+    "autoPrepareTpxoCache": true,
+    "maxConcurrentDownloads": 4,
+    "output": "/path/to/environment.grb",
+    "overwrite": true
+  },
+  "credentials": {
+    "copernicusPasswordEnvironment": "ENVIRONMENTAL_GRIB_COPERNICUS_PASSWORD"
+  }
+}
+```
+
+Passwords must never be placed in a job file. The named environment variable
+is read by the helper after validating the schema.
+
+`maxConcurrentDownloads` is optional, defaults to four, and accepts values from
+one to eight. It is a job-wide limit shared by weather, wave and current
+generation, including forecast-hour and range requests. Setting it to one
+provides a low-resource serial-download mode without changing deterministic
+component merging.
+
+The forecast-extension fields are optional and default to disabled/`none` for
+backward compatibility. When enabled, component generators use known provider
+horizons and native cadences, then composite messages by parameter, level and
+valid time. The preferred input is retained when preferred and fallback inputs
+contain the same message tuple. The result `diagnostics.forecast_extension`
+object records planned/completed/failed coverage for each component.
+
+`hours` is measured from the absolute `start` time, not independently from each
+provider's model cycle. For cycle-based weather and wave products the generator
+requests sufficient additional model lead time, verifies decoded valid-time
+coverage, and removes records beyond `start + hours` from the final composite.
+Generation fails instead of publishing a partial component when neither the
+preferred source nor its selected fallback covers the requested UTC end.
+
+## Discovery and compatibility
+
+`environmental-grib capabilities` reports the job schema, helper version,
+progress protocol, and implemented providers. Unknown schema versions,
+operations, options, and malformed values are rejected before generation.

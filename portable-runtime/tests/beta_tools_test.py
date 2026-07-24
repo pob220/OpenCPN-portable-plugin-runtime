@@ -3,7 +3,6 @@
 import importlib.util
 import json
 import pathlib
-import re
 import subprocess
 import sys
 import unittest
@@ -184,18 +183,14 @@ class BetaToolsTest(unittest.TestCase):
         ):
             self.assertIn(package, source)
 
-    def test_beta_generator_integrity_pin_matches_submodule(self):
+    def test_beta_generator_is_vendored_in_the_portable_repository(self):
         source = (BETA / "build-linux.sh").read_text()
-        match = re.search(r'^generator_commit="([0-9a-f]{40})"$', source, re.M)
-        self.assertIsNotNone(match)
-        actual = subprocess.run(
-            ["git", "-C", str(RUNTIME / "vendor/environmental-grib-generator"),
-             "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        self.assertEqual(match.group(1), actual)
+        self.assertIn("generator_source=vendored", source)
+        self.assertNotIn("submodule update", source)
+        self.assertTrue(
+            (RUNTIME / "vendor/environmental-grib-generator/CMakeLists.txt")
+            .is_file()
+        )
 
     def test_all_linux_eccodes_consumers_validate_the_public_header(self):
         runtime_cmake = (RUNTIME / "CMakeLists.txt").read_text()

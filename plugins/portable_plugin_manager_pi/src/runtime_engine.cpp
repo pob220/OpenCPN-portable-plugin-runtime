@@ -500,6 +500,8 @@ public:
   bool CalculateRouteBlocking(const std::string& package_id,
                               RoutingRequest request, RoutingOutcome* outcome,
                               std::string* diagnostic);
+  bool BeginRouteAttempt(const std::string& package_id,
+                         std::string* diagnostic);
   bool PreflightEnvironment(const std::string& package_id, double latitude,
                             double longitude,
                             const std::vector<std::int64_t>& unix_times,
@@ -1049,6 +1051,26 @@ bool RuntimeEngine::Impl::CalculateRouteBlocking(
   *outcome = std::move(execution.outcome);
   if (diagnostic) *diagnostic = execution.failure;
   return execution.success;
+}
+
+bool RuntimeEngine::Impl::BeginRouteAttempt(const std::string& package_id,
+                                            std::string* diagnostic) {
+  Instance* instance = Find(package_id);
+  if (!instance || !instance->enabled || instance->failed ||
+      !instance->runtime ||
+      !Permitted(*instance, "weather-routing.compute")) {
+    if (diagnostic)
+      *diagnostic = "routing package is unavailable";
+    return false;
+  }
+  std::lock_guard<std::mutex> route_lock(instance->routing_mutex);
+  if (instance->routing_running || instance->routing_call_count != 0) {
+    if (diagnostic) *diagnostic = "a route calculation is already running";
+    return false;
+  }
+  instance->routing_cancelled = false;
+  if (diagnostic) diagnostic->clear();
+  return true;
 }
 
 bool RuntimeEngine::Impl::PreflightEnvironment(
@@ -2380,6 +2402,11 @@ bool RuntimeEngine::CalculateRouteBlocking(const std::string& package_id,
                                            std::string* diagnostic) {
   return impl_->CalculateRouteBlocking(package_id, std::move(request), outcome,
                                        diagnostic);
+}
+
+bool RuntimeEngine::BeginRouteAttempt(const std::string& package_id,
+                                      std::string* diagnostic) {
+  return impl_->BeginRouteAttempt(package_id, diagnostic);
 }
 
 bool RuntimeEngine::PreflightEnvironment(

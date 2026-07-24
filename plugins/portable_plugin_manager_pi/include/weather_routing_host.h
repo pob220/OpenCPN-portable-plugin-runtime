@@ -36,9 +36,11 @@ public:
   using CalculateRoute =
       std::function<bool(ppm::RoutingRequest, ppm::RoutingOutcome*,
                          std::string*)>;
+  using BeginRouteAttempt = std::function<bool(wxString*)>;
 
   PortableWeatherRoutingHost(
       wxWindow* parent, wxFileConfig* config, CalculateRoute calculate_route,
+      BeginRouteAttempt begin_route_attempt,
       std::function<void()> cancel_routes, const wxString& package_root,
       const wxString& plugin_id, const wxString& surface_resource,
       std::function<wxString()> dataset_summary,

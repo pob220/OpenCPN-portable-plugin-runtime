@@ -118,6 +118,8 @@ public:
   bool CalculateRouteBlocking(const std::string& package_id,
                               RoutingRequest request, RoutingOutcome* outcome,
                               std::string* diagnostic);
+  bool BeginRouteAttempt(const std::string& package_id,
+                         std::string* diagnostic);
   bool PreflightEnvironment(const std::string& package_id, double latitude,
                             double longitude,
                             const std::vector<std::int64_t>& unix_times,

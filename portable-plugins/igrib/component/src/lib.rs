@@ -63,18 +63,6 @@ impl exports::opencpn::portable::plugin::Guest for IGrib {
             "Open the portable iGRIB proof of concept",
             Some("resources/igrib.svg"),
         )?;
-        host::register_action(
-            ACTION_FAILURE_TEST,
-            "iGRIB fault test",
-            "Deliberately trap the portable component (developer test)",
-            Some("resources/fault-test.svg"),
-        )?;
-        host::register_action(
-            ACTION_HTTP_TEST,
-            "iGRIB host HTTP test",
-            "Download a small OpenCPN page through the capability-controlled host client",
-            Some("resources/http-download.svg"),
-        )?;
         host::log(LogLevel::Info, "iGRIB portable component initialised");
         Ok(exports::opencpn::portable::plugin::PluginInfo {
             id: "org.opencpn.igrib".into(),

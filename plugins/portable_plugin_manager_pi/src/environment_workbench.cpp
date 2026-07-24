@@ -4352,6 +4352,17 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
   }
 
   wxJSONValue generator_definition = surface_definition["generator"];
+  wxFileConfig* generator_config = GetOCPNConfigObject();
+  long stored_max_concurrent_downloads = 4;
+  if (generator_config) {
+    const wxString old_path = generator_config->GetPath();
+    generator_config->SetPath("/PortablePlugins/" + plugin_id + "/Generator");
+    generator_config->Read("maxConcurrentDownloads",
+                           &stored_max_concurrent_downloads, 4);
+    generator_config->SetPath(old_path);
+  }
+  stored_max_concurrent_downloads =
+      std::clamp(stored_max_concurrent_downloads, 1L, 8L);
   wxJSONValue credential_catalog = surface_definition["credential_catalog"];
   const wxArrayString credential_names = credential_catalog.GetMemberNames();
   const wxString credential_scheme =
@@ -4417,6 +4428,14 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
                               wxString::Format("%d", default_step),
                               wxDefaultPosition, wxDefaultSize,
                               wxSP_ARROW_KEYS, 1, 24, default_step);
+  auto* max_concurrent_downloads = new wxSpinCtrl(
+      form, wxID_ANY,
+      wxString::Format("%ld", stored_max_concurrent_downloads),
+      wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 1, 8,
+      static_cast<int>(stored_max_concurrent_downloads));
+  max_concurrent_downloads->SetToolTip(
+      "Job-wide network request limit shared by weather, waves and currents. "
+      "Use 1 for lowest resource use; 4 is the recommended default.");
   const auto weather_providers =
       SurfaceProviderOptions(surface_definition, "weather");
   const auto wave_providers =
@@ -4565,6 +4584,8 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
       wxString::Format("Forecast duration hours (maximum %d)", maximum_hours),
       hours);
   AddRow(grid, form, "Step hours", step);
+  AddRow(grid, form, "Maximum concurrent downloads",
+         max_concurrent_downloads);
   AddRow(grid, form, "Forecast extension", extend_forecast);
   AddRow(grid, form, "Weather", include_weather);
   AddRow(grid, form, "Weather provider", provider);
@@ -5051,6 +5072,8 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
   request["start"] = start->GetValue();
   request["hours"] = hours->GetValue();
   request["stepHours"] = step->GetValue();
+  request["maxConcurrentDownloads"] =
+      max_concurrent_downloads->GetValue();
   const bool sandboxed_generator = UsesFilesystemSandbox();
   request["weatherProvider"] =
       weather_enabled ? selected_weather.id : wxString("none");
@@ -5112,6 +5135,15 @@ void PortableEnvironmentHost::Impl::ShowGenerator() {
                           ? "/output/" + output_filename.GetFullName()
                           : output_filename.GetFullPath();
   request["overwrite"] = true;
+  if (generator_config) {
+    const wxString old_path = generator_config->GetPath();
+    generator_config->SetPath("/PortablePlugins/" + plugin_id + "/Generator");
+    generator_config->Write(
+        "maxConcurrentDownloads",
+        static_cast<long>(max_concurrent_downloads->GetValue()));
+    generator_config->SetPath(old_path);
+    generator_config->Flush();
+  }
 
   wxString controller_error;
   const wxString generation_state = wxString::Format(

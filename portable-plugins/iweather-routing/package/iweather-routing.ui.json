@@ -12,9 +12,11 @@
     {"label": "&Routings", "items": [
       {"id": "new-routing", "label": "&New", "accelerator": "Ctrl+N"},
       {"id": "edit-routing", "label": "&Edit", "accelerator": "Ctrl+E"},
+      {"id": "delete-routing", "label": "&Delete", "accelerator": "Ctrl+D"},
       {"separator": true},
       {"id": "compute-routing", "label": "&Compute", "accelerator": "Ctrl+C"},
       {"id": "stop-routing", "label": "&Stop", "accelerator": "Ctrl+Z"},
+      {"id": "reset-routing", "label": "&Reset"},
       {"separator": true},
       {"id": "export-gpx", "label": "E&xport routing as GPX file", "accelerator": "Ctrl+X"},
       {"id": "send-to-opencpn", "label": "Send selected route to &OpenCPN"}
@@ -39,6 +41,7 @@
     "actions": [
       {"id": "compute-routing", "label": "&Compute"},
       {"id": "edit-routing", "label": "&Edit"},
+      {"id": "delete-routing", "label": "&Delete"},
       {"id": "export-gpx", "label": "Export as &GPX"}
     ]
   },

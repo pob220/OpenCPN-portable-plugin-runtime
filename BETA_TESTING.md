@@ -135,12 +135,10 @@ portable-runtime/beta/launch-linux.sh -- --fullscreen
 ```
 
 iGRIB should load and open automatically. iWeatherRouting has its own route
-toolbar icon. A separate iGRIB toolbar action remains
-available if the window is closed. The three portable actions use distinct
-icons: the blue **i** and wave icon opens iGRIB, the warning icon deliberately
-tests Wasm trap containment, and the download icon tests the permission-gated
-host HTTP client. The latter two are diagnostic actions, not normal forecast
-controls.
+toolbar icon. A separate blue **i** and wave iGRIB toolbar action remains
+available if the window is closed. The deliberate Wasm-trap and
+permission-gated HTTP diagnostic handlers are exercised by automated tests
+and are not exposed as normal toolbar actions.
 
 ## 5. Suggested beta exercise
 
