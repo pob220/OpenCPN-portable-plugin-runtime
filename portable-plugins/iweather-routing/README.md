@@ -67,11 +67,13 @@ checked. If the user requires authoritative chart safety, absent or incomplete
 semantic/depth coverage fails closed. GSHHS is retained only as an explicitly
 advisory fallback when authoritative validation is disabled.
 
-Completed searches return bounded retained isochrones and exact predecessor
-traces. The host can draw the selected route's isochrones, show the trace
-nearest the chart cursor and interpolate a boat marker at iGRIB's displayed
-forecast time. These are inspection aids, not evidence that unselected space
-or a chart segment is safe.
+Completed searches can return bounded retained isochrones and exact predecessor
+traces. API 0.2 tells the component whether either overlay was requested:
+isochrones are generated incrementally at the declared interval and predecessor
+traces are omitted unless route-to-cursor inspection is enabled. The host can
+draw the selected route's isochrones, show the trace nearest the chart cursor
+and interpolate a boat marker at iGRIB's displayed forecast time. These are
+inspection aids, not evidence that unselected space or a chart segment is safe.
 
 The maximum-state setting bounds feasible labels retained after spatial,
 tack, incoming-heading and propulsion reduction; transient heading candidates
@@ -80,11 +82,20 @@ temporarily increases destination range is not erased by a purely greedy
 ranking. Candidate fans include polar-derived optimum upwind/downwind VMG
 laylines as well as configured TWA limits. Raw candidates are reduced before
 the batched chart-coverage boundary while preserving local alternatives for
-chart rejection.
+chart rejection. The reduction is streamed into the exact best-N cell sets:
+discarded `Node` values never receive clearance geometry and do not remain in a
+second transient candidate arena. Hot-loop environmental, draft and chart
+buffers are reused between forecast layers.
 
 The forward stage reserves bounded state capacity for recovery. Reverse
 recovery ranks historical forward states from the destination side and tests
 reproducible bridges directly and through destination-centred approach rings.
+Long forward searches yield bounded state tranches to reverse recovery and,
+when necessary, the graph, then resume their retained frontier. An early
+recovery route is an incumbent rather than a guessed ETA bound: forward search
+continues until its chronological frontier reaches the incumbent arrival time
+or its declared state tranche ends. This remains valid with an arbitrarily
+strong favourable current because no polar-STW-to-COG assumption is used.
 If no bridge survives, bounded time-dependent graph search explores position,
 forecast time, heading, tack and propulsion labels in a 120 NM passage corridor. Its
 remaining-time bound comes from the fastest configured polar/motor speed, not
@@ -101,7 +112,9 @@ so a difficult calculation is distinguishable from a stalled component.
 When the selected resolution is coarser than 30 minutes, 1.5 NM or 5 degrees,
 the independently validated initial solution becomes a safe incumbent and the
 component automatically reruns inside a 12 NM-or-wider route corridor at those
-finer limits. Progress explicitly identifies this corridor-refinement pass and
+finer limits. The fine pass can improve that route but does not need to
+rediscover it or search chronologically beyond its arrival merely to retain a
+valid result. Progress explicitly identifies this corridor-refinement pass and
 the result reports the ETA difference as a resolution-sensitivity check. If
 the finer bounded pass fails, the validated initial route is retained. Each
 pass has its own configured state bound.
@@ -122,9 +135,17 @@ chart-corridor validation; its odd probe count always includes the exact
 original-leg midpoint later used for metrics. iGRIB decodes immutable
 catalogue frames once and performs deterministic host-side interpolation for
 intermediate route times, avoiding a full GRIB decode at every 15-minute
-probe. Final progress explicitly reports authoritative chart/depth validation,
-and a rejection identifies land, drying area, shallow `DEPARE`, or missing
-depth evidence. This reference remains a portable-runtime proof of concept: it
+probe. Spatial sampling reuses exact conservative candidate-bin plans shared
+by route states in the same GRIB grid cell. Immutable GRIB samples and CM93
+segment assessments use deterministic output slots with a globally bounded
+helper budget: 1–2 GiB systems get at most one helper for a lone caller, while
+larger systems remain capped at four normal caller/helper slots and concurrent
+departure searches reduce helper availability. CM93 cells also spatially index
+hazard and depth/coverage areas without changing polygon tests or fail-closed
+semantics. Final progress explicitly reports authoritative chart/depth
+validation, and a rejection identifies land, drying area, shallow `DEPARE`, or
+missing depth evidence. This reference remains a portable-runtime proof of
+concept: it
 demonstrates a professional bounded solver cascade over typed host services,
 but it is not a safety-certified navigator and does not import native SuperCPN
 or legacy Weather Routing objects into Wasm.

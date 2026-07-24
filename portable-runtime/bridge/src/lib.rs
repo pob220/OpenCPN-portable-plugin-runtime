@@ -90,7 +90,7 @@ mod api_v02_routing {
     });
 }
 
-const HOST_ABI_VERSION: u32 = 13;
+const HOST_ABI_VERSION: u32 = 14;
 const PORTABLE_API_V01: u32 = 1;
 const PORTABLE_API_V02: u32 = 2;
 const PORTABLE_WORLD_PLUGIN: u32 = 0;
@@ -217,6 +217,8 @@ pub struct RouteRequest {
     labels_per_cell: u8,
     max_hours: u32,
     max_states: u32,
+    inspection_interval_seconds: u32,
+    include_traces: u8,
     avoid_unsafe_charts: u8,
     min_true_wind_angle_degrees: f64,
     max_true_wind_angle_degrees: f64,
@@ -2329,7 +2331,7 @@ macro_rules! normalize_route {
 }
 
 macro_rules! build_route_request {
-    ($request_type:ident, $request:expr, $polars:expr) => {
+    ($request_type:ident, $request:expr, $polars:expr $(, $extra_name:ident : $extra_value:expr)*) => {
         $request_type {
             start_latitude: $request.start_latitude,
             start_longitude: $request.start_longitude,
@@ -2383,6 +2385,7 @@ macro_rules! build_route_request {
                 .then_some($request.maximum_fuel_litres),
             maximum_search_angle_degrees: $request.maximum_search_angle_degrees,
             destination_tolerance_nm: $request.destination_tolerance_nm,
+            $($extra_name: $extra_value,)*
         }
     };
 }
@@ -2483,7 +2486,15 @@ pub unsafe extern "C" fn ocpn_portable_runtime_calculate_route(
                         boat_speeds_knots: polar.boat_speeds_knots,
                     })
                     .collect();
-                let guest_request = build_route_request!(GuestRouteRequest, request, polars);
+                let guest_request = build_route_request!(
+                    GuestRouteRequest,
+                    request,
+                    polars,
+                    inspection_interval_seconds:
+                        (request.inspection_interval_seconds != 0)
+                            .then_some(request.inspection_interval_seconds),
+                    include_traces: request.include_traces != 0
+                );
                 let route = bindings
                     .opencpn_portable_weather_routing_engine()
                     .call_calculate_route(&mut runtime.store, &guest_request)?

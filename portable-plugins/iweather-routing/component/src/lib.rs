@@ -118,6 +118,32 @@ fn candidate_score(request: &RouteRequest, node: &Node) -> f64 {
     ) + node.sailed_nm * 0.04
 }
 
+fn retain_preliminary_candidate(
+    request: &RouteRequest,
+    alternatives_per_cell: usize,
+    sequence: usize,
+    candidate: Node,
+    preliminary: &mut BTreeMap<SearchCell, Vec<(f64, usize, Node)>>,
+    selected: &mut Vec<(usize, Node)>,
+) {
+    let remaining = distance_nm(
+        candidate.lat,
+        candidate.lon,
+        request.destination_latitude,
+        request.destination_longitude,
+    );
+    if candidate.reached_destination || remaining <= request.destination_tolerance_nm {
+        selected.push((sequence, candidate));
+        return;
+    }
+    let labels = preliminary
+        .entry(search_cell(request, &candidate))
+        .or_default();
+    labels.push((candidate_score(request, &candidate), sequence, candidate));
+    labels.sort_by(|a, b| a.0.total_cmp(&b.0));
+    labels.truncate(alternatives_per_cell);
+}
+
 /// Apply the deterministic sector-balanced outer-front reduction used by
 /// mature isochrone routers.  A pure closest-to-destination truncation erases
 /// the sideways progress required to reach the opposite layline, especially
@@ -296,6 +322,92 @@ fn route_chain_indices(nodes: &[Node], endpoint: usize) -> Vec<usize> {
     }
     chain.reverse();
     chain
+}
+
+fn detached_route(nodes: &[Node], endpoint: usize) -> Vec<Node> {
+    route_chain_indices(nodes, endpoint)
+        .into_iter()
+        .enumerate()
+        .map(|(position, index)| {
+            let mut node = nodes[index].clone();
+            node.parent = position.checked_sub(1);
+            node
+        })
+        .collect()
+}
+
+fn install_detached_route(nodes: &mut Vec<Node>, route: &[Node]) -> Option<usize> {
+    if route.is_empty() {
+        return None;
+    }
+    let base = nodes.len();
+    for (position, source) in route.iter().enumerate() {
+        let mut node = source.clone();
+        node.parent = position.checked_sub(1).map(|parent| base + parent);
+        nodes.push(node);
+    }
+    Some(nodes.len() - 1)
+}
+
+fn detached_route_from_points(points: &[RoutePoint]) -> Option<Vec<Node>> {
+    if points.len() < 2 {
+        return None;
+    }
+    let mut sailed_nm = 0.0;
+    let mut route = Vec::with_capacity(points.len());
+    for (index, point) in points.iter().enumerate() {
+        let incoming_heading = if index == 0 {
+            0.0
+        } else {
+            let previous = &points[index - 1];
+            sailed_nm += distance_nm(
+                previous.latitude,
+                previous.longitude,
+                point.latitude,
+                point.longitude,
+            );
+            bearing(
+                previous.latitude,
+                previous.longitude,
+                point.latitude,
+                point.longitude,
+            )
+        };
+        route.push(Node {
+            lat: point.latitude,
+            lon: point.longitude,
+            time: point.unix_time,
+            parent: index.checked_sub(1),
+            sailed_nm,
+            incoming_heading,
+            tack: 0,
+            propulsion_mode: PROPULSION_SAIL,
+            motor_seconds: 0,
+            propulsion_run_seconds: 0,
+            propulsion_transitions: 0,
+            consecutive_wait_seconds: 0,
+            reached_destination: index + 1 == points.len(),
+        });
+    }
+    Some(route)
+}
+
+fn retain_earliest_route(incumbent: &mut Option<Vec<Node>>, candidate: Vec<Node>) -> bool {
+    let replace =
+        incumbent
+            .as_ref()
+            .zip(candidate.last())
+            .is_none_or(|(current, candidate_end)| {
+                current.last().is_none_or(|current_end| {
+                    candidate_end.time < current_end.time
+                        || (candidate_end.time == current_end.time
+                            && candidate_end.motor_seconds < current_end.motor_seconds)
+                })
+            });
+    if replace {
+        *incumbent = Some(candidate);
+    }
+    replace
 }
 
 fn validation_failure_leg(error: &str) -> Option<usize> {
@@ -2291,19 +2403,19 @@ fn reverse_isochrone_recovery(
     request: &RouteRequest,
     nodes: &mut Vec<Node>,
     examined: &mut u32,
+    state_limit: u32,
     corridor: Option<&RouteCorridor>,
     invalid_prefixes: &mut BTreeSet<usize>,
     progress: ProgressRange,
+    progress_base: u8,
+    progress_span: u8,
 ) -> Result<ReverseRecoveryOutcome, String> {
     let mut outcome = ReverseRecoveryOutcome {
         winner: None,
         rejected_candidates: 0,
         last_rejection: None,
     };
-    let graph_reserve = (request.max_states / 5)
-        .max(100)
-        .min(request.max_states / 3);
-    let reverse_state_limit = request.max_states.saturating_sub(graph_reserve);
+    let reverse_state_limit = state_limit.min(request.max_states);
     let mut seeds: Vec<_> = (0..nodes.len()).collect();
     seeds.sort_by(|left, right| {
         distance_nm(
@@ -2349,8 +2461,9 @@ fn reverse_isochrone_recovery(
             continue;
         }
         seed_number += 1;
+        let stage_progress = (seed_number * 4 / MAX_REVERSE_SEEDS).min(4) as u8;
         progress.report(
-            90 + ((seed_number * 4 / MAX_REVERSE_SEEDS).min(4) as u8),
+            progress_base + stage_progress.saturating_mul(progress_span) / 4,
             &format!(
                 "Reverse-isocrone recovery: testing frontier bridge {}/{} ({} retained states examined)",
                 seed_number,
@@ -2383,7 +2496,8 @@ fn reverse_isochrone_recovery(
                     outcome.last_rejection = Some(error);
                     if outcome.rejected_candidates == 1 || outcome.rejected_candidates % 16 == 0 {
                         progress.report(
-                            90 + ((seed_number * 4 / MAX_REVERSE_SEEDS).min(4) as u8),
+                            progress_base
+                                + stage_progress.saturating_mul(progress_span) / 4,
                             &format!(
                                 "Reverse-isocrone recovery: provisional bridge failed independent replay; continuing with alternative approaches ({} rejected)",
                                 outcome.rejected_candidates
@@ -2459,7 +2573,8 @@ fn reverse_isochrone_recovery(
                         if outcome.rejected_candidates == 1 || outcome.rejected_candidates % 16 == 0
                         {
                             progress.report(
-                                90 + ((seed_number * 4 / MAX_REVERSE_SEEDS).min(4) as u8),
+                                progress_base
+                                    + stage_progress.saturating_mul(progress_span) / 4,
                                 &format!(
                                     "Reverse-isocrone recovery: provisional approach failed independent replay; continuing ({} rejected)",
                                     outcome.rejected_candidates
@@ -2698,9 +2813,12 @@ fn time_dependent_graph_fallback(
     request: &RouteRequest,
     nodes: &mut Vec<Node>,
     examined: &mut u32,
+    state_limit: u32,
     corridor: Option<&RouteCorridor>,
     invalid_prefixes: &mut BTreeSet<usize>,
     progress: ProgressRange,
+    progress_base: u8,
+    progress_span: u8,
 ) -> Result<Option<usize>, String> {
     let step = request.time_step_seconds.min(1800).max(300);
     let mut seeds: Vec<_> = (0..nodes.len()).collect();
@@ -2747,8 +2865,8 @@ fn time_dependent_graph_fallback(
                 node: seed,
             });
     }
-    let graph_limit = request
-        .max_states
+    let state_limit = state_limit.min(request.max_states);
+    let graph_limit = state_limit
         .saturating_sub(*examined)
         .min((request.max_states / 4).max(2_000));
     let mut graph_labels = 0u32;
@@ -2757,7 +2875,7 @@ fn time_dependent_graph_fallback(
         if host::routing_cancelled() {
             return Err("route calculation cancelled".into());
         }
-        if graph_labels >= graph_limit || *examined >= request.max_states {
+        if graph_labels >= graph_limit || *examined >= state_limit {
             break;
         }
         let entry_key = (
@@ -2798,7 +2916,7 @@ fn time_dependent_graph_fallback(
                 request.destination_longitude,
                 24 * 3600,
                 examined,
-                request.max_states,
+                state_limit,
                 corridor,
             )? {
                 let chain = route_chain(nodes, index);
@@ -2890,7 +3008,8 @@ fn time_dependent_graph_fallback(
                     (graph_labels.saturating_mul(4) / graph_limit).min(4)
                 };
                 progress.report(
-                    95 + stage_percent as u8,
+                    progress_base
+                        + (stage_percent as u8).saturating_mul(progress_span) / 4,
                     &format!(
                         "Time-dependent graph fallback: {} graph labels accepted, {} retained states examined, {} queued",
                         graph_labels,
@@ -2915,6 +3034,7 @@ fn time_dependent_graph_fallback(
 fn calculate_pass(
     request: RouteRequest,
     corridor: Option<&RouteCorridor>,
+    warm_start: Option<&[RoutePoint]>,
     progress: ProgressRange,
 ) -> Result<RouteResult, String> {
     validate(&request)?;
@@ -2963,25 +3083,39 @@ fn calculate_pass(
     // Otherwise a difficult forward search can consume every label before the
     // explicitly requested reverse and graph stages begin.
     let forward_state_limit = request.max_states.saturating_mul(3) / 5;
+    let interleave_interval = (forward_state_limit / 4).clamp(4_000, 12_000);
+    let recovery_slice = (request.max_states / 20).clamp(1_000, 4_000);
+    let mut next_interleaved_recovery = interleave_interval;
+    let mut recovery_incumbent = warm_start.and_then(detached_route_from_points);
+    let mut incumbent_solver_path = if recovery_incumbent.is_some() {
+        "validated coarse-route warm start"
+    } else {
+        "interleaved reverse-isocrone recovery"
+    };
+    let mut interleaved_recovery_attempts = 0u32;
+    let mut progress_floor = 0u8;
     let mut isochrones = Vec::new();
     let mut traces = Vec::new();
     let mut last_inspection_time = request.departure_unix_time;
+    let mut sample_requests: Vec<EnvironmentSampleRequest> = Vec::new();
+    let mut drafts: Vec<(usize, f64, f64, f64)> = Vec::new();
+    let mut midpoint_requests: Vec<EnvironmentSampleRequest> = Vec::new();
+    let mut chart_segments: Vec<GeoSegment> = Vec::new();
+    let mut chart_ranges: Vec<std::ops::Range<usize>> = Vec::new();
 
     'forward: for layer in 0..max_layers.max(1) {
         if host::routing_cancelled() {
             return Err("route calculation cancelled".into());
         }
-        let sample_requests: Vec<_> = frontier
-            .iter()
-            .map(|&index| {
-                let node = &nodes[index];
-                EnvironmentSampleRequest {
-                    latitude: node.lat,
-                    longitude: node.lon,
-                    unix_time: node.time,
-                }
-            })
-            .collect();
+        sample_requests.clear();
+        sample_requests.extend(frontier.iter().map(|&index| {
+            let node = &nodes[index];
+            EnvironmentSampleRequest {
+                latitude: node.lat,
+                longitude: node.lon,
+                unix_time: node.time,
+            }
+        }));
         let samples = host::environment_sample_batch(&sample_requests)?;
         if samples.len() != frontier.len() {
             return Err("environment provider returned the wrong batch length".into());
@@ -3002,7 +3136,7 @@ fn calculate_pass(
         // scheme makes the search use the same chronological weather point as
         // independent replay; previously a one-hour leg could be admitted by
         // start-of-leg wind and then (correctly) rejected by midpoint wind.
-        let mut drafts: Vec<(usize, f64, f64, f64)> = Vec::new();
+        drafts.clear();
         for (frontier_index, &node_index) in frontier.iter().enumerate() {
             let node = &nodes[node_index];
             let env = &samples[frontier_index];
@@ -3084,25 +3218,30 @@ fn calculate_pass(
             break 'forward;
         }
         generated = generated.saturating_add(drafts.len() as u64);
-        let midpoint_requests: Vec<_> = drafts
-            .iter()
-            .map(
-                |(node_index, _, latitude, longitude)| EnvironmentSampleRequest {
-                    latitude: *latitude,
-                    longitude: *longitude,
-                    unix_time: nodes[*node_index].time + i64::from(request.time_step_seconds / 2),
-                },
-            )
-            .collect();
+        midpoint_requests.clear();
+        midpoint_requests.extend(drafts.iter().map(|(node_index, _, latitude, longitude)| {
+            EnvironmentSampleRequest {
+                latitude: *latitude,
+                longitude: *longitude,
+                unix_time: nodes[*node_index].time + i64::from(request.time_step_seconds / 2),
+            }
+        }));
         let midpoint_samples = host::environment_sample_batch(&midpoint_requests)?;
         if midpoint_samples.len() != drafts.len() {
             return Err("environment provider returned the wrong midpoint batch length".into());
         }
 
-        let mut candidates: Vec<Node> = Vec::new();
+        let alternatives_per_cell = usize::from(request.labels_per_cell)
+            .saturating_mul(4)
+            .max(4);
+        let mut preliminary: BTreeMap<SearchCell, Vec<(f64, usize, Node)>> = BTreeMap::new();
+        let mut selected_candidates = Vec::new();
+        let mut provisional_arrivals: Vec<Node> = Vec::new();
+        let mut provisional_sequences = Vec::new();
         let mut arrival_refinements = Vec::new();
+        let mut candidate_sequence = 0usize;
         for ((node_index, heading, _, _), env) in
-            drafts.into_iter().zip(midpoint_samples.into_iter())
+            drafts.iter().copied().zip(midpoint_samples.into_iter())
         {
             let node = &nodes[node_index];
             let (Some(wind_u), Some(wind_v)) = (env.wind_u_knots, env.wind_v_knots) else {
@@ -3206,17 +3345,15 @@ fn calculate_pass(
                     });
             let (candidate, refinement) =
                 if let Some((candidate, elapsed_seconds, motion)) = provisional {
-                    let candidate_index = candidates.len();
                     (
                         candidate,
-                        Some(ArrivalRefinement {
-                            candidate_index,
+                        Some((
                             node_index,
                             heading,
                             elapsed_seconds,
                             motion,
-                            fallback: full_step_candidate,
-                        }),
+                            full_step_candidate,
+                        )),
                     )
                 } else {
                     let Some(candidate) = full_step_candidate else {
@@ -3227,20 +3364,91 @@ fn calculate_pass(
             if corridor.is_some_and(|route| !route.contains(candidate.lat, candidate.lon)) {
                 continue;
             }
-            candidates.push(candidate);
-            if let Some(refinement) = refinement {
-                arrival_refinements.push(refinement);
+            let sequence = candidate_sequence;
+            candidate_sequence = candidate_sequence.saturating_add(1);
+            if let Some((node_index, heading, elapsed_seconds, motion, fallback)) = refinement {
+                let candidate_index = provisional_arrivals.len();
+                provisional_arrivals.push(candidate);
+                provisional_sequences.push(sequence);
+                arrival_refinements.push(ArrivalRefinement {
+                    candidate_index,
+                    node_index,
+                    heading,
+                    elapsed_seconds,
+                    motion,
+                    fallback,
+                });
+            } else if candidate.lat.is_finite()
+                && candidate.lon.is_finite()
+                && candidate.lat.abs() <= request.maximum_latitude_degrees
+            {
+                retain_preliminary_candidate(
+                    &request,
+                    alternatives_per_cell,
+                    sequence,
+                    candidate,
+                    &mut preliminary,
+                    &mut selected_candidates,
+                );
             }
         }
-        refine_shortened_arrivals(&request, &nodes, &mut candidates, arrival_refinements)?;
-        candidates.retain(|candidate| {
-            candidate.lat.is_finite()
+        refine_shortened_arrivals(
+            &request,
+            &nodes,
+            &mut provisional_arrivals,
+            arrival_refinements,
+        )?;
+        for (sequence, candidate) in provisional_sequences
+            .into_iter()
+            .zip(provisional_arrivals.into_iter())
+        {
+            if candidate.lat.is_finite()
                 && candidate.lon.is_finite()
                 && candidate.lat.abs() <= request.maximum_latitude_degrees
                 && corridor.is_none_or(|route| route.contains(candidate.lat, candidate.lon))
-        });
-        let mut chart_segments: Vec<GeoSegment> = Vec::new();
-        let mut chart_ranges: Vec<std::ops::Range<usize>> = Vec::new();
+            {
+                retain_preliminary_candidate(
+                    &request,
+                    alternatives_per_cell,
+                    sequence,
+                    candidate,
+                    &mut preliminary,
+                    &mut selected_candidates,
+                );
+            }
+        }
+
+        // Chart safety is an expensive host boundary and each route segment
+        // expands into several clearance probes.  Reduce geometrically
+        // equivalent raw headings first, retaining four times the requested
+        // labels per cell so chart rejection still has local alternatives.
+        // Destination-reaching candidates are never pre-pruned.
+        selected_candidates.extend(
+            preliminary
+                .into_values()
+                .flatten()
+                .map(|(_, index, candidate)| (index, candidate)),
+        );
+        // Restore generation order after the per-cell reduction. This keeps
+        // all score ties and later stable sorts deterministic while allowing
+        // discarded raw candidates to be released before clearance geometry
+        // is allocated.
+        selected_candidates.sort_by_key(|(index, _)| *index);
+        let candidates: Vec<Node> = selected_candidates
+            .into_iter()
+            .map(|(_, candidate)| candidate)
+            .collect();
+        if candidates.is_empty() {
+            forward_failure = "no viable states remain after midpoint environmental limits".into();
+            break 'forward;
+        }
+
+        // Clearance corridors are several probes per propagated segment. Do
+        // not construct them for headings which the exact preliminary
+        // per-cell reduction has already discarded.
+        chart_segments.clear();
+        chart_ranges.clear();
+        chart_ranges.reserve(candidates.len());
         for candidate in &candidates {
             let parent = &nodes[candidate
                 .parent
@@ -3263,56 +3471,6 @@ fn calculate_pass(
             ));
             chart_ranges.push(first..chart_segments.len());
         }
-        if candidates.is_empty() {
-            forward_failure = "no viable states remain after midpoint environmental limits".into();
-            break 'forward;
-        }
-
-        // Chart safety is an expensive host boundary and each route segment
-        // expands into several clearance probes.  Reduce geometrically
-        // equivalent raw headings first, retaining four times the requested
-        // labels per cell so chart rejection still has local alternatives.
-        // Destination-reaching candidates are never pre-pruned.
-        let alternatives_per_cell = usize::from(request.labels_per_cell)
-            .saturating_mul(4)
-            .max(4);
-        let mut preliminary: BTreeMap<SearchCell, Vec<(f64, usize)>> = BTreeMap::new();
-        let mut selected_candidates = Vec::new();
-        for (index, candidate) in candidates.iter().enumerate() {
-            let remaining = distance_nm(
-                candidate.lat,
-                candidate.lon,
-                request.destination_latitude,
-                request.destination_longitude,
-            );
-            if candidate.reached_destination || remaining <= request.destination_tolerance_nm {
-                selected_candidates.push(index);
-                continue;
-            }
-            let labels = preliminary
-                .entry(search_cell(&request, candidate))
-                .or_default();
-            labels.push((candidate_score(&request, candidate), index));
-            labels.sort_by(|a, b| a.0.total_cmp(&b.0));
-            labels.truncate(alternatives_per_cell);
-        }
-        selected_candidates.extend(preliminary.into_values().flatten().map(|(_, index)| index));
-        selected_candidates.sort_unstable();
-        selected_candidates.dedup();
-
-        let mut reduced_candidates = Vec::with_capacity(selected_candidates.len());
-        let mut reduced_chart_segments = Vec::new();
-        let mut reduced_chart_ranges = Vec::with_capacity(selected_candidates.len());
-        for index in selected_candidates {
-            reduced_candidates.push(candidates[index].clone());
-            let first = reduced_chart_segments.len();
-            reduced_chart_segments
-                .extend(chart_segments[chart_ranges[index].clone()].iter().cloned());
-            reduced_chart_ranges.push(first..reduced_chart_segments.len());
-        }
-        candidates = reduced_candidates;
-        chart_segments = reduced_chart_segments;
-        chart_ranges = reduced_chart_ranges;
 
         let chart_results = if request.avoid_unsafe_charts {
             query_chart_segments(&chart_segments)?
@@ -3425,15 +3583,18 @@ fn calculate_pass(
         if retain_count < retained_limit || examined >= forward_state_limit {
             budget_exhausted = true;
         }
-        const INSPECTION_INTERVAL_SECONDS: i64 = 2 * 3600;
         let frontier_time = nodes[frontier[0]].time;
-        if frontier_time - last_inspection_time >= INSPECTION_INTERVAL_SECONDS {
+        if request.inspection_interval_seconds.is_some_and(|interval| {
+            interval > 0 && frontier_time - last_inspection_time >= i64::from(interval)
+        }) {
             let (layer_contours, layer_traces) = inspection_geometry(&request, &nodes, &frontier);
             append_bounded_inspection(&mut isochrones, layer_contours, 8_000, 160_000);
-            append_bounded_inspection(&mut traces, layer_traces, 8_000, 160_000);
+            if request.include_traces {
+                append_bounded_inspection(&mut traces, layer_traces, 8_000, 160_000);
+            }
             last_inspection_time = frontier_time;
         }
-        let percent = (((layer + 1) * 90) / max_layers.max(1)).min(89) as u8;
+        let percent = ((((layer + 1) * 90) / max_layers.max(1)).min(89) as u8).max(progress_floor);
         progress.report(
             percent,
             &format!(
@@ -3443,8 +3604,106 @@ fn calculate_pass(
                 generated
             ),
         );
+        if recovery_incumbent
+            .as_ref()
+            .and_then(|route| route.last())
+            .is_some_and(|incumbent| frontier_time >= incumbent.time)
+        {
+            winner = install_detached_route(
+                &mut nodes,
+                recovery_incumbent
+                    .as_ref()
+                    .expect("checked recovery incumbent"),
+            );
+            solver_path = incumbent_solver_path;
+            break;
+        }
+        if winner.is_none()
+            && examined >= next_interleaved_recovery
+            && examined < forward_state_limit
+        {
+            interleaved_recovery_attempts = interleaved_recovery_attempts.saturating_add(1);
+            progress.report(
+                percent,
+                &format!(
+                    "Forward isochrone checkpoint: trying bounded reverse recovery before resuming ({examined}/{forward_state_limit} forward-stage states)"
+                ),
+            );
+            let checkpoint = nodes.len();
+            let reverse_limit = examined
+                .saturating_add(recovery_slice)
+                .min(forward_state_limit);
+            let reverse = reverse_isochrone_recovery(
+                &request,
+                &mut nodes,
+                &mut examined,
+                reverse_limit,
+                corridor,
+                &mut invalid_prefixes,
+                progress,
+                percent,
+                0,
+            )?;
+            if let Some(index) = reverse.winner {
+                if retain_earliest_route(&mut recovery_incumbent, detached_route(&nodes, index)) {
+                    incumbent_solver_path = "interleaved reverse-isocrone recovery";
+                }
+            }
+            nodes.truncate(checkpoint);
+
+            if recovery_incumbent.is_none() && examined < forward_state_limit {
+                progress.report(
+                    percent,
+                    "Time-dependent graph fallback: reverse checkpoint was incomplete; trying a bounded graph tranche",
+                );
+                let graph_limit = examined
+                    .saturating_add(recovery_slice)
+                    .min(forward_state_limit);
+                if let Some(index) = time_dependent_graph_fallback(
+                    &request,
+                    &mut nodes,
+                    &mut examined,
+                    graph_limit,
+                    corridor,
+                    &mut invalid_prefixes,
+                    progress,
+                    percent,
+                    0,
+                )? {
+                    if retain_earliest_route(&mut recovery_incumbent, detached_route(&nodes, index))
+                    {
+                        incumbent_solver_path = "interleaved time-dependent graph fallback";
+                    }
+                }
+                nodes.truncate(checkpoint);
+            }
+            progress_floor = percent;
+            next_interleaved_recovery = examined
+                .saturating_add(interleave_interval)
+                .min(forward_state_limit);
+            if recovery_incumbent
+                .as_ref()
+                .and_then(|route| route.last())
+                .is_some_and(|incumbent| frontier_time >= incumbent.time)
+            {
+                winner = install_detached_route(
+                    &mut nodes,
+                    recovery_incumbent
+                        .as_ref()
+                        .expect("checked recovery incumbent"),
+                );
+                solver_path = incumbent_solver_path;
+                break;
+            }
+        }
         if budget_exhausted {
             break;
+        }
+    }
+    if winner.is_none() {
+        if let Some(incumbent) = recovery_incumbent.as_ref() {
+            winner = install_detached_route(&mut nodes, incumbent);
+            solver_path = incumbent_solver_path;
         }
     }
     if forward_failure.is_empty() && winner.is_none() {
@@ -3491,13 +3750,20 @@ fn calculate_pass(
             ),
         );
         let checkpoint = nodes.len();
+        let graph_reserve = (request.max_states / 5)
+            .max(100)
+            .min(request.max_states / 3);
+        let reverse_limit = request.max_states.saturating_sub(graph_reserve);
         let reverse = reverse_isochrone_recovery(
             &request,
             &mut nodes,
             &mut examined,
+            reverse_limit,
             corridor,
             &mut invalid_prefixes,
             progress,
+            90,
+            4,
         )?;
         if let Some(index) = reverse.winner {
             winner = Some(index);
@@ -3538,9 +3804,12 @@ fn calculate_pass(
             &request,
             &mut nodes,
             &mut examined,
+            request.max_states,
             corridor,
             &mut invalid_prefixes,
             progress,
+            95,
+            4,
         )? {
             winner = Some(index);
             solver_path = "time-dependent graph fallback";
@@ -3571,7 +3840,7 @@ fn calculate_pass(
             duration_seconds: (winner_node.time - request.departure_unix_time).max(0) as u64,
             states_examined: examined,
             diagnostic: format!(
-                "The {solver_path} stage completed using typed iGRIB samples, polar-optimal tack/gybe headings, and batched host chart checks. The exact delivered geometry passed an independent chronological replay using {validation_samples} fresh environmental/chart samples. Solver cascade: forward adaptive isochrone -> reverse-isocrone recovery -> time-dependent graph fallback."
+                "The {solver_path} stage completed using typed iGRIB samples, polar-optimal tack/gybe headings, and batched host chart checks. The exact delivered geometry passed an independent chronological replay using {validation_samples} fresh environmental/chart samples. Solver cascade used {interleaved_recovery_attempts} bounded recovery checkpoint(s) before final forward/reverse/graph completion."
             ),
             points: chain,
             isochrones,
@@ -3620,6 +3889,7 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
         return calculate_pass(
             request,
             None,
+            None,
             ProgressRange {
                 start: 0,
                 end: 100,
@@ -3631,6 +3901,7 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
     let coarse_request = request.clone();
     let mut coarse = calculate_pass(
         coarse_request,
+        None,
         None,
         ProgressRange {
             start: 0,
@@ -3657,6 +3928,7 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
     match calculate_pass(
         fine_request,
         Some(&corridor),
+        Some(&coarse.points),
         ProgressRange {
             start: 70,
             end: 100,
@@ -3818,6 +4090,8 @@ mod tests {
             labels_per_cell: 2,
             max_hours: 120,
             max_states: 80_000,
+            inspection_interval_seconds: Some(7200),
+            include_traces: true,
             avoid_unsafe_charts: true,
             min_true_wind_angle_degrees: 40.0,
             max_true_wind_angle_degrees: 160.0,
@@ -3869,6 +4143,55 @@ mod tests {
             consecutive_wait_seconds: 0,
             reached_destination: false,
         }
+    }
+
+    #[test]
+    fn validated_coarse_route_becomes_a_detached_fine_incumbent() {
+        let points = vec![
+            RoutePoint {
+                latitude: 53.0,
+                longitude: -5.0,
+                unix_time: 100,
+            },
+            RoutePoint {
+                latitude: 53.1,
+                longitude: -5.2,
+                unix_time: 3700,
+            },
+            RoutePoint {
+                latitude: 53.2,
+                longitude: -5.4,
+                unix_time: 7300,
+            },
+        ];
+        let route = detached_route_from_points(&points).expect("valid warm route");
+        assert_eq!(route.len(), points.len());
+        assert_eq!(route[0].parent, None);
+        assert_eq!(route[1].parent, Some(0));
+        assert_eq!(route[2].parent, Some(1));
+        assert!(route[2].reached_destination);
+        assert!(route[2].sailed_nm > route[1].sailed_nm);
+
+        let mut arena = vec![test_node()];
+        let winner = install_detached_route(&mut arena, &route).expect("installed warm route");
+        let rebuilt = route_chain(&arena, winner);
+        assert_eq!(rebuilt.len(), points.len());
+        assert_eq!(rebuilt[0].unix_time, 100);
+        assert_eq!(rebuilt[2].unix_time, 7300);
+    }
+
+    #[test]
+    fn interleaved_incumbent_keeps_the_earliest_arrival() {
+        let mut slower = vec![test_node()];
+        slower[0].time = 500;
+        let mut incumbent = Some(slower);
+        let mut later = vec![test_node()];
+        later[0].time = 600;
+        assert!(!retain_earliest_route(&mut incumbent, later));
+        let mut earlier = vec![test_node()];
+        earlier[0].time = 400;
+        assert!(retain_earliest_route(&mut incumbent, earlier));
+        assert_eq!(incumbent.unwrap()[0].time, 400);
     }
 
     fn test_segment() -> GeoSegment {

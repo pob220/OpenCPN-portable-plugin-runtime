@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define OCPN_PORTABLE_HOST_ABI_VERSION 13u
+#define OCPN_PORTABLE_HOST_ABI_VERSION 14u
 #define OCPN_PORTABLE_API_V01 1u
 #define OCPN_PORTABLE_API_V02 2u
 #define OCPN_PORTABLE_WORLD_PLUGIN 0u
@@ -92,6 +92,8 @@ typedef struct ocpn_portable_route_request {
   uint8_t labels_per_cell;
   uint32_t max_hours;
   uint32_t max_states;
+  uint32_t inspection_interval_seconds; /* zero disables isochrone capture */
+  uint8_t include_traces;
   uint8_t avoid_unsafe_charts;
   double min_true_wind_angle_degrees;
   double max_true_wind_angle_degrees;
@@ -303,13 +305,14 @@ int32_t ocpn_portable_runtime_on_job_event(
     ocpn_portable_runtime* runtime, const char* job_id, size_t job_id_len,
     uint32_t event_kind, uint8_t progress, const char* message,
     size_t message_len, char* error, size_t error_capacity);
-int32_t ocpn_portable_runtime_on_event(
-    ocpn_portable_runtime* runtime, uint32_t event_kind, const char* topic,
-    size_t topic_len, const char* payload, size_t payload_len,
-    uint64_t sequence, char* error, size_t error_capacity);
+int32_t ocpn_portable_runtime_on_event(ocpn_portable_runtime* runtime,
+                                       uint32_t event_kind, const char* topic,
+                                       size_t topic_len, const char* payload,
+                                       size_t payload_len, uint64_t sequence,
+                                       char* error, size_t error_capacity);
 int32_t ocpn_portable_runtime_on_navigation_sentence(
-    ocpn_portable_runtime* runtime, const char* sentence,
-    size_t sentence_len, char* error, size_t error_capacity);
+    ocpn_portable_runtime* runtime, const char* sentence, size_t sentence_len,
+    char* error, size_t error_capacity);
 int32_t ocpn_portable_runtime_on_plugin_message(
     ocpn_portable_runtime* runtime, const char* message_id,
     size_t message_id_len, const char* message_body, size_t message_body_len,

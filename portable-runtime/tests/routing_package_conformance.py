@@ -182,14 +182,30 @@ def main():
             if isinstance(service, dict)
         ):
             raise RuntimeError("routing package omits its environment service")
-        interface = (
+        legacy_interface = (
             destination / "interfaces" / "opencpn-portable.wit"
-        ).read_text()
-        for operation in (
-            "environment-sample-batch",
-            "charts-query-segments",
-            "calculate-route",
-        ):
+        )
+        modular_interfaces = (
+            destination / "interfaces" / "opencpn-portable-0.2"
+        )
+        if legacy_interface.is_file():
+            interface = legacy_interface.read_text()
+            operations = (
+                "environment-sample-batch",
+                "charts-query-segments",
+                "calculate-route",
+            )
+        elif modular_interfaces.is_dir():
+            interface = "\n".join(
+                path.read_text()
+                for path in sorted(modular_interfaces.glob("*.wit"))
+            )
+            operations = ("sample-batch", "query-segments", "calculate-route")
+        else:
+            raise RuntimeError(
+                "routing package omits its declared portable interface contract"
+            )
+        for operation in operations:
             if operation not in interface:
                 raise RuntimeError(f"portable interface omits {operation}")
         helper_root = destination / "helpers"

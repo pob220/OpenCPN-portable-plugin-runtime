@@ -31,6 +31,7 @@ struct HostState {
   std::atomic<bool> routing_cancelled{false};
   std::atomic<unsigned> routing_progress_events{0};
   std::atomic<bool> saw_corridor_refinement{false};
+  std::atomic<bool> saw_graph_fallback{false};
   std::atomic<unsigned> routing_stage{0};
   std::atomic<bool> reject_reverse_charts{false};
   std::atomic<size_t> chart_segments_queried{0};
@@ -209,8 +210,10 @@ void RoutingProgress(void* data, uint8_t, const char* message, size_t length) {
     state.saw_corridor_refinement = true;
   if (text.find("Reverse-isocrone recovery") != std::string::npos)
     state.routing_stage = 1;
-  else if (text.find("Time-dependent graph fallback") != std::string::npos)
+  else if (text.find("Time-dependent graph fallback") != std::string::npos) {
     state.routing_stage = 2;
+    state.saw_graph_fallback = true;
+  }
 }
 uint8_t RoutingCancelled(void* data) {
   return static_cast<HostState*>(data)->routing_cancelled.load() ? 1 : 0;
@@ -254,8 +257,7 @@ int32_t StoragePrivateRead(void*, const char*, size_t, uint8_t* value,
   return 0;
 }
 
-int32_t OpenSurface(void* data, const char* surface_id,
-                    size_t surface_id_len) {
+int32_t OpenSurface(void* data, const char* surface_id, size_t surface_id_len) {
   auto& state = *static_cast<HostState*>(data);
   const std::string id = Text(surface_id, surface_id_len);
   state.environmental_viewer_opened = id == "environment.viewer";
@@ -343,10 +345,9 @@ bool NormalLifecycle(const char* component_path) {
   HostState state;
   auto callbacks = Callbacks(&state);
   char error[4096] = {};
-  auto* runtime = ocpn_portable_runtime_create(component_path, &callbacks,
-                                               OCPN_PORTABLE_API_V02,
-                                               OCPN_PORTABLE_WORLD_PLUGIN,
-                                               error, sizeof(error));
+  auto* runtime = ocpn_portable_runtime_create(
+      component_path, &callbacks, OCPN_PORTABLE_API_V02,
+      OCPN_PORTABLE_WORLD_PLUGIN, error, sizeof(error));
   if (!runtime) {
     std::cerr << "create failed: " << error << '\n';
     return false;
@@ -444,10 +445,9 @@ bool TrapIsContained(const char* component_path) {
   HostState state;
   auto callbacks = Callbacks(&state);
   char error[4096] = {};
-  auto* runtime = ocpn_portable_runtime_create(component_path, &callbacks,
-                                               OCPN_PORTABLE_API_V01,
-                                               OCPN_PORTABLE_WORLD_PLUGIN,
-                                               error, sizeof(error));
+  auto* runtime = ocpn_portable_runtime_create(
+      component_path, &callbacks, OCPN_PORTABLE_API_V01,
+      OCPN_PORTABLE_WORLD_PLUGIN, error, sizeof(error));
   if (!runtime) {
     std::cerr << "trap-test create failed: " << error << '\n';
     return false;
@@ -466,10 +466,9 @@ bool IdentityMismatchIsRejected(const char* component_path) {
   HostState state;
   auto callbacks = Callbacks(&state);
   char error[4096] = {};
-  auto* runtime = ocpn_portable_runtime_create(component_path, &callbacks,
-                                               OCPN_PORTABLE_API_V02,
-                                               OCPN_PORTABLE_WORLD_PLUGIN,
-                                               error, sizeof(error));
+  auto* runtime = ocpn_portable_runtime_create(
+      component_path, &callbacks, OCPN_PORTABLE_API_V02,
+      OCPN_PORTABLE_WORLD_PLUGIN, error, sizeof(error));
   if (!runtime) {
     std::cerr << "identity-test create failed: " << error << '\n';
     return false;
@@ -491,10 +490,9 @@ bool RoutingLifecycle(const char* component_path) {
   HostState state;
   auto callbacks = Callbacks(&state);
   char error[4096] = {};
-  auto* runtime = ocpn_portable_runtime_create(component_path, &callbacks,
-                                               OCPN_PORTABLE_API_V02,
-                                               OCPN_PORTABLE_WORLD_WEATHER_ROUTING,
-                                               error, sizeof(error));
+  auto* runtime = ocpn_portable_runtime_create(
+      component_path, &callbacks, OCPN_PORTABLE_API_V02,
+      OCPN_PORTABLE_WORLD_WEATHER_ROUTING, error, sizeof(error));
   if (!runtime) return false;
   const std::string id = "org.opencpn.iweather-routing";
   const std::string name = "iWeatherRouting";
@@ -589,6 +587,7 @@ bool RoutingLifecycle(const char* component_path) {
                               runtime, &request, &result, error, sizeof(error)),
                           "calculate route", error);
   ok = ok && result.point_count >= 2 && result.states_examined > 0 &&
+       result.isochrone_count == 0 && result.trace_count == 0 &&
        result.route_environment_count == result.point_count &&
        result.duration_seconds > 0 && result.diagnostic_len > 0 &&
        state.routing_progress_events > 0 && result.average_speed_knots > 0.0 &&
@@ -656,6 +655,11 @@ bool RoutingLifecycle(const char* component_path) {
   auto inspection_request = request;
   inspection_request.destination_latitude = 50.2;
   inspection_request.destination_longitude = -3.8;
+  inspection_request.inspection_interval_seconds = 3600;
+  inspection_request.include_traces = 1;
+  // This phase verifies API 0.2 inspection scheduling and result marshalling;
+  // synthetic chart rejection is covered independently above.
+  inspection_request.avoid_unsafe_charts = 0;
   result.point_count = 0;
   result.isochrone_point_count = 0;
   result.isochrone_count = 0;
@@ -793,6 +797,7 @@ bool RoutingLifecycle(const char* component_path) {
   // component must visibly escalate and complete through its bounded
   // time-dependent graph labels rather than reporting a frozen/failed job.
   state.routing_stage = 0;
+  state.saw_graph_fallback = false;
   state.reject_reverse_charts = true;
   result.point_count = 0;
   result.diagnostic_len = 0;
@@ -801,13 +806,16 @@ bool RoutingLifecycle(const char* component_path) {
                  ocpn_portable_runtime_calculate_route(
                      runtime, &reverse_request, &result, error, sizeof(error)),
                  "calculate route using graph fallback", error);
-  ok = ok && state.routing_stage.load() == 2 &&
+  ok = ok && state.saw_graph_fallback.load() &&
        std::string(diagnostic, result.diagnostic_len)
                .find("time-dependent graph fallback") != std::string::npos;
   state.reject_reverse_charts = false;
   state.routing_stage = 0;
   if (!ok) {
-    std::cerr << "graph fallback assertions failed: " << error << '\n';
+    std::cerr << "graph fallback assertions failed (stage "
+              << state.routing_stage.load() << ", diagnostic "
+              << std::string(diagnostic, result.diagnostic_len)
+              << "): " << error << '\n';
     ocpn_portable_runtime_destroy(runtime);
     return false;
   }

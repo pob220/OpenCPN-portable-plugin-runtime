@@ -178,10 +178,77 @@ struct SemanticArea {
   BBox bounds;
 };
 
+class SemanticAreaIndex {
+public:
+  void Build(const std::vector<SemanticArea>& areas,
+             const std::vector<std::uint32_t>& indices) {
+    bins_.clear();
+    global_.clear();
+    for (const std::uint32_t index : indices) {
+      const auto& bounds = areas[index].bounds;
+      const int minimum_latitude = Bin(bounds.min_lat);
+      const int maximum_latitude = Bin(bounds.max_lat);
+      const int minimum_longitude = Bin(bounds.min_lon);
+      const int maximum_longitude = Bin(bounds.max_lon);
+      const std::uint64_t bin_count =
+          static_cast<std::uint64_t>(maximum_latitude - minimum_latitude + 1) *
+          static_cast<std::uint64_t>(maximum_longitude - minimum_longitude + 1);
+      if (bin_count > kMaximumBinsPerArea) {
+        global_.push_back(index);
+        continue;
+      }
+      for (int latitude = minimum_latitude; latitude <= maximum_latitude;
+           ++latitude) {
+        for (int longitude = minimum_longitude; longitude <= maximum_longitude;
+             ++longitude) {
+          bins_[{latitude, longitude}].push_back(index);
+        }
+      }
+    }
+  }
+
+  std::vector<std::uint32_t> Query(const BBox& bounds) const {
+    std::vector<std::uint32_t> candidates = global_;
+    const int minimum_latitude = Bin(bounds.min_lat);
+    const int maximum_latitude = Bin(bounds.max_lat);
+    const int minimum_longitude = Bin(bounds.min_lon);
+    const int maximum_longitude = Bin(bounds.max_lon);
+    for (int latitude = minimum_latitude; latitude <= maximum_latitude;
+         ++latitude) {
+      for (int longitude = minimum_longitude; longitude <= maximum_longitude;
+           ++longitude) {
+        const auto found = bins_.find({latitude, longitude});
+        if (found == bins_.end()) continue;
+        candidates.insert(candidates.end(), found->second.begin(),
+                          found->second.end());
+      }
+    }
+    std::sort(candidates.begin(), candidates.end());
+    candidates.erase(std::unique(candidates.begin(), candidates.end()),
+                     candidates.end());
+    return candidates;
+  }
+
+private:
+  static constexpr double kBinDegrees = 0.05;
+  static constexpr std::uint64_t kMaximumBinsPerArea = 4096;
+
+  static int Bin(double coordinate) {
+    return static_cast<int>(std::floor(coordinate / kBinDegrees));
+  }
+
+  std::map<std::pair<int, int>, std::vector<std::uint32_t>> bins_;
+  std::vector<std::uint32_t> global_;
+};
+
 struct SemanticCell {
   fs::path path;
   int detail = 0;
   std::vector<SemanticArea> areas;
+  std::vector<std::uint32_t> hazard_areas;
+  std::vector<std::uint32_t> classified_areas;
+  SemanticAreaIndex hazard_index;
+  SemanticAreaIndex classified_index;
 };
 
 std::vector<std::string> Split(const std::string& line, char separator) {
@@ -601,6 +668,15 @@ std::shared_ptr<SemanticCell> DecodeCell(const fs::path& path, int detail,
     if (diagnostic) *diagnostic = "CM93 cell contains no safety area semantics";
     return {};
   }
+  for (std::size_t index = 0; index < cell->areas.size(); ++index) {
+    const auto kind = cell->areas[index].kind;
+    if (kind == AreaKind::kLand || kind == AreaKind::kDrying)
+      cell->hazard_areas.push_back(static_cast<std::uint32_t>(index));
+    if (kind == AreaKind::kCoverage || kind == AreaKind::kDepth)
+      cell->classified_areas.push_back(static_cast<std::uint32_t>(index));
+  }
+  cell->hazard_index.Build(cell->areas, cell->hazard_areas);
+  cell->classified_index.Build(cell->areas, cell->classified_areas);
   return cell;
 }
 
@@ -894,6 +970,21 @@ bool SegmentHitsArea(const SemanticGeoPoint& start, const SemanticGeoPoint& end,
   return false;
 }
 
+BBox SegmentQueryBounds(const SemanticGeoPoint& start,
+                        const SemanticGeoPoint& end,
+                        double safety_margin_nautical_miles) {
+  BBox bounds;
+  bounds.Add(start);
+  bounds.Add(end);
+  const double margin_degrees =
+      safety_margin_nautical_miles / kNmPerDegreeLatitude;
+  bounds.min_lat -= margin_degrees;
+  bounds.max_lat += margin_degrees;
+  bounds.min_lon -= margin_degrees;
+  bounds.max_lon += margin_degrees;
+  return bounds;
+}
+
 }  // namespace
 
 struct Cm93SemanticReader::Impl {
@@ -1063,10 +1154,14 @@ SemanticSegmentAssessment Cm93SemanticReader::QuerySegment(
     return result;
   }
 
+  const BBox segment_bounds =
+      SegmentQueryBounds(start, end, safety_margin_nautical_miles);
   for (const auto& item : cells) {
-    for (const auto& area : item.second->areas) {
-      if ((area.kind == AreaKind::kLand || area.kind == AreaKind::kDrying) &&
-          SegmentHitsArea(start, end, area, safety_margin_nautical_miles)) {
+    const auto& cell = *item.second;
+    for (const std::uint32_t area_index :
+         cell.hazard_index.Query(segment_bounds)) {
+      const auto& area = cell.areas[area_index];
+      if (SegmentHitsArea(start, end, area, safety_margin_nautical_miles)) {
         result.state = SemanticSegmentAssessment::State::kUnsafe;
         result.diagnostic =
             area.kind == AreaKind::kLand
@@ -1089,6 +1184,8 @@ SemanticSegmentAssessment Cm93SemanticReader::QuerySegment(
   for (std::size_t i = 0; i < samples; ++i) {
     const auto point =
         Interpolate(start, end, static_cast<double>(i) / (samples - 1));
+    BBox point_bounds;
+    point_bounds.Add(point);
     int best_detail = -1;
     bool classified = false;
     bool has_depth = false;
@@ -1098,10 +1195,11 @@ SemanticSegmentAssessment Cm93SemanticReader::QuerySegment(
       bool cell_classified = false;
       bool cell_has_depth = false;
       double cell_depth = std::numeric_limits<double>::infinity();
-      for (const auto& area : cell.areas) {
+      for (const std::uint32_t area_index :
+           cell.classified_index.Query(point_bounds)) {
+        const auto& area = cell.areas[area_index];
         if (!PointInArea(point, area)) continue;
-        if (area.kind == AreaKind::kCoverage || area.kind == AreaKind::kDepth)
-          cell_classified = true;
+        cell_classified = true;
         if (area.kind == AreaKind::kDepth && area.has_minimum_depth) {
           cell_has_depth = true;
           cell_depth = std::min(cell_depth, area.minimum_depth_metres);

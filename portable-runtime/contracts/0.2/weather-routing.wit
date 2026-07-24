@@ -25,6 +25,8 @@ interface weather-routing-engine {
     labels-per-cell: u8,
     max-hours: u32,
     max-states: u32,
+    inspection-interval-seconds: option<u32>,
+    include-traces: bool,
     avoid-unsafe-charts: bool,
     min-true-wind-angle-degrees: f64,
     max-true-wind-angle-degrees: f64,

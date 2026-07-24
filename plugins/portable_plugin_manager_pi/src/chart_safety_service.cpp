@@ -2,6 +2,7 @@
 
 #include <cmath>
 
+#include "bounded_parallel.h"
 #include "cm93_semantic_reader.h"
 #include "ocpn_plugin.h"
 
@@ -56,19 +57,20 @@ std::string ChartSafetyService::Summary() const {
 std::vector<ChartSafetyServiceResult> ChartSafetyService::QuerySemantic(
     const std::vector<ocpn_portable_geo_segment>& segments,
     const ChartSafetyServiceOptions& options) const {
-  std::vector<ChartSafetyServiceResult> results;
-  results.reserve(segments.size());
-  for (const auto& segment : segments) {
+  std::vector<ChartSafetyServiceResult> results(segments.size());
+  const bool authoritative = AuthoritativeAvailable();
+  BoundedParallelFor(segments.size(), 128, [&](const std::size_t index) {
+    const auto& segment = segments[index];
     if (!ValidPoint(segment.start) || !ValidPoint(segment.end) ||
         !std::isfinite(options.safety_margin_nautical_miles) ||
         !std::isfinite(options.minimum_depth_metres) ||
         options.safety_margin_nautical_miles < 0.0 ||
         options.minimum_depth_metres < 0.0) {
-      results.push_back(
-          {3U, 0U, 6U, "invalid final chart-safety geometry or options"});
-      continue;
+      results[index] = ChartSafetyServiceResult{
+          3U, 0U, 6U, "invalid final chart-safety geometry or options"};
+      return;
     }
-    if (AuthoritativeAvailable()) {
+    if (authoritative) {
       const auto assessment = Cm93Reader().QuerySegment(
           {segment.start.latitude, segment.start.longitude},
           {segment.end.latitude, segment.end.longitude},
@@ -88,14 +90,15 @@ std::vector<ChartSafetyServiceResult> ChartSafetyService::QuerySemantic(
           state = 3U;
           break;
       }
-      results.push_back({state, assessment.charts_considered,
-                         ReasonFor(assessment), assessment.diagnostic});
-      continue;
+      results[index] = ChartSafetyServiceResult{
+          state, assessment.charts_considered, ReasonFor(assessment),
+          assessment.diagnostic};
+      return;
     }
-    results.push_back({2U, 0U, 5U,
-                       "authoritative semantic chart-object and depth safety "
-                       "is unavailable"});
-  }
+    results[index] = ChartSafetyServiceResult{
+        2U, 0U, 5U,
+        "authoritative semantic chart-object and depth safety is unavailable"};
+  });
   return results;
 }
 

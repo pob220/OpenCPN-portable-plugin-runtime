@@ -102,13 +102,13 @@ default.
 ## Linux x86-64 evidence
 
 - Full Test-OpenCPN links with `-Werror`.
-- Twelve focused tests pass: real component lifecycle/trap/identity and typed service
-  exercise (including four concurrent compute replicas and cancellation);
-  package/signing/update security tests; beta-tool security checks; iGRIB
-  target package/helper conformance; all-field decode/generation/strict
-  validation; service-version negotiation; immutable real-GRIB routing
-  fixtures; polar parsing; generator merge/long-range rules; and
-  iWeatherRouting package/UI/service conformance.
+- Seventeen focused native tests pass: real component
+  lifecycle/trap/identity and typed-service exercise (including concurrent
+  compute replicas and cancellation); package/signing/update security tests;
+  permission, broker, scheduler and declarative-UI tests; exact environment
+  sampling and CM93 semantic-index tests; polar parsing; and iWeatherRouting
+  package/UI/service conformance. The Rust runtime bridge passes three tests
+  and the iWeatherRouting component passes sixteen solver tests.
 - The exact final executable and signed packages were launched again in a
   fresh isolated `/tmp` profile. Both components loaded, the broker discovered
   iGRIB's environmental-provider service, and the schema-rendered

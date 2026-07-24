@@ -1,5 +1,6 @@
 #include "environment_service.h"
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -8,6 +9,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #define CHECK(expression)                                            \
@@ -125,6 +127,26 @@ int main() {
       CHECK(indexed.wave_height_metres == scanned.wave_height_metres);
     }
   }
+  std::atomic_bool concurrent_plans_match{true};
+  std::vector<std::thread> sampling_workers;
+  for (int worker = 0; worker < 4; ++worker) {
+    sampling_workers.emplace_back([&] {
+      for (int iteration = 0; iteration < 200; ++iteration) {
+        const auto cached =
+            ppm::SampleEnvironmentFrame(frames[0], 53.1, -5.1);
+        if (cached.available != sample.available ||
+            cached.wind_u_knots != sample.wind_u_knots ||
+            cached.wind_v_knots != sample.wind_v_knots ||
+            cached.current_u_knots != sample.current_u_knots ||
+            cached.current_v_knots != sample.current_v_knots ||
+            cached.wave_height_metres != sample.wave_height_metres) {
+          concurrent_plans_match = false;
+        }
+      }
+    });
+  }
+  for (auto& worker : sampling_workers) worker.join();
+  CHECK(concurrent_plans_match);
   auto first = std::make_shared<const ppm::EnvironmentFrame>(frames[0]);
   auto second_value = frames[0];
   second_value.time = "20260723T1100Z";

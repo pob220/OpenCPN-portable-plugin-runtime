@@ -32,6 +32,8 @@ extern char** environ;
 #include <wx/jsonval.h>
 #include <wx/sstream.h>
 
+#include "bounded_parallel.h"
+
 namespace ppm {
 namespace {
 
@@ -890,15 +892,25 @@ public:
     // Immutable resolved frames are sampled after releasing the decoder/cache
     // mutex. Parallel departure searches therefore share catalogue frames
     // without serialising their much larger spatial request batches.
+    struct SamplingTask {
+      std::shared_ptr<const EnvironmentFrame> frame;
+      std::size_t request = 0;
+    };
+    std::vector<SamplingTask> sampling_tasks;
+    sampling_tasks.reserve(requests.size());
     for (const auto& [time, indices] : by_time) {
       const auto found = resolved_frames.find(time);
       if (found == resolved_frames.end()) continue;
-      for (const auto index : indices) {
-        (*samples)[index] =
-            SampleEnvironmentFrame(*found->second, requests[index].latitude,
-                                   requests[index].longitude);
-      }
+      for (const auto index : indices)
+        sampling_tasks.push_back({found->second, index});
     }
+    BoundedParallelFor(sampling_tasks.size(), 256,
+                       [&](const std::size_t task_index) {
+                         const auto& task = sampling_tasks[task_index];
+                         (*samples)[task.request] = SampleEnvironmentFrame(
+                             *task.frame, requests[task.request].latitude,
+                             requests[task.request].longitude);
+                       });
     if (diagnostic) diagnostic->clear();
     return true;
   }
