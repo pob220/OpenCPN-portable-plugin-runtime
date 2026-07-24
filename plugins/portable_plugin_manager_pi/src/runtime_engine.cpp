@@ -414,6 +414,8 @@ public:
     fs::path package_root;
     fs::path component_path;
     fs::path private_root;
+    std::uint32_t portable_api = OCPN_PORTABLE_API_V01;
+    std::uint32_t portable_world = OCPN_PORTABLE_WORLD_PLUGIN;
     std::set<std::string> requested_permissions;
     std::set<std::string> permissions;
     std::map<std::string, std::string> provided_services;
@@ -1740,7 +1742,9 @@ bool RuntimeEngine::Impl::Start(Instance& instance, std::string* diagnostic) {
     callbacks.charts_query_final_safety = ChartsQueryFinalSafety;
     instance.runtime =
         ocpn_portable_runtime_create(instance.component_path.c_str(),
-                                     &callbacks, error.data(), error.size());
+                                     &callbacks, instance.portable_api,
+                                     instance.portable_world, error.data(),
+                                     error.size());
     if (!instance.runtime ||
         ocpn_portable_runtime_initialize(
             instance.runtime, instance.id.data(), instance.id.size(),
@@ -1906,6 +1910,16 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
   const wxString name = manifest["name"].AsString();
   const wxString version = manifest["version"].AsString();
   const wxString component = manifest["component"].AsString();
+  const wxString portable_api = manifest["portable_api"].AsString();
+  const bool portable_api_v01 = portable_api == ">=0.1.0 <0.2.0";
+  const bool portable_api_v02 = portable_api == ">=0.2.0 <0.3.0";
+  const wxString portable_world =
+      manifest["portable_world"].IsString()
+          ? manifest["portable_world"].AsString()
+          : "plugin";
+  const bool supported_world =
+      portable_world == "plugin" ||
+      portable_world == "weather-routing-plugin";
   const bool development = manifest["development"].AsBool();
   const bool typed =
       manifest["format_version"].IsInt() &&
@@ -1917,7 +1931,9 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
   if (!typed || !IsPackageId(id) || name.empty() ||
       !IsSemanticVersion(version) || !SafeRelativePath(component) ||
       manifest["runtime"].AsString() != ">=0.1.0 <0.2.0" ||
-      manifest["portable_api"].AsString() != ">=0.1.0 <0.2.0" ||
+      (!portable_api_v01 && !portable_api_v02) || !supported_world ||
+      (portable_api_v01 && portable_world != "plugin") ||
+      (portable_api_v02 && !manifest["portable_world"].IsString()) ||
       root.filename() != id.ToStdString()) {
     if (diagnostic) *diagnostic = "incompatible installed package";
     wxLogError("PPM incompatible installed package at %s", root.string());
@@ -1933,6 +1949,12 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
   instance->component_path =
       (root / component.ToStdString()).lexically_normal();
   instance->private_root = storage_root / "data" / instance->id;
+  instance->portable_api =
+      portable_api_v02 ? OCPN_PORTABLE_API_V02 : OCPN_PORTABLE_API_V01;
+  instance->portable_world =
+      portable_world == "weather-routing-plugin"
+          ? OCPN_PORTABLE_WORLD_WEATHER_ROUTING
+          : OCPN_PORTABLE_WORLD_PLUGIN;
   if (development && !developer_mode) {
     instance->failed = true;
     instance->diagnostic =
@@ -2474,22 +2496,12 @@ void RuntimeEngine::Impl::ScheduleEvents(Instance& instance) {
             break;
           }
           std::array<char, kErrorCapacity> error{};
-          int result = 0;
-          std::string operation;
-          if (event.kind == CapabilityEventKind::kNmea0183) {
-            operation = "navigation sentence";
-            result = ocpn_portable_runtime_on_navigation_sentence(
-                instance.runtime, event.payload.data(), event.payload.size(),
-                error.data(), error.size());
-          } else if (event.kind == CapabilityEventKind::kPluginMessage) {
-            operation = "plugin message " + event.topic;
-            result = ocpn_portable_runtime_on_plugin_message(
-                instance.runtime, event.topic.data(), event.topic.size(),
-                event.payload.data(), event.payload.size(), error.data(),
-                error.size());
-          } else {
-            continue;
-          }
+          const std::string operation =
+              std::string("capability event ") + CapabilityEventName(event.kind);
+          const int result = ocpn_portable_runtime_on_event(
+              instance.runtime, static_cast<std::uint32_t>(event.kind),
+              event.topic.data(), event.topic.size(), event.payload.data(),
+              event.payload.size(), event.sequence, error.data(), error.size());
           if (result != 0) {
             Fail(instance, operation,
                  error[0] ? error.data() : "portable event handler failed");

@@ -6,7 +6,8 @@
   "description": "Portable polar and OpenCPN Weather Routing boat editor",
   "component": "component/ipolars.wasm",
   "runtime": ">=0.1.0 <0.2.0",
-  "portable_api": ">=0.1.0 <0.2.0",
+  "portable_api": ">=0.2.0 <0.3.0",
+  "portable_world": "plugin",
   "surfaces": {
     "polars.editor": "ui/ipolars.ui.json"
   },

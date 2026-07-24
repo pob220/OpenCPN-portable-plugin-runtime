@@ -6,7 +6,8 @@
   "description": "Development-only probes for portable runtime capabilities",
   "component": "component/capability-lab.wasm",
   "runtime": ">=0.1.0 <0.2.0",
-  "portable_api": ">=0.1.0 <0.2.0",
+  "portable_api": ">=0.2.0 <0.3.0",
+  "portable_world": "plugin",
   "event_subscriptions": [
     {
       "event": "navigation.nmea0183",

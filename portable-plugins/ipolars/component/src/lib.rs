@@ -1,11 +1,47 @@
 wit_bindgen::generate!({
-    path: "../../../portable-runtime/wit",
+    path: "../../../portable-runtime/contracts/0.2",
     world: "plugin-world",
 });
 
-use opencpn::portable::host::{self, LogLevel};
+use opencpn::portable::types::{Event, EventKind, JobEvent, LogLevel, ServiceError};
 use std::fmt::Write as _;
 use std::sync::Mutex;
+
+fn service_error(message: impl Into<String>) -> ServiceError {
+    ServiceError {
+        code: "plugin-error".into(),
+        message: message.into(),
+        retryable: false,
+    }
+}
+
+mod host {
+    use super::*;
+
+    fn text(error: ServiceError) -> String {
+        format!("{}: {}", error.code, error.message)
+    }
+    pub fn register_action(
+        action_id: &str,
+        label: &str,
+        tooltip: &str,
+        icon: Option<&str>,
+    ) -> Result<u32, String> {
+        opencpn::portable::actions::register(action_id, label, tooltip, icon).map_err(text)
+    }
+    pub fn log(level: LogLevel, message: &str) {
+        opencpn::portable::diagnostics::log(level, message)
+    }
+    pub fn open_surface(surface: &str) -> Result<(), String> {
+        opencpn::portable::surfaces::open(surface).map_err(text)
+    }
+    pub fn user_file_read(grant: &str) -> Result<Vec<u8>, String> {
+        opencpn::portable::storage::user_file_read(grant).map_err(text)
+    }
+    pub fn user_file_write(grant: &str, value: &[u8]) -> Result<(), String> {
+        opencpn::portable::storage::user_file_write(grant, value).map_err(text)
+    }
+}
 
 const SURFACE: &str = "polars.editor";
 
@@ -1023,8 +1059,8 @@ fn looks_like_logbook_konni(text: &str) -> bool {
 }
 
 struct IPolars;
-impl exports::opencpn::portable::plugin::Guest for IPolars {
-    fn initialize() -> Result<exports::opencpn::portable::plugin::PluginInfo, String> {
+impl IPolars {
+    fn initialize() -> Result<exports::opencpn::portable::lifecycle::PluginInfo, String> {
         host::register_action(
             "ipolars.open",
             "iPolars",
@@ -1037,7 +1073,7 @@ impl exports::opencpn::portable::plugin::Guest for IPolars {
         e.new_crossover = "0".into();
         e.status = "New cruising polar — open a .pol or boat .xml file, or begin editing.".into();
         refresh(&mut e);
-        Ok(exports::opencpn::portable::plugin::PluginInfo {
+        Ok(exports::opencpn::portable::lifecycle::PluginInfo {
             id: "org.opencpn.ipolars".into(),
             name: "iPolars".into(),
             version: env!("CARGO_PKG_VERSION").into(),
@@ -1466,19 +1502,55 @@ impl exports::opencpn::portable::plugin::Guest for IPolars {
         refresh(&mut e);
         Ok(response(&e))
     }
-    fn on_job_event(_: String, _: exports::opencpn::portable::plugin::JobEvent) {}
     fn on_navigation_sentence(sentence: String) {
         if let Ok(mut editor) = EDITOR.lock() {
             navigation_sample(&mut editor, &sentence);
         }
     }
-    fn calculate_route(
-        _: exports::opencpn::portable::plugin::RouteRequest,
-    ) -> Result<exports::opencpn::portable::plugin::RouteResult, String> {
-        Err("iPolars edits vessel performance; it does not route.".into())
+}
+
+impl exports::opencpn::portable::lifecycle::Guest for IPolars {
+    fn initialize() -> Result<exports::opencpn::portable::lifecycle::PluginInfo, ServiceError> {
+        IPolars::initialize().map_err(service_error)
     }
-    fn test_trap() {
-        panic!("intentional iPolars conformance trap");
+    fn enable() -> Result<(), ServiceError> {
+        IPolars::enable().map_err(service_error)
+    }
+    fn disable() {
+        IPolars::disable()
+    }
+    fn on_action(id: String) -> Result<(), ServiceError> {
+        IPolars::on_action(id).map_err(service_error)
     }
 }
+
+impl exports::opencpn::portable::surface_event_sink::Guest for IPolars {
+    fn on_surface_event(
+        surface: String,
+        control: String,
+        value: String,
+    ) -> Result<String, ServiceError> {
+        IPolars::on_surface_event(surface, control, value).map_err(service_error)
+    }
+}
+
+impl exports::opencpn::portable::job_event_sink::Guest for IPolars {
+    fn on_job_event(_: String, _: JobEvent) {}
+}
+
+impl exports::opencpn::portable::event_sink::Guest for IPolars {
+    fn on_event(event: Event) -> Result<(), ServiceError> {
+        if event.kind == EventKind::Nmea0183 {
+            IPolars::on_navigation_sentence(event.payload);
+        }
+        Ok(())
+    }
+}
+
+impl exports::opencpn::portable::plugin_message_sink::Guest for IPolars {
+    fn on_plugin_message(_message_id: String, _message_body: String) -> Result<(), ServiceError> {
+        Ok(())
+    }
+}
+
 export!(IPolars);

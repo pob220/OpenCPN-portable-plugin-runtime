@@ -254,7 +254,14 @@ int32_t StoragePrivateRead(void*, const char*, size_t, uint8_t* value,
   return 0;
 }
 
-int32_t OpenSurface(void*, const char*, size_t) { return 0; }
+int32_t OpenSurface(void* data, const char* surface_id,
+                    size_t surface_id_len) {
+  auto& state = *static_cast<HostState*>(data);
+  const std::string id = Text(surface_id, surface_id_len);
+  state.environmental_viewer_opened = id == "environment.viewer";
+  state.weather_routing_opened = id == "routing.workbench";
+  return 0;
+}
 
 int32_t UserFileRead(void*, const char*, size_t, uint8_t*, size_t,
                      size_t* value_len) {
@@ -337,6 +344,8 @@ bool NormalLifecycle(const char* component_path) {
   auto callbacks = Callbacks(&state);
   char error[4096] = {};
   auto* runtime = ocpn_portable_runtime_create(component_path, &callbacks,
+                                               OCPN_PORTABLE_API_V02,
+                                               OCPN_PORTABLE_WORLD_PLUGIN,
                                                error, sizeof(error));
   if (!runtime) {
     std::cerr << "create failed: " << error << '\n';
@@ -436,6 +445,8 @@ bool TrapIsContained(const char* component_path) {
   auto callbacks = Callbacks(&state);
   char error[4096] = {};
   auto* runtime = ocpn_portable_runtime_create(component_path, &callbacks,
+                                               OCPN_PORTABLE_API_V01,
+                                               OCPN_PORTABLE_WORLD_PLUGIN,
                                                error, sizeof(error));
   if (!runtime) {
     std::cerr << "trap-test create failed: " << error << '\n';
@@ -456,6 +467,8 @@ bool IdentityMismatchIsRejected(const char* component_path) {
   auto callbacks = Callbacks(&state);
   char error[4096] = {};
   auto* runtime = ocpn_portable_runtime_create(component_path, &callbacks,
+                                               OCPN_PORTABLE_API_V02,
+                                               OCPN_PORTABLE_WORLD_PLUGIN,
                                                error, sizeof(error));
   if (!runtime) {
     std::cerr << "identity-test create failed: " << error << '\n';
@@ -479,6 +492,8 @@ bool RoutingLifecycle(const char* component_path) {
   auto callbacks = Callbacks(&state);
   char error[4096] = {};
   auto* runtime = ocpn_portable_runtime_create(component_path, &callbacks,
+                                               OCPN_PORTABLE_API_V02,
+                                               OCPN_PORTABLE_WORLD_WEATHER_ROUTING,
                                                error, sizeof(error));
   if (!runtime) return false;
   const std::string id = "org.opencpn.iweather-routing";
@@ -955,12 +970,12 @@ bool RoutingLifecycle(const char* component_path) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc != 3) {
+  if (argc != 4) {
     std::cerr << "usage: portable_runtime_smoke_test <igrib.wasm> "
-                 "<iweather-routing.wasm>\n";
+                 "<iweather-routing.wasm> <legacy-v01.wasm>\n";
     return 2;
   }
-  if (!NormalLifecycle(argv[1]) || !TrapIsContained(argv[1]) ||
+  if (!NormalLifecycle(argv[1]) || !TrapIsContained(argv[3]) ||
       !IdentityMismatchIsRejected(argv[1]) || !RoutingLifecycle(argv[2]))
     return 1;
   std::cout << "portable runtime smoke test passed\n";

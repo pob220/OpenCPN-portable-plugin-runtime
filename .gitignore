@@ -8,6 +8,7 @@
 .vscode
 .portable-toolchain/
 portable-runtime/bridge/target/
+portable-runtime/tests/legacy-v01-component/target/
 portable-plugins/*/component/target/
 __pycache__/
 *.pyc

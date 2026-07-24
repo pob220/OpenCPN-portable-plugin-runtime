@@ -1,10 +1,28 @@
 package opencpn:portable@0.2.0;
 
 world plugin-world {
-  import event-subscriptions;
-  import plugin-messages;
+  import diagnostics;
+  import actions;
+  import navigation;
+  import settings;
+  import scenes;
+  import jobs;
+  import surfaces;
+  import environment;
+  import routing-control;
   import chart-safety;
+  import network;
+  import storage;
+  import plugin-messages;
+
   export lifecycle;
+  export surface-event-sink;
+  export job-event-sink;
   export event-sink;
   export plugin-message-sink;
+}
+
+world weather-routing-plugin-world {
+  include plugin-world;
+  export weather-routing-engine;
 }

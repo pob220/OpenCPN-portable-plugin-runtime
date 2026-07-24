@@ -1,0 +1,110 @@
+package opencpn:portable@0.2.0;
+
+interface weather-routing-engine {
+  use types.{service-error};
+
+  record polar-grid {
+    identity: string,
+    true-wind-speeds-knots: list<f64>,
+    true-wind-angles-degrees: list<f64>,
+    boat-speeds-knots: list<f64>,
+  }
+
+  record route-request {
+    start-latitude: f64,
+    start-longitude: f64,
+    destination-latitude: f64,
+    destination-longitude: f64,
+    departure-unix-time: s64,
+    polars: list<polar-grid>,
+    time-step-seconds: u32,
+    heading-step-degrees: u16,
+    refined-heading-step-degrees: u16,
+    adaptive-headings: bool,
+    spatial-cell-nautical-miles: f64,
+    labels-per-cell: u8,
+    max-hours: u32,
+    max-states: u32,
+    avoid-unsafe-charts: bool,
+    min-true-wind-angle-degrees: f64,
+    max-true-wind-angle-degrees: f64,
+    max-wind-knots: option<f64>,
+    max-apparent-wind-knots: option<f64>,
+    max-wave-metres: option<f64>,
+    max-opposing-wind-current-knots-squared: option<f64>,
+    land-safety-margin-nautical-miles: f64,
+    minimum-chart-depth-metres: f64,
+    require-authoritative-chart-safety: bool,
+    use-currents: bool,
+    require-current-data: bool,
+    use-waves: bool,
+    require-wave-data: bool,
+    maximum-latitude-degrees: f64,
+    upwind-efficiency: f64,
+    downwind-efficiency: f64,
+    tack-penalty-seconds: u32,
+    gybe-penalty-seconds: u32,
+    allow-motor-sailing: bool,
+    allow-motor: bool,
+    motor-below-sailing-speed-knots: f64,
+    motor-speed-knots: f64,
+    motor-sailing-boost-knots: f64,
+    motor-crossover-hysteresis-knots: f64,
+    minimum-motor-run-seconds: u32,
+    mode-change-penalty-seconds: u32,
+    maximum-motor-seconds: option<u32>,
+    fuel-consumption-litres-per-hour: option<f64>,
+    maximum-fuel-litres: option<f64>,
+    maximum-search-angle-degrees: f64,
+    destination-tolerance-nm: f64,
+  }
+
+  record route-point {
+    latitude: f64,
+    longitude: f64,
+    unix-time: s64,
+  }
+
+  record route-inspection-line {
+    unix-time: s64,
+    points: list<route-point>,
+  }
+
+  record route-environment-point {
+    latitude: f64,
+    longitude: f64,
+    unix-time: s64,
+    wind-u-knots: f64,
+    wind-v-knots: f64,
+    current-u-knots: option<f64>,
+    current-v-knots: option<f64>,
+    wave-height-metres: option<f64>,
+  }
+
+  record route-result {
+    points: list<route-point>,
+    isochrones: list<route-inspection-line>,
+    traces: list<route-inspection-line>,
+    route-environment: list<route-environment-point>,
+    distance-nautical-miles: f64,
+    duration-seconds: u64,
+    states-examined: u32,
+    average-speed-knots: f64,
+    maximum-speed-knots: f64,
+    average-sog-knots: f64,
+    maximum-sog-knots: f64,
+    average-wind-knots: f64,
+    maximum-wind-knots: f64,
+    average-current-knots: option<f64>,
+    maximum-current-knots: option<f64>,
+    tacks: u32,
+    motor-seconds: u64,
+    estimated-fuel-litres: option<f64>,
+    propulsion-transitions: u32,
+    comfort-level: u8,
+    diagnostic: string,
+  }
+
+  calculate-route: func(request: route-request)
+    -> result<route-result, service-error>;
+}

@@ -173,8 +173,8 @@ copy_file "${source_root}/data/svg/traditional/emblem-download.svg" \
   "${igrib_root}/resources/http-download.svg"
 copy_file "${source_root}/portable-plugins/igrib/package/igrib-viewer.ui.json" \
   "${igrib_root}/ui/igrib-viewer.ui.json"
-copy_file "${source_root}/portable-runtime/wit/opencpn-portable.wit" \
-  "${igrib_root}/interfaces/opencpn-portable.wit"
+cmake -E copy_directory "${source_root}/portable-runtime/contracts/0.2" \
+  "${igrib_root}/interfaces/opencpn-portable-0.2"
 copy_file "${source_root}/COPYING.gplv2" \
   "${igrib_root}/licenses/GPL-2.0.txt"
 copy_file "${source_root}/portable-plugins/igrib/README.md" \
@@ -197,8 +197,8 @@ copy_file \
 copy_file \
   "${source_root}/portable-plugins/iweather-routing/package/iweather-routing.ui.json" \
   "${iweather_root}/ui/iweather-routing.ui.json"
-copy_file "${source_root}/portable-runtime/wit/opencpn-portable.wit" \
-  "${iweather_root}/interfaces/opencpn-portable.wit"
+cmake -E copy_directory "${source_root}/portable-runtime/contracts/0.2" \
+  "${iweather_root}/interfaces/opencpn-portable-0.2"
 copy_file "${source_root}/COPYING.gplv2" \
   "${iweather_root}/licenses/GPL-2.0.txt"
 copy_file "${source_root}/portable-plugins/iweather-routing/README.md" \
@@ -214,8 +214,8 @@ copy_file \
   "${ipolars_root}/resources/ipolars.svg"
 copy_file "${source_root}/portable-plugins/ipolars/package/ui/ipolars.ui.json" \
   "${ipolars_root}/ui/ipolars.ui.json"
-copy_file "${source_root}/portable-runtime/wit/opencpn-portable.wit" \
-  "${ipolars_root}/interfaces/opencpn-portable.wit"
+cmake -E copy_directory "${source_root}/portable-runtime/contracts/0.2" \
+  "${ipolars_root}/interfaces/opencpn-portable-0.2"
 copy_file "${source_root}/COPYING.gplv2" \
   "${ipolars_root}/licenses/GPL-2.0.txt"
 copy_file "${source_root}/portable-plugins/ipolars/README.md" \

@@ -1,0 +1,89 @@
+package opencpn:portable@0.2.0;
+
+interface diagnostics {
+  use types.{log-level};
+
+  log: func(level: log-level, message: string);
+}
+
+interface actions {
+  use types.{service-error};
+
+  register: func(
+    action-id: string,
+    label: string,
+    tooltip: string,
+    icon-resource: option<string>,
+  ) -> result<u32, service-error>;
+}
+
+interface navigation {
+  use types.{service-error, vessel-position};
+
+  get-vessel-position: func() -> result<vessel-position, service-error>;
+}
+
+interface settings {
+  use types.{service-error};
+
+  get: func(key: string) -> result<option<string>, service-error>;
+  set: func(key: string, value: string) -> result<_, service-error>;
+}
+
+interface scenes {
+  use types.{geo-point, overlay-style, service-error};
+
+  submit-polyline: func(
+    scene-id: string,
+    points: list<geo-point>,
+    style: overlay-style,
+  ) -> result<_, service-error>;
+  clear: func(scene-id: string) -> result<_, service-error>;
+}
+
+interface jobs {
+  use types.{service-error};
+
+  start: func(job-id: string, work-units: u32) -> result<_, service-error>;
+  cancel: func(job-id: string) -> result<_, service-error>;
+}
+
+interface surfaces {
+  use types.{service-error};
+
+  open: func(surface-id: string) -> result<_, service-error>;
+}
+
+interface environment {
+  use types.{environment-sample, environment-sample-request, service-error};
+
+  sample-batch: func(requests: list<environment-sample-request>)
+    -> result<list<environment-sample>, service-error>;
+}
+
+interface routing-control {
+  progress: func(percent: u8, message: string);
+  cancelled: func() -> bool;
+}
+
+interface network {
+  use types.{service-error};
+
+  get-to-private: func(
+    request-id: string,
+    url: string,
+    private-name: string,
+    max-bytes: u64,
+  ) -> result<_, service-error>;
+}
+
+interface storage {
+  use types.{service-error};
+
+  private-read: func(private-name: string)
+    -> result<list<u8>, service-error>;
+  user-file-read: func(grant-token: string)
+    -> result<list<u8>, service-error>;
+  user-file-write: func(grant-token: string, value: list<u8>)
+    -> result<_, service-error>;
+}

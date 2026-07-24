@@ -1,11 +1,85 @@
 wit_bindgen::generate!({
-    path: "../../../portable-runtime/wit",
+    path: "../../../portable-runtime/contracts/0.2",
     world: "plugin-world",
 });
 
-use opencpn::portable::host::{
-    self, ChartCoverageState, GeoPoint, GeoSegment, LogLevel, OverlayStyle, VesselPosition,
+use opencpn::portable::types::{
+    ChartCoverageState, GeoPoint, GeoSegment, JobEvent, LogLevel, OverlayStyle, ServiceError,
+    VesselPosition,
 };
+
+fn service_error(message: impl Into<String>) -> ServiceError {
+    ServiceError {
+        code: "plugin-error".into(),
+        message: message.into(),
+        retryable: false,
+    }
+}
+
+mod host {
+    use super::*;
+
+    fn text(error: ServiceError) -> String {
+        format!("{}: {}", error.code, error.message)
+    }
+
+    pub fn register_action(
+        action_id: &str,
+        label: &str,
+        tooltip: &str,
+        icon: Option<&str>,
+    ) -> Result<u32, String> {
+        opencpn::portable::actions::register(action_id, label, tooltip, icon).map_err(text)
+    }
+    pub fn log(level: LogLevel, message: &str) {
+        opencpn::portable::diagnostics::log(level, message)
+    }
+    pub fn clear_scene(scene_id: &str) -> Result<(), String> {
+        opencpn::portable::scenes::clear(scene_id).map_err(text)
+    }
+    pub fn cancel_job(job_id: &str) -> Result<(), String> {
+        opencpn::portable::jobs::cancel(job_id).map_err(text)
+    }
+    pub fn open_environmental_viewer() -> Result<(), String> {
+        opencpn::portable::surfaces::open("environment.viewer").map_err(text)
+    }
+    pub fn get_vessel_position() -> Result<VesselPosition, String> {
+        opencpn::portable::navigation::get_vessel_position().map_err(text)
+    }
+    pub fn setting_get(key: &str) -> Result<Option<String>, String> {
+        opencpn::portable::settings::get(key).map_err(text)
+    }
+    pub fn setting_set(key: &str, value: &str) -> Result<(), String> {
+        opencpn::portable::settings::set(key, value).map_err(text)
+    }
+    pub fn submit_polyline(
+        scene_id: &str,
+        points: &[GeoPoint],
+        style: OverlayStyle,
+    ) -> Result<(), String> {
+        opencpn::portable::scenes::submit_polyline(scene_id, points, style).map_err(text)
+    }
+    pub fn charts_query_segments(
+        segments: &[GeoSegment],
+    ) -> Result<Vec<opencpn::portable::types::ChartSegmentResult>, String> {
+        opencpn::portable::chart_safety::query_segments(segments).map_err(text)
+    }
+    pub fn start_job(job_id: &str, work_units: u32) -> Result<(), String> {
+        opencpn::portable::jobs::start(job_id, work_units).map_err(text)
+    }
+    pub fn network_get_to_private(
+        request_id: &str,
+        url: &str,
+        private_name: &str,
+        max_bytes: u64,
+    ) -> Result<(), String> {
+        opencpn::portable::network::get_to_private(request_id, url, private_name, max_bytes)
+            .map_err(text)
+    }
+    pub fn storage_private_read(private_name: &str) -> Result<Vec<u8>, String> {
+        opencpn::portable::storage::private_read(private_name).map_err(text)
+    }
+}
 
 struct IGrib;
 
@@ -55,8 +129,8 @@ fn weather_window(position: &VesselPosition) -> Vec<GeoPoint> {
     ]
 }
 
-impl exports::opencpn::portable::plugin::Guest for IGrib {
-    fn initialize() -> Result<exports::opencpn::portable::plugin::PluginInfo, String> {
+impl IGrib {
+    fn initialize() -> Result<exports::opencpn::portable::lifecycle::PluginInfo, String> {
         host::register_action(
             ACTION_TOGGLE,
             "iGRIB",
@@ -64,7 +138,7 @@ impl exports::opencpn::portable::plugin::Guest for IGrib {
             Some("resources/igrib.svg"),
         )?;
         host::log(LogLevel::Info, "iGRIB portable component initialised");
-        Ok(exports::opencpn::portable::plugin::PluginInfo {
+        Ok(exports::opencpn::portable::lifecycle::PluginInfo {
             id: "org.opencpn.igrib".into(),
             name: "iGRIB".into(),
             version: env!("CARGO_PKG_VERSION").into(),
@@ -190,8 +264,7 @@ impl exports::opencpn::portable::plugin::Guest for IGrib {
         Ok(value_json)
     }
 
-    fn on_job_event(job_id: String, event: exports::opencpn::portable::plugin::JobEvent) {
-        use exports::opencpn::portable::plugin::JobEvent;
+    fn on_job_event(job_id: String, event: JobEvent) {
         match event {
             JobEvent::Progress(percent) => {
                 if percent % 25 == 0 {
@@ -220,17 +293,48 @@ impl exports::opencpn::portable::plugin::Guest for IGrib {
             }
         }
     }
+}
 
-    fn on_navigation_sentence(_: String) {}
-
-    fn calculate_route(
-        _request: exports::opencpn::portable::plugin::RouteRequest,
-    ) -> Result<exports::opencpn::portable::plugin::RouteResult, String> {
-        Err("iGRIB is an environmental-data provider, not a routing engine".into())
+impl exports::opencpn::portable::lifecycle::Guest for IGrib {
+    fn initialize() -> Result<exports::opencpn::portable::lifecycle::PluginInfo, ServiceError> {
+        IGrib::initialize().map_err(service_error)
     }
+    fn enable() -> Result<(), ServiceError> {
+        IGrib::enable().map_err(service_error)
+    }
+    fn disable() {
+        IGrib::disable()
+    }
+    fn on_action(action_id: String) -> Result<(), ServiceError> {
+        IGrib::on_action(action_id).map_err(service_error)
+    }
+}
 
-    fn test_trap() {
-        panic!("intentional portable component conformance trap");
+impl exports::opencpn::portable::surface_event_sink::Guest for IGrib {
+    fn on_surface_event(
+        surface_id: String,
+        control_id: String,
+        value_json: String,
+    ) -> Result<String, ServiceError> {
+        IGrib::on_surface_event(surface_id, control_id, value_json).map_err(service_error)
+    }
+}
+
+impl exports::opencpn::portable::job_event_sink::Guest for IGrib {
+    fn on_job_event(job_id: String, event: JobEvent) {
+        IGrib::on_job_event(job_id, event)
+    }
+}
+
+impl exports::opencpn::portable::event_sink::Guest for IGrib {
+    fn on_event(_event: opencpn::portable::types::Event) -> Result<(), ServiceError> {
+        Ok(())
+    }
+}
+
+impl exports::opencpn::portable::plugin_message_sink::Guest for IGrib {
+    fn on_plugin_message(_message_id: String, _message_body: String) -> Result<(), ServiceError> {
+        Ok(())
     }
 }
 

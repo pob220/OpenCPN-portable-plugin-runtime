@@ -152,7 +152,8 @@ bool BuildPackage(const fs::path& output_path, const std::string& version,
       "\","
       "\"component\":\"component/test.wasm\","
       "\"runtime\":\">=0.1.0 <0.2.0\","
-      "\"portable_api\":\">=0.1.0 <0.2.0\","
+      "\"portable_api\":\">=0.2.0 <0.3.0\","
+      "\"portable_world\":\"plugin\","
       "\"permissions\":[\"ui.commands\"],"
       "\"development\":" +
       std::string(options.development ? "true" : "false") + "}";

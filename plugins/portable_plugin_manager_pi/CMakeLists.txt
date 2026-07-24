@@ -41,7 +41,10 @@ else()
 endif()
 file(GLOB_RECURSE PPM_RUNTIME_BRIDGE_SOURCES CONFIGURE_DEPENDS
   "${PPM_RUNTIME_SOURCE_DIR}/bridge/src/*.rs"
-  "${PPM_RUNTIME_SOURCE_DIR}/wit/*.wit")
+  "${PPM_RUNTIME_SOURCE_DIR}/wit/*.wit"
+  "${PPM_RUNTIME_SOURCE_DIR}/contracts/*.wit")
+file(GLOB_RECURSE PPM_PORTABLE_API_V02_SOURCES CONFIGURE_DEPENDS
+  "${OPENCPN_SOURCE_DIR}/portable-runtime/contracts/0.2/*.wit")
 add_custom_command(
   OUTPUT "${PPM_RUNTIME_BRIDGE}"
   COMMAND ${CMAKE_COMMAND} -E env
@@ -459,7 +462,7 @@ if(BUILD_TESTING)
     DEPENDS ${PPM_TEST_IGRIB_SOURCES}
             "${OPENCPN_SOURCE_DIR}/portable-plugins/igrib/component/Cargo.toml"
             "${OPENCPN_SOURCE_DIR}/portable-plugins/igrib/component/Cargo.lock"
-            "${OPENCPN_SOURCE_DIR}/portable-runtime/wit/opencpn-portable.wit"
+            ${PPM_PORTABLE_API_V02_SOURCES}
     COMMENT "Building the portable lifecycle test component"
     VERBATIM)
   add_custom_target(ppm_test_igrib_component
@@ -482,7 +485,7 @@ if(BUILD_TESTING)
     DEPENDS ${PPM_TEST_IWEATHER_SOURCES}
             "${OPENCPN_SOURCE_DIR}/portable-plugins/iweather-routing/component/Cargo.toml"
             "${OPENCPN_SOURCE_DIR}/portable-plugins/iweather-routing/component/Cargo.lock"
-            "${OPENCPN_SOURCE_DIR}/portable-runtime/wit/opencpn-portable.wit"
+            ${PPM_PORTABLE_API_V02_SOURCES}
     COMMENT "Building the iWeatherRouting lifecycle test component"
     VERBATIM)
   add_custom_target(ppm_test_iweather_component
@@ -505,7 +508,7 @@ if(BUILD_TESTING)
     DEPENDS ${PPM_TEST_IPOLARS_SOURCES}
             "${OPENCPN_SOURCE_DIR}/portable-plugins/ipolars/component/Cargo.toml"
             "${OPENCPN_SOURCE_DIR}/portable-plugins/ipolars/component/Cargo.lock"
-            "${OPENCPN_SOURCE_DIR}/portable-runtime/wit/opencpn-portable.wit"
+            ${PPM_PORTABLE_API_V02_SOURCES}
     COMMENT "Building the iPolars lifecycle test component"
     VERBATIM)
   add_custom_target(ppm_test_ipolars_component
@@ -528,11 +531,53 @@ if(BUILD_TESTING)
     DEPENDS ${PPM_TEST_CAPABILITY_SOURCES}
             "${OPENCPN_SOURCE_DIR}/portable-plugins/capability-lab/component/Cargo.toml"
             "${OPENCPN_SOURCE_DIR}/portable-plugins/capability-lab/component/Cargo.lock"
-            "${OPENCPN_SOURCE_DIR}/portable-runtime/wit/opencpn-portable.wit"
+            ${PPM_PORTABLE_API_V02_SOURCES}
     COMMENT "Building the portable capability-lab component"
     VERBATIM)
   add_custom_target(ppm_test_capability_component
                     DEPENDS "${PPM_TEST_CAPABILITY_WASM}")
+
+  set(PPM_TEST_LEGACY_V01_SOURCE
+      "${OPENCPN_SOURCE_DIR}/portable-runtime/tests/legacy-v01-component")
+  set(PPM_TEST_LEGACY_V01_TARGET_DIR
+      "${CMAKE_CURRENT_BINARY_DIR}/ppm-test-legacy-v01-target")
+  set(PPM_TEST_LEGACY_V01_WASM
+      "${PPM_TEST_LEGACY_V01_TARGET_DIR}/wasm32-wasip2/release/legacy_v01_portable_component.wasm")
+  file(GLOB_RECURSE PPM_TEST_LEGACY_V01_SOURCES CONFIGURE_DEPENDS
+    "${PPM_TEST_LEGACY_V01_SOURCE}/src/*.rs")
+  add_custom_command(
+    OUTPUT "${PPM_TEST_LEGACY_V01_WASM}"
+    COMMAND ${CMAKE_COMMAND} -E env
+            "CARGO_TARGET_DIR=${PPM_TEST_LEGACY_V01_TARGET_DIR}"
+            "${PPM_CARGO_EXECUTABLE}" build --locked --offline --release
+            --target wasm32-wasip2
+            --manifest-path "${PPM_TEST_LEGACY_V01_SOURCE}/Cargo.toml"
+    DEPENDS ${PPM_TEST_LEGACY_V01_SOURCES}
+            "${PPM_TEST_LEGACY_V01_SOURCE}/Cargo.toml"
+            "${PPM_TEST_LEGACY_V01_SOURCE}/Cargo.lock"
+            "${OPENCPN_SOURCE_DIR}/portable-runtime/wit/opencpn-portable.wit"
+    COMMENT "Building the portable API 0.1 compatibility fixture"
+    VERBATIM)
+  add_custom_target(ppm_test_legacy_v01_component
+                    DEPENDS "${PPM_TEST_LEGACY_V01_WASM}")
+
+  add_executable(ppm_runtime_bridge_smoke
+    "${OPENCPN_SOURCE_DIR}/portable-runtime/tests/bridge_smoke.cpp")
+  add_dependencies(ppm_runtime_bridge_smoke ppm_test_igrib_component
+                   ppm_test_iweather_component
+                   ppm_test_legacy_v01_component)
+  target_include_directories(ppm_runtime_bridge_smoke PRIVATE
+    "${PPM_RUNTIME_SOURCE_DIR}/bridge/include")
+  target_link_libraries(ppm_runtime_bridge_smoke PRIVATE
+    ppm_runtime_bridge Threads::Threads ${CMAKE_DL_LIBS})
+  if(UNIX AND NOT APPLE)
+    target_link_libraries(ppm_runtime_bridge_smoke PRIVATE m)
+  endif()
+  target_compile_features(ppm_runtime_bridge_smoke PRIVATE cxx_std_17)
+  add_test(
+    NAME ppm_runtime_bridge_smoke
+    COMMAND ppm_runtime_bridge_smoke "${PPM_TEST_IGRIB_WASM}"
+            "${PPM_TEST_IWEATHER_WASM}" "${PPM_TEST_LEGACY_V01_WASM}")
 
   add_executable(ppm_capability_runtime_test
     src/capability_event_broker.cpp

@@ -1,6 +1,84 @@
 package opencpn:portable@0.2.0;
 
 interface types {
+  record service-error {
+    code: string,
+    message: string,
+    retryable: bool,
+  }
+
+  enum log-level {
+    debug,
+    info,
+    warning,
+    error,
+  }
+
+  record vessel-position {
+    latitude: f64,
+    longitude: f64,
+    course-over-ground: option<f64>,
+    speed-over-ground: option<f64>,
+  }
+
+  record geo-point {
+    latitude: f64,
+    longitude: f64,
+  }
+
+  record geo-segment {
+    start: geo-point,
+    end: geo-point,
+  }
+
+  record overlay-style {
+    red: u8,
+    green: u8,
+    blue: u8,
+    alpha: u8,
+    width-pixels: f32,
+  }
+
+  record environment-sample-request {
+    latitude: f64,
+    longitude: f64,
+    unix-time: s64,
+  }
+
+  record environment-sample {
+    wind-u-knots: option<f64>,
+    wind-v-knots: option<f64>,
+    current-u-knots: option<f64>,
+    current-v-knots: option<f64>,
+    wave-height-metres: option<f64>,
+  }
+
+  enum chart-coverage-state {
+    covered,
+    unsafe,
+    missing-coverage,
+    unknown,
+  }
+
+  record chart-segment-result {
+    state: chart-coverage-state,
+    charts-considered: u32,
+    diagnostic: string,
+  }
+
+  record final-chart-safety-options {
+    safety-margin-nautical-miles: f64,
+    minimum-depth-metres: f64,
+    require-authoritative: bool,
+  }
+
+  variant job-event {
+    progress(u8),
+    completed,
+    cancelled,
+    failed(string),
+  }
+
   enum event-kind {
     nmea0183,
     nmea2000,

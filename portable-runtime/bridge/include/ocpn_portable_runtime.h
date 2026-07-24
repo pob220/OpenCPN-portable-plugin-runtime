@@ -8,7 +8,11 @@
 extern "C" {
 #endif
 
-#define OCPN_PORTABLE_HOST_ABI_VERSION 12u
+#define OCPN_PORTABLE_HOST_ABI_VERSION 13u
+#define OCPN_PORTABLE_API_V01 1u
+#define OCPN_PORTABLE_API_V02 2u
+#define OCPN_PORTABLE_WORLD_PLUGIN 0u
+#define OCPN_PORTABLE_WORLD_WEATHER_ROUTING 1u
 
 typedef struct ocpn_portable_runtime ocpn_portable_runtime;
 
@@ -265,7 +269,8 @@ typedef struct ocpn_portable_host_callbacks {
 
 ocpn_portable_runtime* ocpn_portable_runtime_create(
     const char* component_path, const ocpn_portable_host_callbacks* callbacks,
-    char* error, size_t error_capacity);
+    uint32_t portable_api, uint32_t portable_world, char* error,
+    size_t error_capacity);
 
 /* Create a fresh, isolated Store for a compute export. The compiled component,
  * epoch clock and explicitly granted host callbacks are shared; plugin
@@ -298,6 +303,10 @@ int32_t ocpn_portable_runtime_on_job_event(
     ocpn_portable_runtime* runtime, const char* job_id, size_t job_id_len,
     uint32_t event_kind, uint8_t progress, const char* message,
     size_t message_len, char* error, size_t error_capacity);
+int32_t ocpn_portable_runtime_on_event(
+    ocpn_portable_runtime* runtime, uint32_t event_kind, const char* topic,
+    size_t topic_len, const char* payload, size_t payload_len,
+    uint64_t sequence, char* error, size_t error_capacity);
 int32_t ocpn_portable_runtime_on_navigation_sentence(
     ocpn_portable_runtime* runtime, const char* sentence,
     size_t sentence_len, char* error, size_t error_capacity);

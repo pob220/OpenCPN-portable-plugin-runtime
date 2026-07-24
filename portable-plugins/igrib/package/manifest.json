@@ -6,7 +6,8 @@
   "description": "Portable environmental-data proof of concept for OpenCPN",
   "component": "component/igrib.wasm",
   "runtime": ">=0.1.0 <0.2.0",
-  "portable_api": ">=0.1.0 <0.2.0",
+  "portable_api": ">=0.2.0 <0.3.0",
+  "portable_world": "plugin",
   "surfaces": {
     "environment.viewer": "ui/igrib-viewer.ui.json"
   },

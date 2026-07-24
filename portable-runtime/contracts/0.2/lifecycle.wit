@@ -1,14 +1,16 @@
 package opencpn:portable@0.2.0;
 
 interface lifecycle {
+  use types.{service-error};
+
   record plugin-info {
     id: string,
     name: string,
     version: string,
   }
 
-  initialize: func() -> result<plugin-info, string>;
-  enable: func() -> result<_, string>;
+  initialize: func() -> result<plugin-info, service-error>;
+  enable: func() -> result<_, service-error>;
   disable: func();
-  on-action: func(action-id: string) -> result<_, string>;
+  on-action: func(action-id: string) -> result<_, service-error>;
 }

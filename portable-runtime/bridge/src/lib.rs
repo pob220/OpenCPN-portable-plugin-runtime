@@ -22,7 +22,79 @@ wasmtime::component::bindgen!({
     world: "plugin-world",
 });
 
-const HOST_ABI_VERSION: u32 = 12;
+mod api_v02_imports {
+    wasmtime::component::bindgen!({
+        path: "../contracts/0.2",
+        interfaces: "
+            import opencpn:portable/types@0.2.0;
+            import opencpn:portable/diagnostics@0.2.0;
+            import opencpn:portable/actions@0.2.0;
+            import opencpn:portable/navigation@0.2.0;
+            import opencpn:portable/settings@0.2.0;
+            import opencpn:portable/scenes@0.2.0;
+            import opencpn:portable/jobs@0.2.0;
+            import opencpn:portable/surfaces@0.2.0;
+            import opencpn:portable/environment@0.2.0;
+            import opencpn:portable/routing-control@0.2.0;
+            import opencpn:portable/chart-safety@0.2.0;
+            import opencpn:portable/network@0.2.0;
+            import opencpn:portable/storage@0.2.0;
+            import opencpn:portable/plugin-messages@0.2.0;
+        ",
+    });
+}
+
+mod api_v02 {
+    wasmtime::component::bindgen!({
+        path: "../contracts/0.2",
+        world: "plugin-world",
+        with: {
+            "opencpn:portable/types@0.2.0": crate::api_v02_imports::opencpn::portable::types,
+            "opencpn:portable/diagnostics@0.2.0": crate::api_v02_imports::opencpn::portable::diagnostics,
+            "opencpn:portable/actions@0.2.0": crate::api_v02_imports::opencpn::portable::actions,
+            "opencpn:portable/navigation@0.2.0": crate::api_v02_imports::opencpn::portable::navigation,
+            "opencpn:portable/settings@0.2.0": crate::api_v02_imports::opencpn::portable::settings,
+            "opencpn:portable/scenes@0.2.0": crate::api_v02_imports::opencpn::portable::scenes,
+            "opencpn:portable/jobs@0.2.0": crate::api_v02_imports::opencpn::portable::jobs,
+            "opencpn:portable/surfaces@0.2.0": crate::api_v02_imports::opencpn::portable::surfaces,
+            "opencpn:portable/environment@0.2.0": crate::api_v02_imports::opencpn::portable::environment,
+            "opencpn:portable/routing-control@0.2.0": crate::api_v02_imports::opencpn::portable::routing_control,
+            "opencpn:portable/chart-safety@0.2.0": crate::api_v02_imports::opencpn::portable::chart_safety,
+            "opencpn:portable/network@0.2.0": crate::api_v02_imports::opencpn::portable::network,
+            "opencpn:portable/storage@0.2.0": crate::api_v02_imports::opencpn::portable::storage,
+            "opencpn:portable/plugin-messages@0.2.0": crate::api_v02_imports::opencpn::portable::plugin_messages,
+        },
+    });
+}
+
+mod api_v02_routing {
+    wasmtime::component::bindgen!({
+        path: "../contracts/0.2",
+        world: "weather-routing-plugin-world",
+        with: {
+            "opencpn:portable/types@0.2.0": crate::api_v02_imports::opencpn::portable::types,
+            "opencpn:portable/diagnostics@0.2.0": crate::api_v02_imports::opencpn::portable::diagnostics,
+            "opencpn:portable/actions@0.2.0": crate::api_v02_imports::opencpn::portable::actions,
+            "opencpn:portable/navigation@0.2.0": crate::api_v02_imports::opencpn::portable::navigation,
+            "opencpn:portable/settings@0.2.0": crate::api_v02_imports::opencpn::portable::settings,
+            "opencpn:portable/scenes@0.2.0": crate::api_v02_imports::opencpn::portable::scenes,
+            "opencpn:portable/jobs@0.2.0": crate::api_v02_imports::opencpn::portable::jobs,
+            "opencpn:portable/surfaces@0.2.0": crate::api_v02_imports::opencpn::portable::surfaces,
+            "opencpn:portable/environment@0.2.0": crate::api_v02_imports::opencpn::portable::environment,
+            "opencpn:portable/routing-control@0.2.0": crate::api_v02_imports::opencpn::portable::routing_control,
+            "opencpn:portable/chart-safety@0.2.0": crate::api_v02_imports::opencpn::portable::chart_safety,
+            "opencpn:portable/network@0.2.0": crate::api_v02_imports::opencpn::portable::network,
+            "opencpn:portable/storage@0.2.0": crate::api_v02_imports::opencpn::portable::storage,
+            "opencpn:portable/plugin-messages@0.2.0": crate::api_v02_imports::opencpn::portable::plugin_messages,
+        },
+    });
+}
+
+const HOST_ABI_VERSION: u32 = 13;
+const PORTABLE_API_V01: u32 = 1;
+const PORTABLE_API_V02: u32 = 2;
+const PORTABLE_WORLD_PLUGIN: u32 = 0;
+const PORTABLE_WORLD_WEATHER_ROUTING: u32 = 1;
 const ROUTE_POINT_LIMIT: usize = 20_000;
 const ROUTE_INSPECTION_POINT_LIMIT: usize = 200_000;
 const ROUTE_INSPECTION_LINE_LIMIT: usize = 10_000;
@@ -399,12 +471,26 @@ impl Drop for EpochTicker {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ApiKind {
+    V01,
+    V02,
+    V02WeatherRouting,
+}
+
+enum RuntimeBindings {
+    V01(PluginWorld),
+    V02(api_v02::PluginWorld),
+    V02WeatherRouting(api_v02_routing::WeatherRoutingPluginWorld),
+}
+
 pub struct Runtime {
     engine: Engine,
     component: Component,
     callbacks: HostCallbacks,
     store: Store<HostState>,
-    bindings: PluginWorld,
+    bindings: RuntimeBindings,
+    api_kind: ApiKind,
     _epoch_ticker: Arc<EpochTicker>,
 }
 
@@ -412,6 +498,7 @@ fn instantiate_runtime(
     engine: Engine,
     component: Component,
     callbacks: HostCallbacks,
+    api_kind: ApiKind,
     epoch_ticker: Arc<EpochTicker>,
 ) -> anyhow::Result<Runtime> {
     let mut linker = Linker::new(&engine);
@@ -419,7 +506,20 @@ fn instantiate_runtime(
     // environment variables, arguments, stdio, filesystem preopens or
     // network access. OpenCPN capabilities are the only authority source.
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
-    PluginWorld::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)?;
+    match api_kind {
+        ApiKind::V01 => {
+            PluginWorld::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)?;
+        }
+        ApiKind::V02 => {
+            api_v02::PluginWorld::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)?;
+        }
+        ApiKind::V02WeatherRouting => {
+            api_v02_routing::WeatherRoutingPluginWorld::add_to_linker::<_, HasSelf<_>>(
+                &mut linker,
+                |state| state,
+            )?;
+        }
+    }
 
     let limits = StoreLimitsBuilder::new()
         .memory_size(256 * 1024 * 1024)
@@ -440,15 +540,34 @@ fn instantiate_runtime(
     store.limiter(|state| &mut state.limits);
     store.set_fuel(100_000_000)?;
     store.set_epoch_deadline(CALL_EPOCH_DEADLINE);
-    let bindings = PluginWorld::instantiate(&mut store, &component, &linker)?;
+    let bindings = match api_kind {
+        ApiKind::V01 => {
+            RuntimeBindings::V01(PluginWorld::instantiate(&mut store, &component, &linker)?)
+        }
+        ApiKind::V02 => RuntimeBindings::V02(api_v02::PluginWorld::instantiate(
+            &mut store, &component, &linker,
+        )?),
+        ApiKind::V02WeatherRouting => RuntimeBindings::V02WeatherRouting(
+            api_v02_routing::WeatherRoutingPluginWorld::instantiate(
+                &mut store, &component, &linker,
+            )?,
+        ),
+    };
     Ok(Runtime {
         engine,
         component,
         callbacks,
         store,
         bindings,
+        api_kind,
         _epoch_ticker: epoch_ticker,
     })
+}
+
+fn v02_guest_error(
+    error: api_v02_imports::opencpn::portable::types::ServiceError,
+) -> anyhow::Error {
+    anyhow::anyhow!("{}: {}", error.code, error.message)
 }
 
 fn prepare_call(runtime: &mut Runtime) -> anyhow::Result<()> {
@@ -1109,6 +1228,296 @@ impl opencpn::portable::host::Host for HostState {
     }
 }
 
+use api_v02_imports::opencpn::portable::types as v02_types;
+
+fn v02_error(code: &str, message: impl Into<String>, retryable: bool) -> v02_types::ServiceError {
+    v02_types::ServiceError {
+        code: code.to_string(),
+        message: message.into(),
+        retryable,
+    }
+}
+
+fn v02_host_error(message: String) -> v02_types::ServiceError {
+    v02_error("host-service-failed", message, false)
+}
+
+impl api_v02_imports::opencpn::portable::types::Host for HostState {}
+
+impl api_v02_imports::opencpn::portable::diagnostics::Host for HostState {
+    fn log(&mut self, level: v02_types::LogLevel, message: String) {
+        let level = match level {
+            v02_types::LogLevel::Debug => opencpn::portable::host::LogLevel::Debug,
+            v02_types::LogLevel::Info => opencpn::portable::host::LogLevel::Info,
+            v02_types::LogLevel::Warning => opencpn::portable::host::LogLevel::Warning,
+            v02_types::LogLevel::Error => opencpn::portable::host::LogLevel::Error,
+        };
+        <Self as opencpn::portable::host::Host>::log(self, level, message);
+    }
+}
+
+impl api_v02_imports::opencpn::portable::actions::Host for HostState {
+    fn register(
+        &mut self,
+        action_id: String,
+        label: String,
+        tooltip: String,
+        icon_resource: Option<String>,
+    ) -> Result<u32, v02_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::register_action(
+            self,
+            action_id,
+            label,
+            tooltip,
+            icon_resource,
+        )
+        .map_err(v02_host_error)
+    }
+}
+
+impl api_v02_imports::opencpn::portable::navigation::Host for HostState {
+    fn get_vessel_position(
+        &mut self,
+    ) -> Result<v02_types::VesselPosition, v02_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::get_vessel_position(self)
+            .map(|position| v02_types::VesselPosition {
+                latitude: position.latitude,
+                longitude: position.longitude,
+                course_over_ground: position.course_over_ground,
+                speed_over_ground: position.speed_over_ground,
+            })
+            .map_err(v02_host_error)
+    }
+}
+
+impl api_v02_imports::opencpn::portable::settings::Host for HostState {
+    fn get(&mut self, key: String) -> Result<Option<String>, v02_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::setting_get(self, key).map_err(v02_host_error)
+    }
+
+    fn set(&mut self, key: String, value: String) -> Result<(), v02_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::setting_set(self, key, value)
+            .map_err(v02_host_error)
+    }
+}
+
+impl api_v02_imports::opencpn::portable::scenes::Host for HostState {
+    fn submit_polyline(
+        &mut self,
+        scene_id: String,
+        points: Vec<v02_types::GeoPoint>,
+        style: v02_types::OverlayStyle,
+    ) -> Result<(), v02_types::ServiceError> {
+        let points = points
+            .into_iter()
+            .map(|point| opencpn::portable::host::GeoPoint {
+                latitude: point.latitude,
+                longitude: point.longitude,
+            })
+            .collect();
+        let style = opencpn::portable::host::OverlayStyle {
+            red: style.red,
+            green: style.green,
+            blue: style.blue,
+            alpha: style.alpha,
+            width_pixels: style.width_pixels,
+        };
+        <Self as opencpn::portable::host::Host>::submit_polyline(self, scene_id, points, style)
+            .map_err(v02_host_error)
+    }
+
+    fn clear(&mut self, scene_id: String) -> Result<(), v02_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::clear_scene(self, scene_id).map_err(v02_host_error)
+    }
+}
+
+impl api_v02_imports::opencpn::portable::jobs::Host for HostState {
+    fn start(&mut self, job_id: String, work_units: u32) -> Result<(), v02_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::start_job(self, job_id, work_units)
+            .map_err(v02_host_error)
+    }
+
+    fn cancel(&mut self, job_id: String) -> Result<(), v02_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::cancel_job(self, job_id).map_err(v02_host_error)
+    }
+}
+
+impl api_v02_imports::opencpn::portable::surfaces::Host for HostState {
+    fn open(&mut self, surface_id: String) -> Result<(), v02_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::open_surface(self, surface_id)
+            .map_err(v02_host_error)
+    }
+}
+
+impl api_v02_imports::opencpn::portable::environment::Host for HostState {
+    fn sample_batch(
+        &mut self,
+        requests: Vec<v02_types::EnvironmentSampleRequest>,
+    ) -> Result<Vec<v02_types::EnvironmentSample>, v02_types::ServiceError> {
+        let requests = requests
+            .into_iter()
+            .map(
+                |request| opencpn::portable::host::EnvironmentSampleRequest {
+                    latitude: request.latitude,
+                    longitude: request.longitude,
+                    unix_time: request.unix_time,
+                },
+            )
+            .collect();
+        <Self as opencpn::portable::host::Host>::environment_sample_batch(self, requests)
+            .map(|samples| {
+                samples
+                    .into_iter()
+                    .map(|sample| v02_types::EnvironmentSample {
+                        wind_u_knots: sample.wind_u_knots,
+                        wind_v_knots: sample.wind_v_knots,
+                        current_u_knots: sample.current_u_knots,
+                        current_v_knots: sample.current_v_knots,
+                        wave_height_metres: sample.wave_height_metres,
+                    })
+                    .collect()
+            })
+            .map_err(v02_host_error)
+    }
+}
+
+impl api_v02_imports::opencpn::portable::routing_control::Host for HostState {
+    fn progress(&mut self, percent: u8, message: String) {
+        <Self as opencpn::portable::host::Host>::routing_progress(self, percent, message);
+    }
+
+    fn cancelled(&mut self) -> bool {
+        <Self as opencpn::portable::host::Host>::routing_cancelled(self)
+    }
+}
+
+fn v02_geo_segments(
+    segments: Vec<v02_types::GeoSegment>,
+) -> Vec<opencpn::portable::host::GeoSegment> {
+    segments
+        .into_iter()
+        .map(|segment| opencpn::portable::host::GeoSegment {
+            start: opencpn::portable::host::GeoPoint {
+                latitude: segment.start.latitude,
+                longitude: segment.start.longitude,
+            },
+            end: opencpn::portable::host::GeoPoint {
+                latitude: segment.end.latitude,
+                longitude: segment.end.longitude,
+            },
+        })
+        .collect()
+}
+
+fn v02_chart_results(
+    results: Vec<opencpn::portable::host::ChartSegmentResult>,
+) -> Vec<v02_types::ChartSegmentResult> {
+    results
+        .into_iter()
+        .map(|result| v02_types::ChartSegmentResult {
+            state: match result.state {
+                opencpn::portable::host::ChartCoverageState::Covered => {
+                    v02_types::ChartCoverageState::Covered
+                }
+                opencpn::portable::host::ChartCoverageState::Unsafe => {
+                    v02_types::ChartCoverageState::Unsafe
+                }
+                opencpn::portable::host::ChartCoverageState::MissingCoverage => {
+                    v02_types::ChartCoverageState::MissingCoverage
+                }
+                opencpn::portable::host::ChartCoverageState::Unknown => {
+                    v02_types::ChartCoverageState::Unknown
+                }
+            },
+            charts_considered: result.charts_considered,
+            diagnostic: result.diagnostic,
+        })
+        .collect()
+}
+
+impl api_v02_imports::opencpn::portable::chart_safety::Host for HostState {
+    fn query_segments(
+        &mut self,
+        segments: Vec<v02_types::GeoSegment>,
+    ) -> Result<Vec<v02_types::ChartSegmentResult>, v02_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::charts_query_segments(
+            self,
+            v02_geo_segments(segments),
+        )
+        .map(v02_chart_results)
+        .map_err(v02_host_error)
+    }
+
+    fn query_final_safety(
+        &mut self,
+        segments: Vec<v02_types::GeoSegment>,
+        options: v02_types::FinalChartSafetyOptions,
+    ) -> Result<Vec<v02_types::ChartSegmentResult>, v02_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::charts_query_final_safety(
+            self,
+            v02_geo_segments(segments),
+            opencpn::portable::host::FinalChartSafetyOptions {
+                safety_margin_nautical_miles: options.safety_margin_nautical_miles,
+                minimum_depth_metres: options.minimum_depth_metres,
+                require_authoritative: options.require_authoritative,
+            },
+        )
+        .map(v02_chart_results)
+        .map_err(v02_host_error)
+    }
+}
+
+impl api_v02_imports::opencpn::portable::network::Host for HostState {
+    fn get_to_private(
+        &mut self,
+        request_id: String,
+        url: String,
+        private_name: String,
+        max_bytes: u64,
+    ) -> Result<(), v02_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::network_get_to_private(
+            self,
+            request_id,
+            url,
+            private_name,
+            max_bytes,
+        )
+        .map_err(v02_host_error)
+    }
+}
+
+impl api_v02_imports::opencpn::portable::storage::Host for HostState {
+    fn private_read(&mut self, private_name: String) -> Result<Vec<u8>, v02_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::storage_private_read(self, private_name)
+            .map_err(v02_host_error)
+    }
+
+    fn user_file_read(&mut self, grant_token: String) -> Result<Vec<u8>, v02_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::user_file_read(self, grant_token)
+            .map_err(v02_host_error)
+    }
+
+    fn user_file_write(
+        &mut self,
+        grant_token: String,
+        value: Vec<u8>,
+    ) -> Result<(), v02_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::user_file_write(self, grant_token, value)
+            .map_err(v02_host_error)
+    }
+}
+
+impl api_v02_imports::opencpn::portable::plugin_messages::Host for HostState {
+    fn send(
+        &mut self,
+        message_id: String,
+        message_body: String,
+    ) -> Result<(), v02_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::send_plugin_message(self, message_id, message_body)
+            .map_err(v02_host_error)
+    }
+}
+
 fn write_error(error: *mut c_char, capacity: usize, message: &str) {
     if error.is_null() || capacity == 0 {
         return;
@@ -1189,6 +1598,8 @@ fn input_doubles(ptr: *const f64, len: usize) -> anyhow::Result<Vec<f64>> {
 pub unsafe extern "C" fn ocpn_portable_runtime_create(
     component_path: *const c_char,
     callbacks: *const HostCallbacks,
+    portable_api: u32,
+    portable_world: u32,
     error: *mut c_char,
     error_capacity: usize,
 ) -> *mut Runtime {
@@ -1204,6 +1615,14 @@ pub unsafe extern "C" fn ocpn_portable_runtime_create(
                 HOST_ABI_VERSION
             );
         }
+        let api_kind = match (portable_api, portable_world) {
+            (PORTABLE_API_V01, PORTABLE_WORLD_PLUGIN) => ApiKind::V01,
+            (PORTABLE_API_V02, PORTABLE_WORLD_PLUGIN) => ApiKind::V02,
+            (PORTABLE_API_V02, PORTABLE_WORLD_WEATHER_ROUTING) => ApiKind::V02WeatherRouting,
+            _ => anyhow::bail!(
+                "unsupported portable API/world combination {portable_api}/{portable_world}"
+            ),
+        };
         let path = unsafe { CStr::from_ptr(component_path) }.to_str()?;
         let bytes = fs::read(Path::new(path))?;
 
@@ -1229,7 +1648,7 @@ pub unsafe extern "C" fn ocpn_portable_runtime_create(
             stop: epoch_ticker_stop,
             thread: Some(epoch_ticker),
         });
-        instantiate_runtime(engine, component, callbacks, epoch_ticker)
+        instantiate_runtime(engine, component, callbacks, api_kind, epoch_ticker)
     })();
 
     match result {
@@ -1259,6 +1678,7 @@ pub unsafe extern "C" fn ocpn_portable_runtime_clone_compute(
         runtime.engine.clone(),
         runtime.component.clone(),
         runtime.callbacks,
+        runtime.api_kind,
         Arc::clone(&runtime._epoch_ticker),
     ) {
         Ok(replica) => Box::into_raw(Box::new(replica)),
@@ -1297,18 +1717,35 @@ pub unsafe extern "C" fn ocpn_portable_runtime_initialize(
         let expected_id = input_string(expected_id, expected_id_len)?;
         let expected_name = input_string(expected_name, expected_name_len)?;
         let expected_version = input_string(expected_version, expected_version_len)?;
-        let info = runtime
-            .bindings
-            .opencpn_portable_plugin()
-            .call_initialize(&mut runtime.store)?
-            .map_err(anyhow::Error::msg)?;
-        if info.id != expected_id || info.name != expected_name || info.version != expected_version
-        {
+        let (id, name, version) = match &runtime.bindings {
+            RuntimeBindings::V01(bindings) => {
+                let info = bindings
+                    .opencpn_portable_plugin()
+                    .call_initialize(&mut runtime.store)?
+                    .map_err(anyhow::Error::msg)?;
+                (info.id, info.name, info.version)
+            }
+            RuntimeBindings::V02(bindings) => {
+                let info = bindings
+                    .opencpn_portable_lifecycle()
+                    .call_initialize(&mut runtime.store)?
+                    .map_err(v02_guest_error)?;
+                (info.id, info.name, info.version)
+            }
+            RuntimeBindings::V02WeatherRouting(bindings) => {
+                let info = bindings
+                    .opencpn_portable_lifecycle()
+                    .call_initialize(&mut runtime.store)?
+                    .map_err(v02_guest_error)?;
+                (info.id, info.name, info.version)
+            }
+        };
+        if id != expected_id || name != expected_name || version != expected_version {
             anyhow::bail!(
                 "component identity mismatch: manifest ({expected_id}, {expected_name}, {expected_version}), component ({}, {}, {})",
-                info.id,
-                info.name,
-                info.version
+                id,
+                name,
+                version
             );
         }
         Ok(())
@@ -1328,11 +1765,20 @@ pub unsafe extern "C" fn ocpn_portable_runtime_enable(
     };
     let result = (|| -> anyhow::Result<()> {
         prepare_call(runtime)?;
-        runtime
-            .bindings
-            .opencpn_portable_plugin()
-            .call_enable(&mut runtime.store)?
-            .map_err(anyhow::Error::msg)?;
+        match &runtime.bindings {
+            RuntimeBindings::V01(bindings) => bindings
+                .opencpn_portable_plugin()
+                .call_enable(&mut runtime.store)?
+                .map_err(anyhow::Error::msg)?,
+            RuntimeBindings::V02(bindings) => bindings
+                .opencpn_portable_lifecycle()
+                .call_enable(&mut runtime.store)?
+                .map_err(v02_guest_error)?,
+            RuntimeBindings::V02WeatherRouting(bindings) => bindings
+                .opencpn_portable_lifecycle()
+                .call_enable(&mut runtime.store)?
+                .map_err(v02_guest_error)?,
+        }
         Ok(())
     })();
     ffi_result(result, error, error_capacity)
@@ -1350,10 +1796,17 @@ pub unsafe extern "C" fn ocpn_portable_runtime_disable(
     };
     let result = (|| -> anyhow::Result<()> {
         prepare_call(runtime)?;
-        runtime
-            .bindings
-            .opencpn_portable_plugin()
-            .call_disable(&mut runtime.store)?;
+        match &runtime.bindings {
+            RuntimeBindings::V01(bindings) => bindings
+                .opencpn_portable_plugin()
+                .call_disable(&mut runtime.store)?,
+            RuntimeBindings::V02(bindings) => bindings
+                .opencpn_portable_lifecycle()
+                .call_disable(&mut runtime.store)?,
+            RuntimeBindings::V02WeatherRouting(bindings) => bindings
+                .opencpn_portable_lifecycle()
+                .call_disable(&mut runtime.store)?,
+        }
         Ok(())
     })();
     ffi_result(result, error, error_capacity)
@@ -1374,11 +1827,20 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_action(
     let result = (|| -> anyhow::Result<()> {
         prepare_call(runtime)?;
         let action_id = input_string(action_id, action_id_len)?;
-        runtime
-            .bindings
-            .opencpn_portable_plugin()
-            .call_on_action(&mut runtime.store, &action_id)?
-            .map_err(anyhow::Error::msg)?;
+        match &runtime.bindings {
+            RuntimeBindings::V01(bindings) => bindings
+                .opencpn_portable_plugin()
+                .call_on_action(&mut runtime.store, &action_id)?
+                .map_err(anyhow::Error::msg)?,
+            RuntimeBindings::V02(bindings) => bindings
+                .opencpn_portable_lifecycle()
+                .call_on_action(&mut runtime.store, &action_id)?
+                .map_err(v02_guest_error)?,
+            RuntimeBindings::V02WeatherRouting(bindings) => bindings
+                .opencpn_portable_lifecycle()
+                .call_on_action(&mut runtime.store, &action_id)?
+                .map_err(v02_guest_error)?,
+        }
         Ok(())
     })();
     ffi_result(result, error, error_capacity)
@@ -1411,11 +1873,20 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_surface_event(
         if value_json.len() > SETTINGS_VALUE_LIMIT {
             anyhow::bail!("surface event value exceeds the 64 KiB limit");
         }
-        let state = runtime
-            .bindings
-            .opencpn_portable_plugin()
-            .call_on_surface_event(&mut runtime.store, &surface_id, &control_id, &value_json)?
-            .map_err(anyhow::Error::msg)?;
+        let state = match &runtime.bindings {
+            RuntimeBindings::V01(bindings) => bindings
+                .opencpn_portable_plugin()
+                .call_on_surface_event(&mut runtime.store, &surface_id, &control_id, &value_json)?
+                .map_err(anyhow::Error::msg)?,
+            RuntimeBindings::V02(bindings) => bindings
+                .opencpn_portable_surface_event_sink()
+                .call_on_surface_event(&mut runtime.store, &surface_id, &control_id, &value_json)?
+                .map_err(v02_guest_error)?,
+            RuntimeBindings::V02WeatherRouting(bindings) => bindings
+                .opencpn_portable_surface_event_sink()
+                .call_on_surface_event(&mut runtime.store, &surface_id, &control_id, &value_json)?
+                .map_err(v02_guest_error)?,
+        };
         if state.len() > SETTINGS_VALUE_LIMIT {
             anyhow::bail!("surface event state exceeds the 64 KiB limit");
         }
@@ -1455,17 +1926,168 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_job_event(
     let result = (|| -> anyhow::Result<()> {
         prepare_call(runtime)?;
         let job_id = input_string(job_id, job_id_len)?;
-        let event = match event_kind {
-            0 => JobEvent::Progress(progress),
-            1 => JobEvent::Completed,
-            2 => JobEvent::Cancelled,
-            3 => JobEvent::Failed(input_string(message, message_len)?),
-            _ => anyhow::bail!("invalid job event kind {event_kind}"),
-        };
-        runtime
-            .bindings
-            .opencpn_portable_plugin()
-            .call_on_job_event(&mut runtime.store, &job_id, &event)?;
+        let failed_message = (event_kind == 3)
+            .then(|| input_string(message, message_len))
+            .transpose()?;
+        match &runtime.bindings {
+            RuntimeBindings::V01(bindings) => {
+                let event = match event_kind {
+                    0 => JobEvent::Progress(progress),
+                    1 => JobEvent::Completed,
+                    2 => JobEvent::Cancelled,
+                    3 => JobEvent::Failed(failed_message.unwrap_or_default()),
+                    _ => anyhow::bail!("invalid job event kind {event_kind}"),
+                };
+                bindings.opencpn_portable_plugin().call_on_job_event(
+                    &mut runtime.store,
+                    &job_id,
+                    &event,
+                )?;
+            }
+            RuntimeBindings::V02(bindings) => {
+                let event = match event_kind {
+                    0 => v02_types::JobEvent::Progress(progress),
+                    1 => v02_types::JobEvent::Completed,
+                    2 => v02_types::JobEvent::Cancelled,
+                    3 => v02_types::JobEvent::Failed(failed_message.unwrap_or_default()),
+                    _ => anyhow::bail!("invalid job event kind {event_kind}"),
+                };
+                bindings
+                    .opencpn_portable_job_event_sink()
+                    .call_on_job_event(&mut runtime.store, &job_id, &event)?;
+            }
+            RuntimeBindings::V02WeatherRouting(bindings) => {
+                let event = match event_kind {
+                    0 => v02_types::JobEvent::Progress(progress),
+                    1 => v02_types::JobEvent::Completed,
+                    2 => v02_types::JobEvent::Cancelled,
+                    3 => v02_types::JobEvent::Failed(failed_message.unwrap_or_default()),
+                    _ => anyhow::bail!("invalid job event kind {event_kind}"),
+                };
+                bindings
+                    .opencpn_portable_job_event_sink()
+                    .call_on_job_event(&mut runtime.store, &job_id, &event)?;
+            }
+        }
+        Ok(())
+    })();
+    ffi_result(result, error, error_capacity)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ocpn_portable_runtime_on_event(
+    runtime: *mut Runtime,
+    event_kind: u32,
+    topic: *const c_char,
+    topic_len: usize,
+    payload: *const c_char,
+    payload_len: usize,
+    sequence: u64,
+    error: *mut c_char,
+    error_capacity: usize,
+) -> i32 {
+    let Some(runtime) = (unsafe { runtime.as_mut() }) else {
+        write_error(error, error_capacity, "runtime is null");
+        return -1;
+    };
+    let result = (|| -> anyhow::Result<()> {
+        prepare_call(runtime)?;
+        if topic_len > PLUGIN_MESSAGE_ID_LIMIT {
+            anyhow::bail!("event topic exceeds policy");
+        }
+        if payload_len > PLUGIN_MESSAGE_BODY_LIMIT {
+            anyhow::bail!("event payload exceeds policy");
+        }
+        let topic = input_string(topic, topic_len)?;
+        let payload = input_string(payload, payload_len)?;
+        match &runtime.bindings {
+            RuntimeBindings::V01(bindings) => match event_kind {
+                0 => {
+                    if payload.is_empty() || payload.len() > NAVIGATION_SENTENCE_LIMIT {
+                        anyhow::bail!("navigation sentence is empty or exceeds 1024 bytes");
+                    }
+                    bindings
+                        .opencpn_portable_plugin()
+                        .call_on_navigation_sentence(&mut runtime.store, &payload)?;
+                }
+                8 => {
+                    bindings
+                        .opencpn_portable_plugin()
+                        .call_on_surface_event(
+                            &mut runtime.store,
+                            "host.plugin-message",
+                            &topic,
+                            &payload,
+                        )?
+                        .map_err(anyhow::Error::msg)?;
+                }
+                _ => {}
+            },
+            RuntimeBindings::V02(bindings) => {
+                if event_kind == 8 {
+                    bindings
+                        .opencpn_portable_plugin_message_sink()
+                        .call_on_plugin_message(&mut runtime.store, &topic, &payload)?
+                        .map_err(v02_guest_error)?;
+                    return Ok(());
+                }
+                let kind = match event_kind {
+                    0 => v02_types::EventKind::Nmea0183,
+                    1 => v02_types::EventKind::Nmea2000,
+                    2 => v02_types::EventKind::SignalK,
+                    3 => v02_types::EventKind::NavigationPosition,
+                    4 => v02_types::EventKind::AisTarget,
+                    5 => v02_types::EventKind::ActiveLeg,
+                    6 => v02_types::EventKind::Cursor,
+                    7 => v02_types::EventKind::Viewport,
+                    _ => anyhow::bail!("invalid event kind {event_kind}"),
+                };
+                bindings
+                    .opencpn_portable_event_sink()
+                    .call_on_event(
+                        &mut runtime.store,
+                        &v02_types::Event {
+                            kind,
+                            topic,
+                            payload,
+                            sequence,
+                        },
+                    )?
+                    .map_err(v02_guest_error)?;
+            }
+            RuntimeBindings::V02WeatherRouting(bindings) => {
+                if event_kind == 8 {
+                    bindings
+                        .opencpn_portable_plugin_message_sink()
+                        .call_on_plugin_message(&mut runtime.store, &topic, &payload)?
+                        .map_err(v02_guest_error)?;
+                    return Ok(());
+                }
+                let kind = match event_kind {
+                    0 => v02_types::EventKind::Nmea0183,
+                    1 => v02_types::EventKind::Nmea2000,
+                    2 => v02_types::EventKind::SignalK,
+                    3 => v02_types::EventKind::NavigationPosition,
+                    4 => v02_types::EventKind::AisTarget,
+                    5 => v02_types::EventKind::ActiveLeg,
+                    6 => v02_types::EventKind::Cursor,
+                    7 => v02_types::EventKind::Viewport,
+                    _ => anyhow::bail!("invalid event kind {event_kind}"),
+                };
+                bindings
+                    .opencpn_portable_event_sink()
+                    .call_on_event(
+                        &mut runtime.store,
+                        &v02_types::Event {
+                            kind,
+                            topic,
+                            payload,
+                            sequence,
+                        },
+                    )?
+                    .map_err(v02_guest_error)?;
+            }
+        }
         Ok(())
     })();
     ffi_result(result, error, error_capacity)
@@ -1489,10 +2111,35 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_navigation_sentence(
             anyhow::bail!("navigation sentence is empty or exceeds 1024 bytes");
         }
         let sentence = input_string(sentence, sentence_len)?;
-        runtime
-            .bindings
-            .opencpn_portable_plugin()
-            .call_on_navigation_sentence(&mut runtime.store, &sentence)?;
+        match &runtime.bindings {
+            RuntimeBindings::V01(bindings) => bindings
+                .opencpn_portable_plugin()
+                .call_on_navigation_sentence(&mut runtime.store, &sentence)?,
+            RuntimeBindings::V02(bindings) => {
+                let event = v02_types::Event {
+                    kind: v02_types::EventKind::Nmea0183,
+                    topic: String::new(),
+                    payload: sentence,
+                    sequence: 0,
+                };
+                bindings
+                    .opencpn_portable_event_sink()
+                    .call_on_event(&mut runtime.store, &event)?
+                    .map_err(v02_guest_error)?;
+            }
+            RuntimeBindings::V02WeatherRouting(bindings) => {
+                let event = v02_types::Event {
+                    kind: v02_types::EventKind::Nmea0183,
+                    topic: String::new(),
+                    payload: sentence,
+                    sequence: 0,
+                };
+                bindings
+                    .opencpn_portable_event_sink()
+                    .call_on_event(&mut runtime.store, &event)?
+                    .map_err(v02_guest_error)?;
+            }
+        }
         Ok(())
     })();
     ffi_result(result, error, error_capacity)
@@ -1522,19 +2169,222 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_plugin_message(
         }
         let message_id = input_string(message_id, message_id_len)?;
         let message_body = input_string(message_body, message_body_len)?;
-        runtime
-            .bindings
-            .opencpn_portable_plugin()
-            .call_on_surface_event(
-                &mut runtime.store,
-                "host.plugin-message",
-                &message_id,
-                &message_body,
-            )?
-            .map_err(anyhow::Error::msg)?;
+        match &runtime.bindings {
+            RuntimeBindings::V01(bindings) => {
+                bindings
+                    .opencpn_portable_plugin()
+                    .call_on_surface_event(
+                        &mut runtime.store,
+                        "host.plugin-message",
+                        &message_id,
+                        &message_body,
+                    )?
+                    .map_err(anyhow::Error::msg)?;
+            }
+            RuntimeBindings::V02(bindings) => bindings
+                .opencpn_portable_plugin_message_sink()
+                .call_on_plugin_message(&mut runtime.store, &message_id, &message_body)?
+                .map_err(v02_guest_error)?,
+            RuntimeBindings::V02WeatherRouting(bindings) => bindings
+                .opencpn_portable_plugin_message_sink()
+                .call_on_plugin_message(&mut runtime.store, &message_id, &message_body)?
+                .map_err(v02_guest_error)?,
+        }
         Ok(())
     })();
     ffi_result(result, error, error_capacity)
+}
+
+struct NormalizedPolarGrid {
+    identity: String,
+    true_wind_speeds_knots: Vec<f64>,
+    true_wind_angles_degrees: Vec<f64>,
+    boat_speeds_knots: Vec<f64>,
+}
+
+struct NormalizedRoutePoint {
+    latitude: f64,
+    longitude: f64,
+    unix_time: i64,
+}
+
+struct NormalizedRouteLine {
+    unix_time: i64,
+    points: Vec<NormalizedRoutePoint>,
+}
+
+struct NormalizedRouteEnvironmentPoint {
+    latitude: f64,
+    longitude: f64,
+    unix_time: i64,
+    wind_u_knots: f64,
+    wind_v_knots: f64,
+    current_u_knots: Option<f64>,
+    current_v_knots: Option<f64>,
+    wave_height_metres: Option<f64>,
+}
+
+struct NormalizedRoute {
+    points: Vec<NormalizedRoutePoint>,
+    isochrones: Vec<NormalizedRouteLine>,
+    traces: Vec<NormalizedRouteLine>,
+    route_environment: Vec<NormalizedRouteEnvironmentPoint>,
+    distance_nautical_miles: f64,
+    duration_seconds: u64,
+    states_examined: u32,
+    average_speed_knots: f64,
+    maximum_speed_knots: f64,
+    average_sog_knots: f64,
+    maximum_sog_knots: f64,
+    average_wind_knots: f64,
+    maximum_wind_knots: f64,
+    average_current_knots: Option<f64>,
+    maximum_current_knots: Option<f64>,
+    tacks: u32,
+    motor_seconds: u64,
+    estimated_fuel_litres: Option<f64>,
+    propulsion_transitions: u32,
+    comfort_level: u8,
+    diagnostic: String,
+}
+
+macro_rules! normalize_route {
+    ($route:expr) => {{
+        let route = $route;
+        NormalizedRoute {
+            points: route
+                .points
+                .into_iter()
+                .map(|point| NormalizedRoutePoint {
+                    latitude: point.latitude,
+                    longitude: point.longitude,
+                    unix_time: point.unix_time,
+                })
+                .collect(),
+            isochrones: route
+                .isochrones
+                .into_iter()
+                .map(|line| NormalizedRouteLine {
+                    unix_time: line.unix_time,
+                    points: line
+                        .points
+                        .into_iter()
+                        .map(|point| NormalizedRoutePoint {
+                            latitude: point.latitude,
+                            longitude: point.longitude,
+                            unix_time: point.unix_time,
+                        })
+                        .collect(),
+                })
+                .collect(),
+            traces: route
+                .traces
+                .into_iter()
+                .map(|line| NormalizedRouteLine {
+                    unix_time: line.unix_time,
+                    points: line
+                        .points
+                        .into_iter()
+                        .map(|point| NormalizedRoutePoint {
+                            latitude: point.latitude,
+                            longitude: point.longitude,
+                            unix_time: point.unix_time,
+                        })
+                        .collect(),
+                })
+                .collect(),
+            route_environment: route
+                .route_environment
+                .into_iter()
+                .map(|point| NormalizedRouteEnvironmentPoint {
+                    latitude: point.latitude,
+                    longitude: point.longitude,
+                    unix_time: point.unix_time,
+                    wind_u_knots: point.wind_u_knots,
+                    wind_v_knots: point.wind_v_knots,
+                    current_u_knots: point.current_u_knots,
+                    current_v_knots: point.current_v_knots,
+                    wave_height_metres: point.wave_height_metres,
+                })
+                .collect(),
+            distance_nautical_miles: route.distance_nautical_miles,
+            duration_seconds: route.duration_seconds,
+            states_examined: route.states_examined,
+            average_speed_knots: route.average_speed_knots,
+            maximum_speed_knots: route.maximum_speed_knots,
+            average_sog_knots: route.average_sog_knots,
+            maximum_sog_knots: route.maximum_sog_knots,
+            average_wind_knots: route.average_wind_knots,
+            maximum_wind_knots: route.maximum_wind_knots,
+            average_current_knots: route.average_current_knots,
+            maximum_current_knots: route.maximum_current_knots,
+            tacks: route.tacks,
+            motor_seconds: route.motor_seconds,
+            estimated_fuel_litres: route.estimated_fuel_litres,
+            propulsion_transitions: route.propulsion_transitions,
+            comfort_level: route.comfort_level,
+            diagnostic: route.diagnostic,
+        }
+    }};
+}
+
+macro_rules! build_route_request {
+    ($request_type:ident, $request:expr, $polars:expr) => {
+        $request_type {
+            start_latitude: $request.start_latitude,
+            start_longitude: $request.start_longitude,
+            destination_latitude: $request.destination_latitude,
+            destination_longitude: $request.destination_longitude,
+            departure_unix_time: $request.departure_unix_time,
+            polars: $polars,
+            time_step_seconds: $request.time_step_seconds,
+            heading_step_degrees: $request.heading_step_degrees,
+            refined_heading_step_degrees: $request.refined_heading_step_degrees,
+            adaptive_headings: $request.adaptive_headings != 0,
+            spatial_cell_nautical_miles: $request.spatial_cell_nautical_miles,
+            labels_per_cell: $request.labels_per_cell,
+            max_hours: $request.max_hours,
+            max_states: $request.max_states,
+            avoid_unsafe_charts: $request.avoid_unsafe_charts != 0,
+            min_true_wind_angle_degrees: $request.min_true_wind_angle_degrees,
+            max_true_wind_angle_degrees: $request.max_true_wind_angle_degrees,
+            max_wind_knots: ($request.limits_available & 1 != 0).then_some($request.max_wind_knots),
+            max_apparent_wind_knots: ($request.limits_available & 4 != 0)
+                .then_some($request.max_apparent_wind_knots),
+            max_wave_metres: ($request.limits_available & 2 != 0)
+                .then_some($request.max_wave_metres),
+            max_opposing_wind_current_knots_squared: ($request.limits_available & 8 != 0)
+                .then_some($request.max_opposing_wind_current_knots_squared),
+            land_safety_margin_nautical_miles: $request.land_safety_margin_nautical_miles,
+            minimum_chart_depth_metres: $request.minimum_chart_depth_metres,
+            require_authoritative_chart_safety: $request.require_authoritative_chart_safety != 0,
+            use_currents: $request.use_currents != 0,
+            require_current_data: $request.require_current_data != 0,
+            use_waves: $request.use_waves != 0,
+            require_wave_data: $request.require_wave_data != 0,
+            maximum_latitude_degrees: $request.maximum_latitude_degrees,
+            upwind_efficiency: $request.upwind_efficiency,
+            downwind_efficiency: $request.downwind_efficiency,
+            tack_penalty_seconds: $request.tack_penalty_seconds,
+            gybe_penalty_seconds: $request.gybe_penalty_seconds,
+            allow_motor_sailing: $request.allow_motor_sailing != 0,
+            allow_motor: $request.allow_motor != 0,
+            motor_below_sailing_speed_knots: $request.motor_below_sailing_speed_knots,
+            motor_speed_knots: $request.motor_speed_knots,
+            motor_sailing_boost_knots: $request.motor_sailing_boost_knots,
+            motor_crossover_hysteresis_knots: $request.motor_crossover_hysteresis_knots,
+            minimum_motor_run_seconds: $request.minimum_motor_run_seconds,
+            mode_change_penalty_seconds: $request.mode_change_penalty_seconds,
+            maximum_motor_seconds: ($request.limits_available & 16 != 0)
+                .then_some($request.maximum_motor_seconds),
+            fuel_consumption_litres_per_hour: ($request.limits_available & 32 != 0)
+                .then_some($request.fuel_consumption_litres_per_hour),
+            maximum_fuel_litres: ($request.limits_available & 64 != 0)
+                .then_some($request.maximum_fuel_litres),
+            maximum_search_angle_degrees: $request.maximum_search_angle_degrees,
+            destination_tolerance_nm: $request.destination_tolerance_nm,
+        }
+    };
 }
 
 #[unsafe(no_mangle)]
@@ -1589,7 +2439,7 @@ pub unsafe extern "C" fn ocpn_portable_runtime_calculate_route(
             if total_cells > POLAR_CELL_LIMIT {
                 anyhow::bail!("route polar data exceeds the cell limit");
             }
-            polars.push(exports::opencpn::portable::plugin::PolarGrid {
+            polars.push(NormalizedPolarGrid {
                 identity: input_string(raw.identity, raw.identity_len)?,
                 true_wind_speeds_knots: input_doubles(
                     raw.true_wind_speeds_knots,
@@ -1602,64 +2452,48 @@ pub unsafe extern "C" fn ocpn_portable_runtime_calculate_route(
                 boat_speeds_knots: input_doubles(raw.boat_speeds_knots, raw.boat_speed_count)?,
             });
         }
-        let request = exports::opencpn::portable::plugin::RouteRequest {
-            start_latitude: request.start_latitude,
-            start_longitude: request.start_longitude,
-            destination_latitude: request.destination_latitude,
-            destination_longitude: request.destination_longitude,
-            departure_unix_time: request.departure_unix_time,
-            polars,
-            time_step_seconds: request.time_step_seconds,
-            heading_step_degrees: request.heading_step_degrees,
-            refined_heading_step_degrees: request.refined_heading_step_degrees,
-            adaptive_headings: request.adaptive_headings != 0,
-            spatial_cell_nautical_miles: request.spatial_cell_nautical_miles,
-            labels_per_cell: request.labels_per_cell,
-            max_hours: request.max_hours,
-            max_states: request.max_states,
-            avoid_unsafe_charts: request.avoid_unsafe_charts != 0,
-            min_true_wind_angle_degrees: request.min_true_wind_angle_degrees,
-            max_true_wind_angle_degrees: request.max_true_wind_angle_degrees,
-            max_wind_knots: (request.limits_available & 1 != 0).then_some(request.max_wind_knots),
-            max_apparent_wind_knots: (request.limits_available & 4 != 0)
-                .then_some(request.max_apparent_wind_knots),
-            max_wave_metres: (request.limits_available & 2 != 0).then_some(request.max_wave_metres),
-            max_opposing_wind_current_knots_squared: (request.limits_available & 8 != 0)
-                .then_some(request.max_opposing_wind_current_knots_squared),
-            land_safety_margin_nautical_miles: request.land_safety_margin_nautical_miles,
-            minimum_chart_depth_metres: request.minimum_chart_depth_metres,
-            require_authoritative_chart_safety: request.require_authoritative_chart_safety != 0,
-            use_currents: request.use_currents != 0,
-            require_current_data: request.require_current_data != 0,
-            use_waves: request.use_waves != 0,
-            require_wave_data: request.require_wave_data != 0,
-            maximum_latitude_degrees: request.maximum_latitude_degrees,
-            upwind_efficiency: request.upwind_efficiency,
-            downwind_efficiency: request.downwind_efficiency,
-            tack_penalty_seconds: request.tack_penalty_seconds,
-            gybe_penalty_seconds: request.gybe_penalty_seconds,
-            allow_motor_sailing: request.allow_motor_sailing != 0,
-            allow_motor: request.allow_motor != 0,
-            motor_below_sailing_speed_knots: request.motor_below_sailing_speed_knots,
-            motor_speed_knots: request.motor_speed_knots,
-            motor_sailing_boost_knots: request.motor_sailing_boost_knots,
-            motor_crossover_hysteresis_knots: request.motor_crossover_hysteresis_knots,
-            minimum_motor_run_seconds: request.minimum_motor_run_seconds,
-            mode_change_penalty_seconds: request.mode_change_penalty_seconds,
-            maximum_motor_seconds: (request.limits_available & 16 != 0)
-                .then_some(request.maximum_motor_seconds),
-            fuel_consumption_litres_per_hour: (request.limits_available & 32 != 0)
-                .then_some(request.fuel_consumption_litres_per_hour),
-            maximum_fuel_litres: (request.limits_available & 64 != 0)
-                .then_some(request.maximum_fuel_litres),
-            maximum_search_angle_degrees: request.maximum_search_angle_degrees,
-            destination_tolerance_nm: request.destination_tolerance_nm,
+        let route = match &runtime.bindings {
+            RuntimeBindings::V01(bindings) => {
+                use exports::opencpn::portable::plugin::RouteRequest as GuestRouteRequest;
+                let polars = polars
+                    .into_iter()
+                    .map(|polar| exports::opencpn::portable::plugin::PolarGrid {
+                        identity: polar.identity,
+                        true_wind_speeds_knots: polar.true_wind_speeds_knots,
+                        true_wind_angles_degrees: polar.true_wind_angles_degrees,
+                        boat_speeds_knots: polar.boat_speeds_knots,
+                    })
+                    .collect();
+                let guest_request = build_route_request!(GuestRouteRequest, request, polars);
+                let route = bindings
+                    .opencpn_portable_plugin()
+                    .call_calculate_route(&mut runtime.store, &guest_request)?
+                    .map_err(anyhow::Error::msg)?;
+                normalize_route!(route)
+            }
+            RuntimeBindings::V02WeatherRouting(bindings) => {
+                use api_v02_routing::exports::opencpn::portable::weather_routing_engine as routing;
+                use routing::RouteRequest as GuestRouteRequest;
+                let polars = polars
+                    .into_iter()
+                    .map(|polar| routing::PolarGrid {
+                        identity: polar.identity,
+                        true_wind_speeds_knots: polar.true_wind_speeds_knots,
+                        true_wind_angles_degrees: polar.true_wind_angles_degrees,
+                        boat_speeds_knots: polar.boat_speeds_knots,
+                    })
+                    .collect();
+                let guest_request = build_route_request!(GuestRouteRequest, request, polars);
+                let route = bindings
+                    .opencpn_portable_weather_routing_engine()
+                    .call_calculate_route(&mut runtime.store, &guest_request)?
+                    .map_err(v02_guest_error)?;
+                normalize_route!(route)
+            }
+            RuntimeBindings::V02(_) => {
+                anyhow::bail!("portable API 0.2 base world does not export weather routing")
+            }
         };
-        let route = runtime
-            .bindings
-            .opencpn_portable_plugin()
-            .call_calculate_route(&mut runtime.store, &request)?
-            .map_err(anyhow::Error::msg)?;
         output.point_count = route.points.len();
         if route.points.len() > ROUTE_POINT_LIMIT
             || route.points.len() > output.point_capacity
@@ -1680,7 +2514,7 @@ pub unsafe extern "C" fn ocpn_portable_runtime_calculate_route(
                 };
             }
         }
-        let copy_lines = |lines: Vec<exports::opencpn::portable::plugin::RouteInspectionLine>,
+        let copy_lines = |lines: Vec<NormalizedRouteLine>,
                           point_output: *mut RoutePoint,
                           point_capacity: usize,
                           line_output: *mut RouteLine,
@@ -1841,10 +2675,14 @@ pub unsafe extern "C" fn ocpn_portable_runtime_test_trap(
     };
     let result = (|| -> anyhow::Result<()> {
         prepare_call(runtime)?;
-        runtime
-            .bindings
-            .opencpn_portable_plugin()
-            .call_test_trap(&mut runtime.store)?;
+        match &runtime.bindings {
+            RuntimeBindings::V01(bindings) => bindings
+                .opencpn_portable_plugin()
+                .call_test_trap(&mut runtime.store)?,
+            RuntimeBindings::V02(_) | RuntimeBindings::V02WeatherRouting(_) => {
+                anyhow::bail!("test-trap is available only to portable API 0.1 fixtures")
+            }
+        }
         Ok(())
     })();
     ffi_result(result, error, error_capacity)
@@ -1882,15 +2720,4 @@ mod tests {
         assert!(message.contains("80000 retained states"));
         assert!(!message.contains("wasm backtrace"));
     }
-}
-
-#[cfg(test)]
-mod portable_api_v02_contract {
-    // Compile the next API contract on every bridge test build. Keeping it in
-    // a separate bindgen module proves the modular WIT remains well-formed
-    // without changing the production 0.1 world or its installed packages.
-    wasmtime::component::bindgen!({
-        path: "../contracts/0.2",
-        world: "plugin-world",
-    });
 }

@@ -188,6 +188,8 @@ bool RuntimeBridgeProbe::Start(const std::string& component_path) {
   std::array<char, 4096> error{};
   auto callbacks = Callbacks(this);
   runtime_ = ocpn_portable_runtime_create(component_path.c_str(), &callbacks,
+                                           OCPN_PORTABLE_API_V01,
+                                           OCPN_PORTABLE_WORLD_PLUGIN,
                                            error.data(), error.size());
   if (!runtime_) {
     wxLogMessage("RUNTIME_HOST_WASMTIME event=create-failed error=%s",

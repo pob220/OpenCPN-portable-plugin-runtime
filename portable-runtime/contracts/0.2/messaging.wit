@@ -1,9 +1,15 @@
 package opencpn:portable@0.2.0;
 
 interface plugin-messages {
-  send: func(message-id: string, message-body: string) -> result<_, string>;
+  use types.{service-error};
+
+  send: func(message-id: string, message-body: string)
+    -> result<_, service-error>;
 }
 
 interface plugin-message-sink {
-  on-plugin-message: func(message-id: string, message-body: string) -> result<_, string>;
+  use types.{service-error};
+
+  on-plugin-message: func(message-id: string, message-body: string)
+    -> result<_, service-error>;
 }
