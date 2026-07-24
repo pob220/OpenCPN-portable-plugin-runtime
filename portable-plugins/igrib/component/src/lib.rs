@@ -60,7 +60,7 @@ impl exports::opencpn::portable::plugin::Guest for IGrib {
         host::register_action(
             ACTION_TOGGLE,
             "iGRIB",
-            "Open the portable iGRIB proof of concept",
+            "Open portable iGRIB",
             Some("resources/igrib.svg"),
         )?;
         host::log(LogLevel::Info, "iGRIB portable component initialised");
