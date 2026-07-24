@@ -38,11 +38,12 @@ default.
   `charts.segment-safety` capability. Its stock-5.14-compatible CM93 decoder
   reads configured chart roots without an OpenCPN core patch, caches immutable
   cells and classifies `LNDARE`, `DRGARE`, `ITDARE` and `DEPARE/DRVAL1`.
-  Semantic land/drying checks run during route propagation; every delivered
-  route then undergoes 15-minute/~1.5 NM five-line corridor validation with
-  the configured minimum depth. Strict requests fail closed on missing
-  semantic/depth evidence. The public GSHHS check remains an explicitly
-  advisory fallback only.
+  Semantic land/drying checks run on routing workers during propagation using
+  exact CM93 cell-grid traversal; only unresolved advisory GSHHS fallbacks are
+  marshalled to OpenCPN's main thread. Every delivered route then undergoes
+  15-minute/~1.5 NM five-line corridor validation with the configured minimum
+  depth. Strict requests fail closed on missing semantic/depth evidence. The
+  public GSHHS check remains an explicitly advisory fallback only.
 - Host-rendered declarative UI v2 environmental surface with readable UTC timeline
   navigation/playback, chart-cursor values, progress/cancellation,
   open/settings/download/generate actions and native file pickers. Persistent

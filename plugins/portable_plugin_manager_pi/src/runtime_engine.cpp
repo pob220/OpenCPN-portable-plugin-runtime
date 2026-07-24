@@ -160,11 +160,11 @@ bool ValidateRoutingRequest(const RoutingRequest& request,
                        return std::isfinite(value) && value >= 0.0 &&
                               value <= 180.0;
                      }) ||
-        !std::all_of(polar.boat_speeds_knots.begin(),
-                     polar.boat_speeds_knots.end(), [](double value) {
-                       return std::isfinite(value) && value >= 0.0 &&
-                              value <= 250.0;
-                     }) ||
+        !std::all_of(
+            polar.boat_speeds_knots.begin(), polar.boat_speeds_knots.end(),
+            [](double value) {
+              return std::isfinite(value) && value >= 0.0 && value <= 250.0;
+            }) ||
         std::adjacent_find(polar.true_wind_speeds_knots.begin(),
                            polar.true_wind_speeds_knots.end(),
                            [](double left, double right) {
@@ -185,8 +185,7 @@ bool ValidateRoutingRequest(const RoutingRequest& request,
 
 bool ValidRoutePoint(const ocpn_portable_route_point& point) {
   return std::isfinite(point.latitude) && std::isfinite(point.longitude) &&
-         std::abs(point.latitude) <= 90.0 &&
-         std::abs(point.longitude) <= 180.0;
+         std::abs(point.latitude) <= 90.0 && std::abs(point.longitude) <= 180.0;
 }
 
 struct RoutingExecution {
@@ -205,15 +204,13 @@ RoutingExecution ExecuteRoute(ocpn_portable_runtime* replica,
     std::vector<ocpn_portable_polar_grid> polar_views;
     polar_views.reserve(request.polars.size());
     for (const auto& polar : request.polars) {
-      polar_views.push_back(
-          {polar.identity.data(),
-           polar.identity.size(),
-           polar.true_wind_speeds_knots.data(),
-           polar.true_wind_speeds_knots.size(),
-           polar.true_wind_angles_degrees.data(),
-           polar.true_wind_angles_degrees.size(),
-           polar.boat_speeds_knots.data(),
-           polar.boat_speeds_knots.size()});
+      polar_views.push_back({polar.identity.data(), polar.identity.size(),
+                             polar.true_wind_speeds_knots.data(),
+                             polar.true_wind_speeds_knots.size(),
+                             polar.true_wind_angles_degrees.data(),
+                             polar.true_wind_angles_degrees.size(),
+                             polar.boat_speeds_knots.data(),
+                             polar.boat_speeds_knots.size()});
     }
     request.parameters.polars = polar_views.data();
     request.parameters.polar_count = polar_views.size();
@@ -223,12 +220,10 @@ RoutingExecution ExecuteRoute(ocpn_portable_runtime* replica,
         kRoutePointLimit);
     std::vector<ocpn_portable_route_point> isochrone_points(
         kRouteInspectionPointLimit);
-    std::vector<ocpn_portable_route_line> isochrones(
-        kRouteInspectionLineLimit);
+    std::vector<ocpn_portable_route_line> isochrones(kRouteInspectionLineLimit);
     std::vector<ocpn_portable_route_point> trace_points(
         kRouteInspectionPointLimit);
-    std::vector<ocpn_portable_route_line> traces(
-        kRouteInspectionLineLimit);
+    std::vector<ocpn_portable_route_line> traces(kRouteInspectionLineLimit);
     std::array<char, kErrorCapacity> error{};
     std::array<char, kErrorCapacity> result_diagnostic{};
     ocpn_portable_route_result result{};
@@ -295,21 +290,20 @@ RoutingExecution ExecuteRoute(ocpn_portable_runtime* replica,
     }
     const bool valid_environment =
         bounded && result.route_environment_count == result.point_count &&
-        std::all_of(
-            environment.begin(),
-            environment.begin() + result.route_environment_count,
-            [](const auto& point) {
-              return std::isfinite(point.latitude) &&
-                     std::isfinite(point.longitude) &&
-                     std::abs(point.latitude) <= 90.0 &&
-                     std::abs(point.longitude) <= 180.0 &&
-                     std::isfinite(point.wind_u_knots) &&
-                     std::isfinite(point.wind_v_knots) &&
-                     std::isfinite(point.current_u_knots) &&
-                     std::isfinite(point.current_v_knots) &&
-                     std::isfinite(point.wave_height_metres) &&
-                     (point.available & ~std::uint8_t{3}) == 0;
-            });
+        std::all_of(environment.begin(),
+                    environment.begin() + result.route_environment_count,
+                    [](const auto& point) {
+                      return std::isfinite(point.latitude) &&
+                             std::isfinite(point.longitude) &&
+                             std::abs(point.latitude) <= 90.0 &&
+                             std::abs(point.longitude) <= 180.0 &&
+                             std::isfinite(point.wind_u_knots) &&
+                             std::isfinite(point.wind_v_knots) &&
+                             std::isfinite(point.current_u_knots) &&
+                             std::isfinite(point.current_v_knots) &&
+                             std::isfinite(point.wave_height_metres) &&
+                             (point.available & ~std::uint8_t{3}) == 0;
+                    });
     bool environment_matches_route = valid_environment;
     for (std::size_t index = 0;
          environment_matches_route && index < result.point_count; ++index) {
@@ -325,17 +319,17 @@ RoutingExecution ExecuteRoute(ocpn_portable_runtime* replica,
         result.maximum_wind_knots,      result.average_current_knots,
         result.maximum_current_knots,   result.estimated_fuel_litres};
     const bool valid_metrics =
-        std::all_of(metrics.begin(), metrics.end(), [](double value) {
-          return std::isfinite(value) && value >= 0.0;
-        }) &&
+        std::all_of(metrics.begin(), metrics.end(),
+                    [](double value) {
+                      return std::isfinite(value) && value >= 0.0;
+                    }) &&
         result.comfort_level >= 1 && result.comfort_level <= 3 &&
         (result.metrics_available & ~std::uint8_t{3}) == 0;
     const bool valid_success =
-        status != 0 ||
-        (result.point_count >= 2 && chronological &&
-         environment_matches_route && valid_metrics);
-    execution.success = status == 0 && bounded && valid_spans && valid_points &&
-                        valid_success;
+        status != 0 || (result.point_count >= 2 && chronological &&
+                        environment_matches_route && valid_metrics);
+    execution.success =
+        status == 0 && bounded && valid_spans && valid_points && valid_success;
     if (!bounded || !valid_spans || !valid_points || !valid_success) {
       execution.failure =
           "routing component returned an invalid or oversized result";
@@ -363,8 +357,7 @@ RoutingExecution ExecuteRoute(ocpn_portable_runtime* replica,
     copy_lines(isochrone_points, isochrones, result.isochrone_count,
                &outcome.isochrones);
     copy_lines(trace_points, traces, result.trace_count, &outcome.traces);
-    outcome.diagnostic.assign(result_diagnostic.data(),
-                              result.diagnostic_len);
+    outcome.diagnostic.assign(result_diagnostic.data(), result.diagnostic_len);
     outcome.distance_nautical_miles = result.distance_nautical_miles;
     outcome.duration_seconds = result.duration_seconds;
     outcome.states_examined = result.states_examined;
@@ -586,6 +579,49 @@ public:
     return completion->changed.wait_for(
         lock, timeout, [&completion]() { return completion->complete; });
   }
+  bool QueryChartSafety(const std::vector<ocpn_portable_geo_segment>& input,
+                        const ChartSafetyServiceOptions& options,
+                        std::chrono::milliseconds advisory_timeout,
+                        std::vector<ChartSafetyServiceResult>* output) {
+    if (!output) return false;
+
+    // The manager-owned semantic decoder and immutable cell cache are
+    // thread-safe. Keep this potentially substantial work on the routing
+    // worker instead of posting it to the GUI thread.
+    *output = chart_safety.QuerySemantic(input, options);
+    if (output->size() != input.size() || options.require_authoritative)
+      return output->size() == input.size();
+
+    std::vector<ocpn_portable_geo_segment> fallback_segments;
+    std::vector<std::size_t> fallback_indices;
+    fallback_segments.reserve(output->size());
+    fallback_indices.reserve(output->size());
+    for (std::size_t index = 0; index < output->size(); ++index) {
+      if ((*output)[index].state != 2U && (*output)[index].state != 3U)
+        continue;
+      fallback_segments.push_back(input[index]);
+      fallback_indices.push_back(index);
+    }
+    if (fallback_segments.empty()) return true;
+
+    // GSHHS is deliberately only an advisory fallback. Its public OpenCPN
+    // wrapper requires main-thread initialisation, so dispatch only these
+    // unresolved segments rather than the semantic CM93 batch.
+    auto fallback = std::make_shared<std::vector<ChartSafetyServiceResult>>();
+    if (!RunUiService(
+            [this, fallback_segments = std::move(fallback_segments),
+             fallback]() {
+              *fallback =
+                  chart_safety.QueryAdvisoryCoastline(fallback_segments);
+            },
+            advisory_timeout)) {
+      return false;
+    }
+    if (fallback->size() != fallback_indices.size()) return false;
+    for (std::size_t index = 0; index < fallback->size(); ++index)
+      (*output)[fallback_indices[index]] = (*fallback)[index];
+    return true;
+  }
   void PublishRemoveActions(const std::string& package_id) {
     const auto remove = remove_actions;
     Publish([remove, package_id]() { remove(package_id); });
@@ -651,8 +687,7 @@ public:
       void* user_data, const ocpn_portable_geo_segment* segments,
       std::size_t segment_count,
       const ocpn_portable_final_chart_safety_options* options,
-      ocpn_portable_chart_segment_result* results,
-      std::size_t result_count);
+      ocpn_portable_chart_segment_result* results, std::size_t result_count);
   static std::int32_t NetworkGetToPrivate(void*, const char*, std::size_t,
                                           const char*, std::size_t, const char*,
                                           std::size_t, std::uint64_t) {
@@ -673,8 +708,7 @@ public:
                                     std::size_t grant_token_length,
                                     const std::uint8_t* value,
                                     std::size_t value_length);
-  static std::int32_t SendPluginMessage(void* user_data,
-                                        const char* message_id,
+  static std::int32_t SendPluginMessage(void* user_data, const char* message_id,
                                         std::size_t message_id_length,
                                         const char* message_body,
                                         std::size_t message_body_length);
@@ -982,25 +1016,25 @@ bool RuntimeEngine::Impl::StartRoute(const std::string& package_id,
     instance->routing_cancelled = false;
     instance->routing_running = true;
     try {
-      instance->routing_worker = std::thread([instance, replica,
-                                              request = std::move(
-                                                  request)]() mutable {
-        RoutingExecution execution = ExecuteRoute(replica, std::move(request));
-        {
-          std::lock_guard<std::mutex> route_lock(instance->routing_mutex);
-          instance->routing_running = false;
-        }
-        instance->routing_changed.notify_all();
-        const auto completed = instance->owner->routing_completed;
-        if (completed) {
-          const std::string id = instance->id;
-          instance->owner->Publish(
-              [completed, id, execution = std::move(execution)]() mutable {
-                completed(id, execution.success,
-                          std::move(execution.outcome), execution.failure);
-              });
-        }
-      });
+      instance->routing_worker = std::thread(
+          [instance, replica, request = std::move(request)]() mutable {
+            RoutingExecution execution =
+                ExecuteRoute(replica, std::move(request));
+            {
+              std::lock_guard<std::mutex> route_lock(instance->routing_mutex);
+              instance->routing_running = false;
+            }
+            instance->routing_changed.notify_all();
+            const auto completed = instance->owner->routing_completed;
+            if (completed) {
+              const std::string id = instance->id;
+              instance->owner->Publish(
+                  [completed, id, execution = std::move(execution)]() mutable {
+                    completed(id, execution.success,
+                              std::move(execution.outcome), execution.failure);
+                  });
+            }
+          });
     } catch (const std::exception& exception) {
       instance->routing_running = false;
       ocpn_portable_runtime_destroy(replica);
@@ -1013,13 +1047,13 @@ bool RuntimeEngine::Impl::StartRoute(const std::string& package_id,
   return true;
 }
 
-bool RuntimeEngine::Impl::CalculateRouteBlocking(
-    const std::string& package_id, RoutingRequest request,
-    RoutingOutcome* outcome, std::string* diagnostic) {
+bool RuntimeEngine::Impl::CalculateRouteBlocking(const std::string& package_id,
+                                                 RoutingRequest request,
+                                                 RoutingOutcome* outcome,
+                                                 std::string* diagnostic) {
   Instance* instance = Find(package_id);
   if (!outcome || !instance || !instance->enabled || instance->failed ||
-      !instance->runtime ||
-      !Permitted(*instance, "weather-routing.compute")) {
+      !instance->runtime || !Permitted(*instance, "weather-routing.compute")) {
     if (diagnostic)
       *diagnostic =
           !outcome ? "routing output is required"
@@ -1034,10 +1068,8 @@ bool RuntimeEngine::Impl::CalculateRouteBlocking(
       if (diagnostic) *diagnostic = "a route calculation is already running";
       return false;
     }
-    if (instance->routing_call_count == 0)
-      instance->routing_cancelled = false;
-    if (instance->routing_cancelled || !instance->enabled ||
-        instance->failed) {
+    if (instance->routing_call_count == 0) instance->routing_cancelled = false;
+    if (instance->routing_cancelled || !instance->enabled || instance->failed) {
       if (diagnostic) *diagnostic = "route calculation was cancelled";
       return false;
     }
@@ -1046,8 +1078,7 @@ bool RuntimeEngine::Impl::CalculateRouteBlocking(
   auto finish_call = [instance]() {
     {
       std::lock_guard<std::mutex> route_lock(instance->routing_mutex);
-      if (instance->routing_call_count != 0)
-        --instance->routing_call_count;
+      if (instance->routing_call_count != 0) --instance->routing_call_count;
     }
     instance->routing_changed.notify_all();
   };
@@ -1080,10 +1111,8 @@ bool RuntimeEngine::Impl::BeginRouteAttempt(const std::string& package_id,
                                             std::string* diagnostic) {
   Instance* instance = Find(package_id);
   if (!instance || !instance->enabled || instance->failed ||
-      !instance->runtime ||
-      !Permitted(*instance, "weather-routing.compute")) {
-    if (diagnostic)
-      *diagnostic = "routing package is unavailable";
+      !instance->runtime || !Permitted(*instance, "weather-routing.compute")) {
+    if (diagnostic) *diagnostic = "routing package is unavailable";
     return false;
   }
   std::lock_guard<std::mutex> route_lock(instance->routing_mutex);
@@ -1156,12 +1185,10 @@ bool RuntimeEngine::Impl::WaitForRoute(const std::string& package_id,
   std::thread worker;
   {
     std::unique_lock<std::mutex> route_lock(instance->routing_mutex);
-    if (!instance->routing_changed.wait_for(
-            route_lock, timeout,
-            [instance]() {
-              return !instance->routing_running &&
-                     instance->routing_call_count == 0;
-            })) {
+    if (!instance->routing_changed.wait_for(route_lock, timeout, [instance]() {
+          return !instance->routing_running &&
+                 instance->routing_call_count == 0;
+        })) {
       return false;
     }
     if (instance->routing_worker.joinable())
@@ -1274,9 +1301,8 @@ std::int32_t RuntimeEngine::Impl::SendPluginMessage(
   auto* instance = static_cast<Instance*>(user_data);
   const std::string id = Text(message_id, message_id_length);
   const std::string body = Text(message_body, message_body_length);
-  if (!instance || !instance->owner || !instance->enabled ||
-      instance->failed || id.empty() ||
-      id.size() > CapabilityEventBroker::kMaximumTopicBytes ||
+  if (!instance || !instance->owner || !instance->enabled || instance->failed ||
+      id.empty() || id.size() > CapabilityEventBroker::kMaximumTopicBytes ||
       body.size() > CapabilityEventBroker::kMaximumPayloadBytes ||
       !instance->owner->Permitted(*instance, "plugin.messages.send") ||
       !instance->owner->plugin_message_sender ||
@@ -1536,9 +1562,10 @@ std::int32_t RuntimeEngine::Impl::EnvironmentSampleBatch(
   return 0;
 }
 
-void RuntimeEngine::Impl::RoutingProgressCallback(
-    void* user_data, std::uint8_t percent, const char* message,
-    std::size_t message_length) {
+void RuntimeEngine::Impl::RoutingProgressCallback(void* user_data,
+                                                  std::uint8_t percent,
+                                                  const char* message,
+                                                  std::size_t message_length) {
   auto* instance = static_cast<Instance*>(user_data);
   if (!instance || !instance->owner || !instance->owner->routing_progress)
     return;
@@ -1551,10 +1578,9 @@ void RuntimeEngine::Impl::RoutingProgressCallback(
 
 std::uint8_t RuntimeEngine::Impl::RoutingCancelled(void* user_data) {
   auto* instance = static_cast<Instance*>(user_data);
-  return instance &&
-                 (instance->routing_cancelled || !instance->enabled ||
-                  instance->failed || !instance->owner ||
-                  instance->owner->stopped)
+  return instance && (instance->routing_cancelled || !instance->enabled ||
+                      instance->failed || !instance->owner ||
+                      instance->owner->stopped)
              ? 1U
              : 0U;
 }
@@ -1571,26 +1597,20 @@ std::int32_t RuntimeEngine::Impl::ChartsQuerySegments(
   }
   const std::vector<ocpn_portable_geo_segment> input(segments,
                                                      segments + segment_count);
-  auto output =
-      std::make_shared<std::vector<ocpn_portable_chart_segment_result>>(
-          segment_count);
-  if (!instance->owner->RunUiService(
-          [owner = instance->owner, input, output]() {
-            for (auto& result : *output) result = {3U, 0U, 6U};
-            const auto assessments = owner->chart_safety.QueryFinal(
-                input, ChartSafetyServiceOptions{0.0, 0.0, false});
-            if (assessments.size() != input.size()) return;
-            for (std::size_t index = 0; index < input.size(); ++index) {
-              (*output)[index] = {assessments[index].state,
-                                  assessments[index].charts_considered,
-                                  assessments[index].reason};
-            }
-          },
-          std::chrono::seconds(5))) {
-    wxLogWarning("PPM chart service timed out waiting for the UI thread");
+  std::vector<ChartSafetyServiceResult> assessments;
+  if (!instance->owner->QueryChartSafety(
+          input, ChartSafetyServiceOptions{0.0, 0.0, false},
+          std::chrono::seconds(15), &assessments)) {
+    wxLogWarning(
+        "PPM advisory chart fallback timed out waiting for the UI thread");
     return -2;
   }
-  std::copy(output->begin(), output->end(), results);
+  if (assessments.size() != input.size()) return -3;
+  for (std::size_t index = 0; index < input.size(); ++index) {
+    results[index] = {assessments[index].state,
+                      assessments[index].charts_considered,
+                      assessments[index].reason};
+  }
   return 0;
 }
 
@@ -1598,8 +1618,7 @@ std::int32_t RuntimeEngine::Impl::ChartsQueryFinalSafety(
     void* user_data, const ocpn_portable_geo_segment* segments,
     std::size_t segment_count,
     const ocpn_portable_final_chart_safety_options* options,
-    ocpn_portable_chart_segment_result* results,
-    std::size_t result_count) {
+    ocpn_portable_chart_segment_result* results, std::size_t result_count) {
   auto* instance = static_cast<Instance*>(user_data);
   if (!instance || !instance->owner || !segments || !options || !results ||
       result_count != segment_count || segment_count > 10'000 ||
@@ -1611,21 +1630,18 @@ std::int32_t RuntimeEngine::Impl::ChartsQueryFinalSafety(
   const ChartSafetyServiceOptions service_options{
       options->safety_margin_nautical_miles, options->minimum_depth_metres,
       options->require_authoritative != 0};
-  auto output = std::make_shared<std::vector<ChartSafetyServiceResult>>();
-  if (!instance->owner->RunUiService(
-          [owner = instance->owner, input, service_options, output]() {
-            *output = owner->chart_safety.QueryFinal(input, service_options);
-          },
-          std::chrono::seconds(15))) {
+  std::vector<ChartSafetyServiceResult> output;
+  if (!instance->owner->QueryChartSafety(input, service_options,
+                                         std::chrono::seconds(15), &output)) {
     wxLogWarning(
-        "PPM final chart-safety service timed out waiting for the UI thread");
+        "PPM final advisory chart fallback timed out waiting for the UI "
+        "thread");
     return -2;
   }
-  if (output->size() != segment_count) return -3;
+  if (output.size() != segment_count) return -3;
   for (std::size_t index = 0; index < segment_count; ++index) {
-    results[index] = {(*output)[index].state,
-                      (*output)[index].charts_considered,
-                      (*output)[index].reason};
+    results[index] = {output[index].state, output[index].charts_considered,
+                      output[index].reason};
   }
   return 0;
 }
@@ -1964,9 +1980,9 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
                 ? std::string()
                 : (prefix_value.IsString()
                        ? prefix_value.AsString().ToStdString()
-                       : std::string(CapabilityEventBroker::kMaximumTopicBytes +
-                                         1,
-                                     'x'));
+                       : std::string(
+                             CapabilityEventBroker::kMaximumTopicBytes + 1,
+                             'x'));
         const std::size_t queue_limit =
             !declared.HasMember("queue_limit")
                 ? 32
@@ -1974,8 +1990,7 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
                        ? static_cast<std::size_t>(queue_value.AsInt())
                        : 0);
         CapabilityEventSubscription subscription{
-            instance->id, CapabilityEventKind::kNmea0183, prefix,
-            queue_limit};
+            instance->id, CapabilityEventKind::kNmea0183, prefix, queue_limit};
         std::string subscription_error;
         if (!declared.IsObject() ||
             !ParseCapabilityEventKind(event_name, &kind) ||
@@ -1991,8 +2006,7 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
         if (!events.Subscribe(subscription, &subscription_error)) {
           instance->failed = true;
           instance->diagnostic =
-              "manifest event subscription is invalid: " +
-              subscription_error;
+              "manifest event subscription is invalid: " + subscription_error;
           break;
         }
       }
@@ -2383,9 +2397,9 @@ bool RuntimeEngine::Impl::WaitForIdle(const std::string& package_id,
   if (!jobs.WaitOwnerIdle(package_id, timeout)) return false;
   auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - started);
-  if (!instance->executor.WaitIdle(
-          elapsed >= timeout ? std::chrono::milliseconds(0)
-                             : timeout - elapsed)) {
+  if (!instance->executor.WaitIdle(elapsed >= timeout
+                                       ? std::chrono::milliseconds(0)
+                                       : timeout - elapsed)) {
     return false;
   }
   elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2408,8 +2422,7 @@ void RuntimeEngine::Impl::DeliverNavigationSentence(
   const std::size_t topic_end = sentence.find_first_of(",*");
   const std::string topic =
       sentence.substr(0, std::min(topic_end, sentence.size()));
-  events.Publish(
-      {CapabilityEventKind::kNmea0183, topic, sentence});
+  events.Publish({CapabilityEventKind::kNmea0183, topic, sentence});
   for (auto& item : instances) {
     ScheduleEvents(*item);
   }
@@ -2419,9 +2432,9 @@ void RuntimeEngine::Impl::DeliverPluginMessage(
     const std::string& message_id, const std::string& message_body) {
   std::string diagnostic;
   if (message_id.empty() ||
-      !events.Publish({CapabilityEventKind::kPluginMessage, message_id,
-                       message_body},
-                      &diagnostic)) {
+      !events.Publish(
+          {CapabilityEventKind::kPluginMessage, message_id, message_body},
+          &diagnostic)) {
     if (!diagnostic.empty())
       wxLogWarning("PPM plugin-message-rejected diagnostic=%s", diagnostic);
     return;
@@ -2479,8 +2492,7 @@ void RuntimeEngine::Impl::ScheduleEvents(Instance& instance) {
           }
           if (result != 0) {
             Fail(instance, operation,
-                 error[0] ? error.data()
-                          : "portable event handler failed");
+                 error[0] ? error.data() : "portable event handler failed");
             break;
           }
         }

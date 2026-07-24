@@ -1,3 +1,4 @@
+#include "chart_safety_service.h"
 #include "portable_polar.h"
 #include "runtime_engine.h"
 
@@ -32,9 +33,9 @@ bool UnixTime(const char* value, std::int64_t* result) {
 
 bool Enable(ppm::RuntimeEngine* engine, const std::string& package_id,
             std::string* diagnostic) {
-  return engine->SetGrantedPermissions(
-             package_id, engine->RequestedPermissions(package_id),
-             diagnostic) &&
+  return engine->SetGrantedPermissions(package_id,
+                                       engine->RequestedPermissions(package_id),
+                                       diagnostic) &&
          engine->Enable(package_id, diagnostic);
 }
 
@@ -52,8 +53,7 @@ int main(int argc, char** argv) {
   double start_longitude = 0.0;
   double destination_latitude = 0.0;
   double destination_longitude = 0.0;
-  if (!UnixTime(argv[4], &departure) ||
-      !Number(argv[5], &start_latitude) ||
+  if (!UnixTime(argv[4], &departure) || !Number(argv[5], &start_latitude) ||
       !Number(argv[6], &start_longitude) ||
       !Number(argv[7], &destination_latitude) ||
       !Number(argv[8], &destination_longitude)) {
@@ -65,6 +65,14 @@ int main(int argc, char** argv) {
   if (!wx.IsOk()) {
     std::cerr << "wxWidgets could not be initialised\n";
     return 1;
+  }
+  if (const char* cm93_root = std::getenv("PPM_TEST_CM93_ROOT")) {
+    ppm::ChartSafetyService::ConfigureChartRoots({cm93_root});
+    if (!ppm::ChartSafetyService().AuthoritativeAvailable()) {
+      std::cerr << "configured CM93 semantic chart root is unavailable\n";
+      return 1;
+    }
+    std::cout << ppm::ChartSafetyService().Summary() << '\n';
   }
   std::uint32_t next_action = 1;
   ppm::RuntimeEngine engine(
@@ -129,6 +137,10 @@ int main(int argc, char** argv) {
   request.parameters.downwind_efficiency = 1.0;
   request.parameters.maximum_search_angle_degrees = 120.0;
   request.parameters.destination_tolerance_nm = 1.0;
+  request.parameters.avoid_unsafe_charts = 1;
+  request.parameters.land_safety_margin_nautical_miles = 0.4;
+  request.parameters.minimum_chart_depth_metres = 2.0;
+  request.parameters.require_authoritative_chart_safety = 1;
   request.parameters.tack_penalty_seconds = 300;
   request.parameters.gybe_penalty_seconds = 300;
   request.parameters.use_currents = 1;
@@ -136,16 +148,14 @@ int main(int argc, char** argv) {
   request.parameters.use_waves = 1;
   request.parameters.require_wave_data = 1;
   for (auto& polar : loaded.grids) {
-    request.polars.push_back(
-        {std::move(polar.identity),
-         std::move(polar.true_wind_speeds_knots),
-         std::move(polar.true_wind_angles_degrees),
-         std::move(polar.boat_speeds_knots)});
+    request.polars.push_back({std::move(polar.identity),
+                              std::move(polar.true_wind_speeds_knots),
+                              std::move(polar.true_wind_angles_degrees),
+                              std::move(polar.boat_speeds_knots)});
   }
 
   engine.SetRoutingProgressCallback(
-      [](const std::string&, std::uint8_t percent,
-         const std::string& message) {
+      [](const std::string&, std::uint8_t percent, const std::string& message) {
         std::cout << "progress=" << static_cast<unsigned>(percent) << '\t'
                   << message << '\n';
       });

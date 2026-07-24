@@ -1,10 +1,12 @@
 #include "cm93_semantic_reader.h"
 
 #include <cassert>
+#include <atomic>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <vector>
 
 int main() {
@@ -49,5 +51,30 @@ int main() {
     return 1;
   }
   std::cout << reported_route.diagnostic << '\n';
+
+  // Departure-time optimisation may run several route searches in parallel.
+  // Exercise the shared immutable dictionary and decoded-cell cache under the
+  // same concurrent read pattern.
+  std::atomic_bool concurrent_queries_passed{true};
+  std::vector<std::thread> workers;
+  for (int worker = 0; worker < 4; ++worker) {
+    workers.emplace_back([&] {
+      for (int query = 0; query < 4; ++query) {
+        const auto land = reader.QuerySegment(west_of_south_stack,
+                                              holyhead_harbour, 0.0, 0.0);
+        const auto safe = reader.QuerySegment(holyhead_offshore,
+                                              dun_laoghaire_offshore, 0.0, 2.0);
+        if (land.state != ppm::SemanticSegmentAssessment::State::kUnsafe ||
+            safe.state != ppm::SemanticSegmentAssessment::State::kSafe) {
+          concurrent_queries_passed = false;
+        }
+      }
+    });
+  }
+  for (auto& worker : workers) worker.join();
+  if (!concurrent_queries_passed) {
+    std::cerr << "Concurrent CM93 semantic queries were inconsistent\n";
+    return 1;
+  }
   return 0;
 }

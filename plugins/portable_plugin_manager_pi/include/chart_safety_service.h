@@ -36,9 +36,25 @@ public:
   bool AuthoritativeAvailable() const;
   std::string Summary() const;
 
-  std::vector<ChartSafetyServiceResult> QueryFinal(
+  /**
+   * Query only the manager-owned semantic provider.
+   *
+   * This path is thread-safe and may run on routing workers. Missing semantic
+   * coverage remains missing; it is never silently replaced with GSHHS.
+   */
+  std::vector<ChartSafetyServiceResult> QuerySemantic(
       const std::vector<ocpn_portable_geo_segment>& segments,
       const ChartSafetyServiceOptions& options) const;
+
+  /**
+   * Query the explicitly advisory public OpenCPN coastline fallback.
+   *
+   * OpenCPN requires the first GSHHS call to be made on its main thread, so
+   * the runtime engine dispatches this method there and only for semantic
+   * misses when authoritative validation was not requested.
+   */
+  std::vector<ChartSafetyServiceResult> QueryAdvisoryCoastline(
+      const std::vector<ocpn_portable_geo_segment>& segments) const;
 };
 
 }  // namespace ppm

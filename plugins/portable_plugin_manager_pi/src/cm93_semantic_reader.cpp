@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -26,9 +27,9 @@ constexpr double kDegree = kPi / 180.0;
 constexpr double kCm93SemiMajorAxisMetres = 6378388.0;
 constexpr double kNmPerDegreeLatitude = 60.0;
 constexpr double kSemanticSampleNm = 0.025;
-constexpr double kCellDiscoverySampleNm = 0.25;
 constexpr std::size_t kMaxRecords = 2000000;
 constexpr std::size_t kMaxPoints = 20000000;
+constexpr auto kCellModificationCheckInterval = std::chrono::seconds(30);
 
 const std::array<unsigned char, 256> kTable0 = {
     0xCD, 0xEA, 0xDC, 0x48, 0x3E, 0x6D, 0xCA, 0x7B, 0x52, 0xE1, 0xA4, 0x8E,
@@ -673,6 +674,92 @@ double NormalizeLongitudeDelta(double value) {
   return value;
 }
 
+std::vector<SemanticGeoPoint> SegmentCellRepresentatives(
+    const SemanticGeoPoint& start, const SemanticGeoPoint& end,
+    const Scale& scale, double safety_margin_nautical_miles) {
+  const double end_longitude =
+      start.longitude +
+      NormalizeLongitudeDelta(end.longitude - start.longitude);
+  const double x0 = (start.longitude + 360.0) * 3.0 / scale.divisor;
+  const double y0 = (start.latitude * 3.0 + 240.0) / scale.divisor;
+  const double x1 = (end_longitude + 360.0) * 3.0 / scale.divisor;
+  const double y1 = (end.latitude * 3.0 + 240.0) / scale.divisor;
+  const double dx = x1 - x0;
+  const double dy = y1 - y0;
+  const int step_x = dx > 0.0 ? 1 : (dx < 0.0 ? -1 : 0);
+  const int step_y = dy > 0.0 ? 1 : (dy < 0.0 ? -1 : 0);
+  int cell_x = static_cast<int>(std::floor(x0));
+  int cell_y = static_cast<int>(std::floor(y0));
+  const int end_x = static_cast<int>(std::floor(x1));
+  const int end_y = static_cast<int>(std::floor(y1));
+  const double infinity = std::numeric_limits<double>::infinity();
+  const double delta_x = step_x == 0 ? infinity : 1.0 / std::abs(dx);
+  const double delta_y = step_y == 0 ? infinity : 1.0 / std::abs(dy);
+  double maximum_x =
+      step_x > 0 ? (std::floor(x0) + 1.0 - x0) * delta_x
+                 : (step_x < 0 ? (x0 - std::floor(x0)) * delta_x : infinity);
+  double maximum_y =
+      step_y > 0 ? (std::floor(y0) + 1.0 - y0) * delta_y
+                 : (step_y < 0 ? (y0 - std::floor(y0)) * delta_y : infinity);
+
+  const double maximum_absolute_latitude = std::min(
+      89.9, std::max(std::abs(start.latitude), std::abs(end.latitude)));
+  const double latitude_margin =
+      safety_margin_nautical_miles / kNmPerDegreeLatitude;
+  const double longitude_margin =
+      latitude_margin /
+      std::max(0.01, std::cos(maximum_absolute_latitude * kDegree));
+  const int margin_x = static_cast<int>(
+      std::ceil(longitude_margin * 3.0 / static_cast<double>(scale.divisor)));
+  const int margin_y = static_cast<int>(
+      std::ceil(latitude_margin * 3.0 / static_cast<double>(scale.divisor)));
+
+  std::set<std::pair<int, int>> cells;
+  auto add = [&](int x, int y) {
+    for (int offset_y = -margin_y; offset_y <= margin_y; ++offset_y) {
+      for (int offset_x = -margin_x; offset_x <= margin_x; ++offset_x) {
+        cells.emplace(x + offset_x, y + offset_y);
+      }
+    }
+  };
+  add(cell_x, cell_y);
+  while (cell_x != end_x || cell_y != end_y) {
+    if (maximum_x < maximum_y) {
+      cell_x += step_x;
+      maximum_x += delta_x;
+    } else if (maximum_y < maximum_x) {
+      cell_y += step_y;
+      maximum_y += delta_y;
+    } else {
+      // A segment through a grid corner touches both adjacent cells as well
+      // as the diagonal destination cell. Include all four conservatively.
+      add(cell_x + step_x, cell_y);
+      add(cell_x, cell_y + step_y);
+      cell_x += step_x;
+      cell_y += step_y;
+      maximum_x += delta_x;
+      maximum_y += delta_y;
+    }
+    add(cell_x, cell_y);
+  }
+
+  std::vector<SemanticGeoPoint> representatives;
+  representatives.reserve(cells.size());
+  for (const auto& cell : cells) {
+    SemanticGeoPoint point;
+    point.longitude =
+        (static_cast<double>(cell.first) + 0.5) * scale.divisor / 3.0 - 360.0;
+    while (point.longitude > 180.0) point.longitude -= 360.0;
+    while (point.longitude < -180.0) point.longitude += 360.0;
+    point.latitude =
+        ((static_cast<double>(cell.second) + 0.5) * scale.divisor - 240.0) /
+        3.0;
+    if (point.latitude >= -90.0 && point.latitude <= 90.0)
+      representatives.push_back(point);
+  }
+  return representatives;
+}
+
 double DistanceNm(const SemanticGeoPoint& a, const SemanticGeoPoint& b) {
   const double mean_latitude = (a.latitude + b.latitude) * 0.5 * kDegree;
   const double dx = NormalizeLongitudeDelta(b.longitude - a.longitude) *
@@ -814,10 +901,15 @@ struct Cm93SemanticReader::Impl {
     fs::path path;
     Dictionary dictionary;
   };
+  struct CachedCell {
+    fs::file_time_type modified;
+    std::chrono::steady_clock::time_point last_checked;
+    std::shared_ptr<SemanticCell> cell;
+  };
 
   mutable std::mutex mutex;
-  std::vector<Root> roots;
-  mutable std::unordered_map<std::string, std::shared_ptr<SemanticCell>> cache;
+  std::vector<std::shared_ptr<const Root>> roots;
+  mutable std::unordered_map<std::string, CachedCell> cache;
   mutable std::unordered_map<std::string, fs::path> cell_path_cache;
   std::string status = "no CM93 chart root has been indexed";
 
@@ -843,21 +935,38 @@ struct Cm93SemanticReader::Impl {
   std::shared_ptr<SemanticCell> Load(const Root& root, const fs::path& path,
                                      int detail,
                                      std::string* diagnostic) const {
-    std::error_code error;
-    const auto modified = fs::last_write_time(path, error);
-    const std::string key =
-        path.string() + ":" +
-        (error ? std::string("unknown")
-               : std::to_string(modified.time_since_epoch().count()));
+    const std::string key = path.string();
+    const auto now = std::chrono::steady_clock::now();
     {
       std::lock_guard<std::mutex> lock(mutex);
       const auto found = cache.find(key);
-      if (found != cache.end()) return found->second;
+      if (found != cache.end() &&
+          now - found->second.last_checked < kCellModificationCheckInterval) {
+        return found->second.cell;
+      }
+    }
+
+    std::error_code error;
+    const auto modified = fs::last_write_time(path, error);
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      const auto found = cache.find(key);
+      if (found != cache.end() && !error &&
+          found->second.modified == modified) {
+        found->second.last_checked = now;
+        return found->second.cell;
+      }
+      if (error) {
+        cache.erase(key);
+        if (diagnostic)
+          *diagnostic = "CM93 cell metadata is no longer available";
+        return {};
+      }
     }
     auto decoded = DecodeCell(path, detail, root.dictionary, diagnostic);
     if (decoded) {
       std::lock_guard<std::mutex> lock(mutex);
-      cache[key] = decoded;
+      cache[key] = {modified, now, decoded};
     }
     return decoded;
   }
@@ -867,7 +976,7 @@ Cm93SemanticReader::Cm93SemanticReader() : impl_(new Impl) {}
 Cm93SemanticReader::~Cm93SemanticReader() = default;
 
 void Cm93SemanticReader::SetChartRoots(const std::vector<std::string>& roots) {
-  std::vector<Impl::Root> indexed;
+  std::vector<std::shared_ptr<const Impl::Root>> indexed;
   std::set<std::string> seen;
   std::string last_error;
   for (const auto& root_string : roots) {
@@ -877,7 +986,8 @@ void Cm93SemanticReader::SetChartRoots(const std::vector<std::string>& roots) {
     if (!IsCm93Root(root) || !seen.insert(root.string()).second) continue;
     Dictionary dictionary;
     if (!LoadDictionary(root, &dictionary, &last_error)) continue;
-    indexed.push_back({root, std::move(dictionary)});
+    indexed.push_back(std::make_shared<const Impl::Root>(
+        Impl::Root{root, std::move(dictionary)}));
   }
   std::lock_guard<std::mutex> lock(impl_->mutex);
   impl_->roots = std::move(indexed);
@@ -915,7 +1025,7 @@ SemanticSegmentAssessment Cm93SemanticReader::QuerySegment(
     return result;
   }
 
-  std::vector<Impl::Root> roots;
+  std::vector<std::shared_ptr<const Impl::Root>> roots;
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     roots = impl_->roots;
@@ -930,17 +1040,13 @@ SemanticSegmentAssessment Cm93SemanticReader::QuerySegment(
   const std::size_t samples = std::max<std::size_t>(
       2,
       static_cast<std::size_t>(std::ceil(distance_nm / kSemanticSampleNm)) + 1);
-  const std::size_t discovery_samples = std::max<std::size_t>(
-      2, static_cast<std::size_t>(
-             std::ceil(distance_nm / kCellDiscoverySampleNm)) +
-             1);
   std::map<std::string, std::shared_ptr<SemanticCell>> cells;
   std::string decode_error;
-  for (std::size_t i = 0; i < discovery_samples; ++i) {
-    const auto point = Interpolate(
-        start, end, static_cast<double>(i) / (discovery_samples - 1));
-    for (const auto& root : roots) {
-      for (const auto& scale : kScales) {
+  for (const auto& root_handle : roots) {
+    const auto& root = *root_handle;
+    for (const auto& scale : kScales) {
+      for (const auto& point : SegmentCellRepresentatives(
+               start, end, scale, safety_margin_nautical_miles)) {
         const fs::path path = impl_->Find(root, point, scale);
         if (path.empty()) continue;
         auto cell = impl_->Load(root, path, scale.detail, &decode_error);

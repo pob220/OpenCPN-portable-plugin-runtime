@@ -53,7 +53,7 @@ std::string ChartSafetyService::Summary() const {
                "only advisory GSHHS coastline checks are available";
 }
 
-std::vector<ChartSafetyServiceResult> ChartSafetyService::QueryFinal(
+std::vector<ChartSafetyServiceResult> ChartSafetyService::QuerySemantic(
     const std::vector<ocpn_portable_geo_segment>& segments,
     const ChartSafetyServiceOptions& options) const {
   std::vector<ChartSafetyServiceResult> results;
@@ -88,28 +88,25 @@ std::vector<ChartSafetyServiceResult> ChartSafetyService::QueryFinal(
           state = 3U;
           break;
       }
-      if (state == 0U || state == 1U || options.require_authoritative) {
-        results.push_back({state, assessment.charts_considered,
-                           ReasonFor(assessment), assessment.diagnostic});
-        continue;
-      }
-      const bool crosses_land = PlugIn_GSHHS_CrossesLand(
-          segment.start.latitude, segment.start.longitude, segment.end.latitude,
-          segment.end.longitude);
-      results.push_back(
-          {crosses_land ? 1U : 0U, 0U, crosses_land ? 1U : 0U,
-           crosses_land
-               ? "advisory GSHHS coastline intersection after missing CM93 "
-                 "semantic coverage"
-               : "advisory GSHHS fallback after missing CM93 semantic "
-                 "coverage found no intersection"});
+      results.push_back({state, assessment.charts_considered,
+                         ReasonFor(assessment), assessment.diagnostic});
       continue;
     }
-    if (options.require_authoritative) {
-      results.push_back(
-          {2U, 0U, 5U,
-           "authoritative semantic chart-object and depth safety is "
-           "unavailable"});
+    results.push_back({2U, 0U, 5U,
+                       "authoritative semantic chart-object and depth safety "
+                       "is unavailable"});
+  }
+  return results;
+}
+
+std::vector<ChartSafetyServiceResult>
+ChartSafetyService::QueryAdvisoryCoastline(
+    const std::vector<ocpn_portable_geo_segment>& segments) const {
+  std::vector<ChartSafetyServiceResult> results;
+  results.reserve(segments.size());
+  for (const auto& segment : segments) {
+    if (!ValidPoint(segment.start) || !ValidPoint(segment.end)) {
+      results.push_back({3U, 0U, 6U, "invalid advisory chart-safety geometry"});
       continue;
     }
     const bool crosses_land = PlugIn_GSHHS_CrossesLand(

@@ -58,11 +58,14 @@ indexes configured CM93 roots with its own bounded, read-only semantic decoder.
 Search-time propagation rejects `LNDARE`, `DRGARE` and `ITDARE` geometry; dense
 final replay additionally requires `DEPARE/DRVAL1` coverage at the configured
 minimum depth. Decoded cells and cell lookups are immutable and cached. The
-component expands each final segment into a five-line swept corridor, so the
-centre, parallel clearances and crossing diagonals are all checked. If the
-user requires authoritative chart safety, absent or incomplete semantic/depth
-coverage fails closed. GSHHS is retained only as an explicitly advisory
-fallback when authoritative validation is disabled.
+manager runs semantic decoding on routing workers rather than the GUI thread,
+uses exact CM93 cell-grid traversal and rate-limits file metadata checks.
+Only unresolved advisory GSHHS fallbacks are dispatched to OpenCPN's main
+thread. The component expands each final segment into a five-line swept
+corridor, so the centre, parallel clearances and crossing diagonals are all
+checked. If the user requires authoritative chart safety, absent or incomplete
+semantic/depth coverage fails closed. GSHHS is retained only as an explicitly
+advisory fallback when authoritative validation is disabled.
 
 Completed searches return bounded retained isochrones and exact predecessor
 traces. The host can draw the selected route's isochrones, show the trace
