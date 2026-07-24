@@ -2,6 +2,8 @@
 #define OCPN_PORTABLE_DEPARTURE_TIME_H
 
 #include <cstdint>
+#include <cstddef>
+#include <vector>
 
 #include <wx/datetime.h>
 #include <wx/string.h>
@@ -37,5 +39,15 @@ wxDateTime PortableDepartureWallTime(int64_t unix_time,
 
 wxString FormatPortableDepartureTime(int64_t unix_time,
                                      const PortableDepartureZone& zone);
+
+// Returns chronological offsets spanning the requested range on both sides of
+// the nominal departure. Zero is always present.
+std::vector<int64_t> PortableDepartureOffsetsSeconds(int range_hours,
+                                                     int spacing_hours);
+
+// Returns indices in calculation order: nominal first, then increasingly
+// distant alternatives. Results can remain in chronological offset order.
+std::vector<size_t> PortableDepartureExecutionOrder(
+    const std::vector<int64_t>& offsets_seconds);
 
 #endif  // OCPN_PORTABLE_DEPARTURE_TIME_H

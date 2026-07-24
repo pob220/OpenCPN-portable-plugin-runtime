@@ -8,9 +8,10 @@ Every stage propagates forward through time and a route from any stage must pass
 an independent chronological replay before it is returned. OpenCPN
 brokers typed environmental samples published by iGRIB, batched chart checks,
 cancellation, a declared four-tab/form control schema, GPX output and retained
-route overlays. Forward departure comparisons run in up to four isolated
-Wasmtime Stores. Results are planning aids and are not
-navigation-authoritative.
+route overlays. Symmetric departure-time optimisation searches before and
+after the nominal time, nearest alternatives first, in up to four isolated
+Wasmtime Stores subject to the host's hardware limit. Results are planning
+aids and are not navigation-authoritative.
 
 Routes use a real tabulated vessel model. The host accepts either an OpenCPN
 weather-routing `.pol` table or an OpenCPN boat `.xml` file referencing up to
@@ -51,6 +52,18 @@ live vessel position, OpenCPN waypoints (copied as stable GUID/name/coordinate
 records), the latest chart cursor position, or manually entered coordinates.
 No native navigation object or pointer crosses the component boundary.
 
+Chart safety is a host-owned value service rather than a renderer or modified
+OpenCPN-core dependency. On stock OpenCPN 5.14 the Portable Plugin Manager
+indexes configured CM93 roots with its own bounded, read-only semantic decoder.
+Search-time propagation rejects `LNDARE`, `DRGARE` and `ITDARE` geometry; dense
+final replay additionally requires `DEPARE/DRVAL1` coverage at the configured
+minimum depth. Decoded cells and cell lookups are immutable and cached. The
+component expands each final segment into a five-line swept corridor, so the
+centre, parallel clearances and crossing diagonals are all checked. If the
+user requires authoritative chart safety, absent or incomplete semantic/depth
+coverage fails closed. GSHHS is retained only as an explicitly advisory
+fallback when authoritative validation is disabled.
+
 Completed searches return bounded retained isochrones and exact predecessor
 traces. The host can draw the selected route's isochrones, show the trace
 nearest the chart cursor and interpolate a boat marker at iGRIB's displayed
@@ -72,9 +85,9 @@ reproducible bridges directly and through destination-centred approach rings.
 If no bridge survives, bounded time-dependent graph search explores position,
 forecast time, heading, tack and propulsion labels in a 120 NM passage corridor. Its
 remaining-time bound comes from the fastest configured polar/motor speed, not
-a fixed boat speed. When currents are enabled, the request has no global upper
-bound on favourable current, so the fallback correctly becomes bounded
-Dijkstra rather than using a potentially inadmissible A* heuristic. Label
+a fixed boat speed. When currents are enabled, it adds the portable
+environment service's conservative physical current ceiling, preserving an
+admissible A* heuristic without assuming a typical tidal speed. Label
 dominance preserves non-dominated elapsed-time/motor-use alternatives and
 minimum-run state. A stationary wait action of at most six consecutive hours
 allows the graph to wait for a forecast or tidal gate without consuming motor
@@ -102,13 +115,21 @@ matching the independent replay boundary. This removes the former failure mode
 where start-of-hour wind admitted a leg which midpoint wind then rejected after
 a forecast shift. Final replay additionally subdivides route geometry to at
 most 15-minute and approximately 1.5 NM probes for environmental-limit and
-chart-corridor validation. This reference remains a portable-runtime proof of
-concept: it demonstrates a professional bounded solver cascade over typed host
-services, but it is not a safety-certified navigator and does not import native
-SuperCPN or legacy Weather Routing objects into Wasm.
+chart-corridor validation; its odd probe count always includes the exact
+original-leg midpoint later used for metrics. iGRIB decodes immutable
+catalogue frames once and performs deterministic host-side interpolation for
+intermediate route times, avoiding a full GRIB decode at every 15-minute
+probe. Final progress explicitly reports authoritative chart/depth validation,
+and a rejection identifies land, drying area, shallow `DEPARE`, or missing
+depth evidence. This reference remains a portable-runtime proof of concept: it
+demonstrates a professional bounded solver cascade over typed host services,
+but it is not a safety-certified navigator and does not import native SuperCPN
+or legacy Weather Routing objects into Wasm.
 
 When departure comparison is enabled, the Results tab opens automatically and
-lists every attempted departure, including failures. It reports the best
+lists every attempted departure, including failures. The configured range is
+applied on both sides of the selected time and progress reports completed,
+active and queued searches together with each solver stage. It reports the best
 (shortest elapsed) passage, offset, UTC departure/ETA, elapsed time, distance,
 average boat speed and SOG, maximum SOG, wind/current statistics, tack count,
 motor time/fuel/mode changes when propulsion is enabled, the existing Weather

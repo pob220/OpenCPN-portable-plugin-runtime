@@ -1,6 +1,7 @@
 #include "portable_departure_time.h"
 
 #include <array>
+#include <algorithm>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
@@ -231,4 +232,31 @@ wxString FormatPortableDepartureTime(int64_t unix_time,
   const wxDateTime wall = PortableDepartureWallTime(unix_time, zone);
   return wxString::Format("%s %s", wall.Format("%d %b %Y %H:%M"),
                           PortableDepartureZoneLabel(zone, unix_time));
+}
+
+std::vector<int64_t> PortableDepartureOffsetsSeconds(int range_hours,
+                                                     int spacing_hours) {
+  if (range_hours <= 0 || spacing_hours <= 0) return {0};
+  const int64_t range_seconds = static_cast<int64_t>(range_hours) * 3600;
+  const int64_t spacing_seconds = static_cast<int64_t>(spacing_hours) * 3600;
+  std::vector<int64_t> offsets;
+  const int64_t alternatives = range_seconds / spacing_seconds;
+  offsets.reserve(static_cast<size_t>(alternatives * 2 + 1));
+  for (int64_t step = -alternatives; step <= alternatives; ++step)
+    offsets.push_back(step * spacing_seconds);
+  return offsets;
+}
+
+std::vector<size_t> PortableDepartureExecutionOrder(
+    const std::vector<int64_t>& offsets_seconds) {
+  std::vector<size_t> order(offsets_seconds.size());
+  for (size_t index = 0; index < order.size(); ++index) order[index] = index;
+  std::stable_sort(
+      order.begin(), order.end(), [&offsets_seconds](size_t lhs, size_t rhs) {
+        const int64_t lhs_distance = std::abs(offsets_seconds[lhs]);
+        const int64_t rhs_distance = std::abs(offsets_seconds[rhs]);
+        if (lhs_distance != rhs_distance) return lhs_distance < rhs_distance;
+        return offsets_seconds[lhs] < offsets_seconds[rhs];
+      });
+  return order;
 }

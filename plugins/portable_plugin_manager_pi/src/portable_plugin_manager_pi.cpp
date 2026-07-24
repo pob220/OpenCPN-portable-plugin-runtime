@@ -22,6 +22,7 @@
 #endif
 
 #include "manager_dialog.h"
+#include "chart_safety_service.h"
 #include "environment_workbench.h"
 #include "surface_dialog.h"
 #include "weather_routing_host.h"
@@ -236,12 +237,23 @@ int PortablePluginManagerPi::Init() {
     wxLogWarning("PPM event=duplicate-init");
     return WANTS_TOOLBAR_CALLBACK | INSTALLS_TOOLBAR_TOOL | WANTS_CONFIG |
            WANTS_NMEA_EVENTS | WANTS_NMEA_SENTENCES | WANTS_OVERLAY_CALLBACK |
-           WANTS_OPENGL_OVERLAY_CALLBACK | WANTS_CURSOR_LATLON;
+           WANTS_OPENGL_OVERLAY_CALLBACK | WANTS_CURSOR_LATLON |
+           WANTS_PLUGIN_MESSAGING;
   }
   initialized_ = true;
   storage_root_ = ResolveStorageRoot();
   wxLogMessage("PPM event=init api=1.21 version=0.2.1");
   wxLogMessage("PPM event=storage-root path=%s", storage_root_);
+  {
+    std::vector<std::string> chart_roots;
+    const wxArrayString configured_chart_roots = GetChartDBDirArrayString();
+    chart_roots.reserve(configured_chart_roots.size());
+    for (const auto& root : configured_chart_roots)
+      chart_roots.push_back(root.ToStdString());
+    ChartSafetyService::ConfigureChartRoots(chart_roots);
+    wxLogMessage("PPM event=chart-safety-provider status=%s",
+                 wxString::FromUTF8(ChartSafetyService().Summary()));
+  }
   if (!RegisterManagerAction()) {
     wxLogError("PPM event=manager-action-registration-failed");
   }
@@ -302,6 +314,11 @@ int PortablePluginManagerPi::Init() {
               percent, wxString::FromUTF8(message));
         }
       });
+  runtime_engine_->SetPluginMessageSender(
+      [](const std::string& message_id, const std::string& message_body) {
+        ::SendPluginMessage(wxString::FromUTF8(message_id),
+                            wxString::FromUTF8(message_body));
+      });
   if (!runtime_engine_->LoadInstalled(developer_mode_)) {
     wxLogWarning(
         "PPM event=runtime-engine-load-completed-with-package-failures");
@@ -349,7 +366,8 @@ int PortablePluginManagerPi::Init() {
   }
   return WANTS_TOOLBAR_CALLBACK | INSTALLS_TOOLBAR_TOOL | WANTS_CONFIG |
          WANTS_NMEA_EVENTS | WANTS_NMEA_SENTENCES | WANTS_OVERLAY_CALLBACK |
-         WANTS_OPENGL_OVERLAY_CALLBACK | WANTS_CURSOR_LATLON;
+         WANTS_OPENGL_OVERLAY_CALLBACK | WANTS_CURSOR_LATLON |
+         WANTS_PLUGIN_MESSAGING;
 }
 
 bool PortablePluginManagerPi::DeInit() {
@@ -662,7 +680,10 @@ void PortablePluginManagerPi::OpenPackageSurface(
                          cursor_longitude_};
             return true;
           },
-          [](std::int64_t*) { return false; },
+          [this](std::int64_t* unix_time) {
+            return environment_workbench_ &&
+                   environment_workbench_->DisplayedTime(unix_time);
+          },
           [this, package_id](
               double latitude, double longitude,
               const std::vector<std::int64_t>& unix_times,
@@ -1241,6 +1262,17 @@ void PortablePluginManagerPi::SetNMEASentence(wxString& sentence) {
   if (value)
     runtime_engine_->DeliverNavigationSentence(
         std::string(value.data(), value.length()));
+}
+
+void PortablePluginManagerPi::SetPluginMessage(wxString& message_id,
+                                               wxString& message_body) {
+  if (!runtime_engine_) return;
+  const wxScopedCharBuffer id = message_id.utf8_str();
+  const wxScopedCharBuffer body = message_body.utf8_str();
+  if (!id || !body) return;
+  runtime_engine_->DeliverPluginMessage(
+      std::string(id.data(), id.length()),
+      std::string(body.data(), body.length()));
 }
 
 bool PortablePluginManagerPi::RenderOverlayMultiCanvas(

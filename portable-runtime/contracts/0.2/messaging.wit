@@ -1,0 +1,9 @@
+package opencpn:portable@0.2.0;
+
+interface plugin-messages {
+  send: func(message-id: string, message-body: string) -> result<_, string>;
+}
+
+interface plugin-message-sink {
+  on-plugin-message: func(message-id: string, message-body: string) -> result<_, string>;
+}

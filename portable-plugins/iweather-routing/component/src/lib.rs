@@ -8,7 +8,7 @@ use exports::opencpn::portable::plugin::{
 };
 use opencpn::portable::host::{
     self, ChartCoverageState, ChartSegmentResult, EnvironmentSample, EnvironmentSampleRequest,
-    GeoPoint, GeoSegment, LogLevel,
+    FinalChartSafetyOptions, GeoPoint, GeoSegment, LogLevel,
 };
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 
@@ -120,6 +120,11 @@ const PROPULSION_MOTOR: u8 = 2;
 const MAX_GRAPH_WAIT_SECONDS: u32 = 6 * 3600;
 const VALIDATION_INTERVAL_SECONDS: i64 = 15 * 60;
 const VALIDATION_SEGMENT_NM: f64 = 1.5;
+// The host rejects current vectors whose magnitude reaches 12 m/s before
+// exposing them through the portable environment service.  This declared
+// physical ceiling therefore remains an admissible, deliberately
+// conservative bound for a current-aware A* heuristic.
+const MAX_PROVIDER_CURRENT_SPEED_KNOTS: f64 = 12.0 * 1.94384449;
 
 #[derive(Clone, Copy)]
 struct ProgressRange {
@@ -225,6 +230,58 @@ fn route_chain(nodes: &[Node], endpoint: usize) -> Vec<RoutePoint> {
     }
     chain.reverse();
     chain
+}
+
+fn route_chain_indices(nodes: &[Node], endpoint: usize) -> Vec<usize> {
+    let mut chain = Vec::new();
+    let mut cursor = Some(endpoint);
+    while let Some(index) = cursor {
+        chain.push(index);
+        cursor = nodes[index].parent;
+    }
+    chain.reverse();
+    chain
+}
+
+fn validation_failure_leg(error: &str) -> Option<usize> {
+    let marker = "leg ";
+    let start = error.find(marker)? + marker.len();
+    let digits = error[start..]
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .collect::<String>();
+    let one_based = digits.parse::<usize>().ok()?;
+    one_based.checked_sub(1)
+}
+
+fn remember_invalid_prefix(
+    error: &str,
+    chain: &[usize],
+    persistent_node_count: usize,
+    invalid_prefixes: &mut BTreeSet<usize>,
+) {
+    let Some(leg) = validation_failure_leg(error) else {
+        return;
+    };
+    let endpoint = leg.saturating_add(1);
+    if endpoint < chain.len() && chain[endpoint] < persistent_node_count {
+        invalid_prefixes.insert(chain[endpoint]);
+    }
+}
+
+fn ancestry_has_invalid_prefix(
+    nodes: &[Node],
+    endpoint: usize,
+    invalid_prefixes: &BTreeSet<usize>,
+) -> bool {
+    let mut cursor = Some(endpoint);
+    while let Some(index) = cursor {
+        if invalid_prefixes.contains(&index) {
+            return true;
+        }
+        cursor = nodes[index].parent;
+    }
+    false
 }
 
 enum ArrivalCandidateDecision {
@@ -558,7 +615,15 @@ fn route_statistics(
         let sample = &samples[index];
         let (wind_u, wind_v) = match (sample.wind_u_knots, sample.wind_v_knots) {
             (Some(u), Some(v)) => (u, v),
-            _ => return Err("completed route lost wind coverage while calculating metrics".into()),
+            _ => {
+                return Err(format!(
+                    "completed route lost wind coverage while calculating metrics for leg {} at {} ({:.5}, {:.5})",
+                    index + 1,
+                    requests[index].unix_time,
+                    requests[index].latitude,
+                    requests[index].longitude
+                ));
+            }
         };
         let wind = wind_u.hypot(wind_v);
         let (current_u, current_v, has_current) =
@@ -1186,12 +1251,17 @@ fn opposing_wind_current(wind_u: f64, wind_v: f64, current_u: f64, current_v: f6
     -(wind_u * current_u + wind_v * current_v)
 }
 
-/// Return the centre segment and conservative parallel probes at the
-/// configured clearance.  The host owns land/chart data; the portable engine
-/// only sends value geometry.  Requiring every probe to be covered turns the
-/// nominal line into a bounded safety corridor without exposing chart
-/// objects across the runtime boundary.
-fn clearance_segments(segment: &GeoSegment, margin_nm: f64) -> Vec<GeoSegment> {
+/// Return the centre segment and conservative probes at the configured
+/// clearance.  The host owns land/chart data; the portable engine only sends
+/// value geometry.  Search propagation uses the centre and parallel sides.
+/// Dense final validation also crosses the opposite corners so an obstruction
+/// inside the swept corridor cannot hide between the three longitudinal
+/// probes.
+fn clearance_segments(
+    segment: &GeoSegment,
+    margin_nm: f64,
+    close_final_corridor: bool,
+) -> Vec<GeoSegment> {
     let mut result = vec![segment.clone()];
     if margin_nm <= 1e-9 {
         return result;
@@ -1207,10 +1277,11 @@ fn clearance_segments(segment: &GeoSegment, margin_nm: f64) -> Vec<GeoSegment> {
     let perpendicular_north = -course_radians.sin();
     let average_latitude = (segment.start.latitude + segment.end.latitude) * 0.5;
     let longitude_scale = average_latitude.to_radians().cos().abs().max(0.05);
+    let mut parallel = Vec::with_capacity(2);
     for side in [-1.0, 1.0] {
         let latitude_offset = side * perpendicular_north * margin_nm / 60.0;
         let longitude_offset = side * perpendicular_east * margin_nm / (60.0 * longitude_scale);
-        result.push(GeoSegment {
+        parallel.push(GeoSegment {
             start: GeoPoint {
                 latitude: (segment.start.latitude + latitude_offset).clamp(-90.0, 90.0),
                 longitude: (segment.start.longitude + longitude_offset + 540.0).rem_euclid(360.0)
@@ -1221,6 +1292,22 @@ fn clearance_segments(segment: &GeoSegment, margin_nm: f64) -> Vec<GeoSegment> {
                 longitude: (segment.end.longitude + longitude_offset + 540.0).rem_euclid(360.0)
                     - 180.0,
             },
+        });
+    }
+    result.extend(parallel.iter().cloned());
+    if close_final_corridor {
+        // The centre and parallel probes alone can miss a small obstruction
+        // inside the swept rectangle.  Crossing the opposite offset corners
+        // matches the conservative final-route geometry used by the working
+        // OpenCPN weather router while keeping the cheaper three-line test for
+        // the much larger propagation fan.
+        result.push(GeoSegment {
+            start: parallel[0].start.clone(),
+            end: parallel[1].end.clone(),
+        });
+        result.push(GeoSegment {
+            start: parallel[1].start.clone(),
+            end: parallel[0].end.clone(),
         });
     }
     result
@@ -1246,6 +1333,24 @@ where
 
 fn query_chart_segments(segments: &[GeoSegment]) -> Result<Vec<ChartSegmentResult>, String> {
     query_chart_segments_with(segments, host::charts_query_segments)
+}
+
+fn query_final_chart_safety(
+    segments: &[GeoSegment],
+    request: &RouteRequest,
+) -> Result<Vec<ChartSegmentResult>, String> {
+    // The portable engine has already expanded every dense route segment into
+    // the full five-line clearance corridor.  Passing zero here prevents the
+    // host provider from applying the horizontal margin a second time while
+    // still requesting chart-object and depth semantics for every probe.
+    let options = FinalChartSafetyOptions {
+        safety_margin_nautical_miles: 0.0,
+        minimum_depth_metres: request.minimum_chart_depth_metres,
+        require_authoritative: request.require_authoritative_chart_safety,
+    };
+    query_chart_segments_with(segments, |batch| {
+        host::charts_query_final_safety(batch, options.clone())
+    })
 }
 
 fn chart_corridor_is_covered(results: &[ChartSegmentResult]) -> bool {
@@ -1275,6 +1380,8 @@ fn validate(request: &RouteRequest) -> Result<(), String> {
         || !(1..=8).contains(&request.labels_per_cell)
         || !(1..=720).contains(&request.max_hours)
         || !(100..=1_000_000).contains(&request.max_states)
+        || !request.minimum_chart_depth_metres.is_finite()
+        || !(0.0..=100.0).contains(&request.minimum_chart_depth_metres)
     {
         return Err("route calculation limits are outside the supported range".into());
     }
@@ -1461,7 +1568,21 @@ fn validation_subsegments(
         let time_parts = ((seconds + VALIDATION_INTERVAL_SECONDS - 1) / VALIDATION_INTERVAL_SECONDS)
             .max(1) as usize;
         let distance_parts = (distance / VALIDATION_SEGMENT_NM).ceil().max(1.0) as usize;
-        let parts = time_parts.max(distance_parts).min(256);
+        let required_parts = time_parts.max(distance_parts);
+        if required_parts > 255 {
+            return Err(format!(
+                "independent validation rejected leg {} because it requires more than 255 bounded probes",
+                route_leg + 1
+            ));
+        }
+        // Keep an odd number of probes so the centre probe is the exact
+        // original-leg midpoint used by propulsion metrics. This prevents a
+        // route from passing probes either side of a narrow coverage gap and
+        // then failing only after solver acceptance.
+        let mut parts = required_parts;
+        if parts % 2 == 0 {
+            parts += 1;
+        }
         let first = subsegments.len();
         for part in 0..parts {
             subsegments.push(ValidationSubsegment {
@@ -1475,11 +1596,27 @@ fn validation_subsegments(
     Ok((subsegments, leg_ranges))
 }
 
-/// Independently replay the exact delivered geometry.  This deliberately
-/// re-samples the immutable environmental dataset and chart service instead
-/// of trusting search-state decisions.  A route cannot be returned as a
-/// success unless every chronological leg passes this boundary.
-fn validate_delivered_route(request: &RouteRequest, points: &[RoutePoint]) -> Result<u64, String> {
+/// Independently replay exact route geometry.  Delivered routes require the
+/// configured destination; prefix checks use the same chronological dynamics
+/// without pretending an intermediate search state is an arrival.
+fn validate_route_geometry(
+    request: &RouteRequest,
+    points: &[RoutePoint],
+    require_destination: bool,
+) -> Result<u64, String> {
+    if !require_destination && points.len() == 1 {
+        return if distance_nm(
+            points[0].latitude,
+            points[0].longitude,
+            request.start_latitude,
+            request.start_longitude,
+        ) <= 0.002
+        {
+            Ok(0)
+        } else {
+            Err("independent validation found the wrong route start".into())
+        };
+    }
     if points.len() < 2 {
         return Err("independent validation rejected an empty route".into());
     }
@@ -1492,15 +1629,19 @@ fn validate_delivered_route(request: &RouteRequest, points: &[RoutePoint]) -> Re
     {
         return Err("independent validation found the wrong route start".into());
     }
-    let end = points.last().expect("route was checked non-empty");
-    if distance_nm(
-        end.latitude,
-        end.longitude,
-        request.destination_latitude,
-        request.destination_longitude,
-    ) > request.destination_tolerance_nm + 1e-9
-    {
-        return Err("independent validation found the route outside destination tolerance".into());
+    if require_destination {
+        let end = points.last().expect("route was checked non-empty");
+        if distance_nm(
+            end.latitude,
+            end.longitude,
+            request.destination_latitude,
+            request.destination_longitude,
+        ) > request.destination_tolerance_nm + 1e-9
+        {
+            return Err(
+                "independent validation found the route outside destination tolerance".into(),
+            );
+        }
     }
 
     let (validation_segments, leg_ranges) = validation_subsegments(points)?;
@@ -1527,30 +1668,37 @@ fn validate_delivered_route(request: &RouteRequest, points: &[RoutePoint]) -> Re
         segments.extend(clearance_segments(
             &segment,
             request.land_safety_margin_nautical_miles,
+            true,
         ));
     }
     let environments = host::environment_sample_batch(&samples)?;
     if environments.len() != samples.len() {
         return Err("independent validation received the wrong environmental batch length".into());
     }
-    if request.avoid_unsafe_charts {
-        let chart_results = query_chart_segments(&segments)?;
-        if chart_results.len() != segments.len() {
-            return Err("independent validation received the wrong chart batch length".into());
-        }
-        let probes_per_leg = if request.land_safety_margin_nautical_miles > 1e-9 {
-            3
-        } else {
-            1
-        };
-        if chart_results
-            .chunks(probes_per_leg)
-            .any(|results| !chart_corridor_is_covered(results))
-        {
-            return Err(
-                "independent validation rejected unsafe or uncovered route geometry".into(),
-            );
-        }
+    // Search-time avoidance may be disabled for diagnosis, but a delivered
+    // route must always pass the host's dense final safety service.
+    let chart_results = query_final_chart_safety(&segments, request)?;
+    if chart_results.len() != segments.len() {
+        return Err("independent validation received the wrong chart batch length".into());
+    }
+    let probes_per_leg = if request.land_safety_margin_nautical_miles > 1e-9 {
+        5
+    } else {
+        1
+    };
+    if let Some((result_index, rejected)) = chart_results
+        .iter()
+        .enumerate()
+        .find(|(_, result)| result.state != ChartCoverageState::Covered)
+    {
+        let probe_index = result_index / probes_per_leg;
+        let route_leg = validation_segments
+            .get(probe_index)
+            .map_or(probe_index + 1, |probe| probe.route_leg + 1);
+        return Err(format!(
+            "independent final chart-safety validation rejected leg {route_leg}: {}",
+            rejected.diagnostic
+        ));
     }
 
     // Environmental limits and coverage are checked at every dense probe,
@@ -1765,6 +1913,17 @@ fn validate_delivered_route(request: &RouteRequest, points: &[RoutePoint]) -> Re
         }) as u64)
 }
 
+/// The final acceptance boundary always performs a fresh dense replay of the
+/// exact delivered route, independent of any prefix certification used to
+/// avoid repeating known-invalid recovery work.
+fn validate_delivered_route(request: &RouteRequest, points: &[RoutePoint]) -> Result<u64, String> {
+    validate_route_geometry(request, points, true)
+}
+
+fn validate_route_prefix(request: &RouteRequest, points: &[RoutePoint]) -> Result<u64, String> {
+    validate_route_geometry(request, points, false)
+}
+
 fn usable_environment(
     request: &RouteRequest,
     wind_u: Option<f64>,
@@ -1963,6 +2122,7 @@ fn expand_recovery_node(
         segments.extend(clearance_segments(
             &segment,
             request.land_safety_margin_nautical_miles,
+            false,
         ));
         ranges.push(first..segments.len());
     }
@@ -2077,6 +2237,7 @@ fn reverse_isochrone_recovery(
     nodes: &mut Vec<Node>,
     examined: &mut u32,
     corridor: Option<&RouteCorridor>,
+    invalid_prefixes: &mut BTreeSet<usize>,
     progress: ProgressRange,
 ) -> Result<ReverseRecoveryOutcome, String> {
     let mut outcome = ReverseRecoveryOutcome {
@@ -2104,7 +2265,6 @@ fn reverse_isochrone_recovery(
         ))
         .then_with(|| nodes[*right].time.cmp(&nodes[*left].time))
     });
-    seeds.truncate(32);
     let mut approaches = Vec::new();
     for radius in [request.destination_tolerance_nm.max(2.0), 5.0, 10.0] {
         for direction in (0..360).step_by(15) {
@@ -2116,14 +2276,30 @@ fn reverse_isochrone_recovery(
             ));
         }
     }
-    let seed_count = seeds.len().max(1);
-    for (seed_number, seed) in seeds.into_iter().enumerate() {
+    const MAX_REVERSE_SEEDS: usize = 32;
+    let mut seed_number = 0usize;
+    for seed in seeds {
+        if ancestry_has_invalid_prefix(nodes, seed, invalid_prefixes) {
+            continue;
+        }
+        if seed_number >= MAX_REVERSE_SEEDS {
+            break;
+        }
+        let seed_indices = route_chain_indices(nodes, seed);
+        let seed_chain = route_chain(nodes, seed);
+        if let Err(error) = validate_route_prefix(request, &seed_chain) {
+            remember_invalid_prefix(&error, &seed_indices, nodes.len(), invalid_prefixes);
+            outcome.rejected_candidates = outcome.rejected_candidates.saturating_add(1);
+            outcome.last_rejection = Some(error);
+            continue;
+        }
+        seed_number += 1;
         progress.report(
-            90 + ((seed_number * 4 / seed_count).min(4) as u8),
+            90 + ((seed_number * 4 / MAX_REVERSE_SEEDS).min(4) as u8),
             &format!(
                 "Reverse-isocrone recovery: testing frontier bridge {}/{} ({} retained states examined)",
-                seed_number + 1,
-                seed_count,
+                seed_number,
+                MAX_REVERSE_SEEDS,
                 examined
             ),
         );
@@ -2146,15 +2322,19 @@ fn reverse_isochrone_recovery(
                     return Ok(outcome);
                 }
                 Err(error) => {
+                    let chain_indices = route_chain_indices(nodes, index);
+                    remember_invalid_prefix(&error, &chain_indices, checkpoint, invalid_prefixes);
                     outcome.rejected_candidates = outcome.rejected_candidates.saturating_add(1);
                     outcome.last_rejection = Some(error);
-                    progress.report(
-                        90 + ((seed_number * 4 / seed_count).min(4) as u8),
-                        &format!(
-                            "Reverse-isocrone recovery: provisional bridge failed independent replay; continuing with alternative approaches ({} rejected)",
-                            outcome.rejected_candidates
-                        ),
-                    );
+                    if outcome.rejected_candidates == 1 || outcome.rejected_candidates % 16 == 0 {
+                        progress.report(
+                            90 + ((seed_number * 4 / MAX_REVERSE_SEEDS).min(4) as u8),
+                            &format!(
+                                "Reverse-isocrone recovery: provisional bridge failed independent replay; continuing with alternative approaches ({} rejected)",
+                                outcome.rejected_candidates
+                            ),
+                        );
+                    }
                 }
             }
         }
@@ -2212,15 +2392,25 @@ fn reverse_isochrone_recovery(
                         return Ok(outcome);
                     }
                     Err(error) => {
+                        let chain_indices = route_chain_indices(nodes, index);
+                        remember_invalid_prefix(
+                            &error,
+                            &chain_indices,
+                            checkpoint,
+                            invalid_prefixes,
+                        );
                         outcome.rejected_candidates = outcome.rejected_candidates.saturating_add(1);
                         outcome.last_rejection = Some(error);
-                        progress.report(
-                            90 + ((seed_number * 4 / seed_count).min(4) as u8),
-                            &format!(
-                                "Reverse-isocrone recovery: provisional approach failed independent replay; continuing ({} rejected)",
-                                outcome.rejected_candidates
-                            ),
-                        );
+                        if outcome.rejected_candidates == 1 || outcome.rejected_candidates % 16 == 0
+                        {
+                            progress.report(
+                                90 + ((seed_number * 4 / MAX_REVERSE_SEEDS).min(4) as u8),
+                                &format!(
+                                    "Reverse-isocrone recovery: provisional approach failed independent replay; continuing ({} rejected)",
+                                    outcome.rejected_candidates
+                                ),
+                            );
+                        }
                     }
                 }
             }
@@ -2317,15 +2507,16 @@ fn maximum_vessel_speed_knots(request: &RouteRequest) -> f64 {
     maximum.max(0.0)
 }
 
-/// A* may only use a lower bound on remaining time. With currents enabled the
-/// request contains no global upper bound on favourable current, so the only
-/// admissible heuristic is zero (Dijkstra). Without currents the maximum
-/// polar/motor speed is a valid upper bound on through-water progress.
+/// A* may only use a lower bound on remaining time.  The maximum polar/motor
+/// speed bounds through-water progress and the portable environment contract's
+/// physical current ceiling bounds favourable drift.
 fn remaining_time_lower_bound_seconds(request: &RouteRequest, node: &Node) -> f64 {
-    if request.use_currents {
-        return 0.0;
-    }
-    let maximum_speed = maximum_vessel_speed_knots(request);
+    let maximum_speed = maximum_vessel_speed_knots(request)
+        + if request.use_currents {
+            MAX_PROVIDER_CURRENT_SPEED_KNOTS
+        } else {
+            0.0
+        };
     if maximum_speed <= 0.05 {
         return 0.0;
     }
@@ -2453,6 +2644,7 @@ fn time_dependent_graph_fallback(
     nodes: &mut Vec<Node>,
     examined: &mut u32,
     corridor: Option<&RouteCorridor>,
+    invalid_prefixes: &mut BTreeSet<usize>,
     progress: ProgressRange,
 ) -> Result<Option<usize>, String> {
     let step = request.time_step_seconds.min(1800).max(300);
@@ -2460,11 +2652,24 @@ fn time_dependent_graph_fallback(
     seeds.sort_by(|left, right| {
         candidate_score(request, &nodes[*left]).total_cmp(&candidate_score(request, &nodes[*right]))
     });
-    seeds.truncate(128);
     let mut open = BinaryHeap::new();
     let mut labels: BTreeMap<(SearchCell, i64, u32), Vec<GraphLabel>> = BTreeMap::new();
     let mut serial = 0u64;
+    let mut accepted_seeds = 0usize;
     for seed in seeds {
+        if ancestry_has_invalid_prefix(nodes, seed, invalid_prefixes) {
+            continue;
+        }
+        if accepted_seeds >= 128 {
+            break;
+        }
+        let seed_indices = route_chain_indices(nodes, seed);
+        let seed_chain = route_chain(nodes, seed);
+        if let Err(error) = validate_route_prefix(request, &seed_chain) {
+            remember_invalid_prefix(&error, &seed_indices, nodes.len(), invalid_prefixes);
+            continue;
+        }
+        accepted_seeds += 1;
         let cost = nodes[seed].time - request.departure_unix_time;
         let heuristic = remaining_time_lower_bound_seconds(request, &nodes[seed]);
         open.push(GraphQueueEntry {
@@ -2519,8 +2724,12 @@ fn time_dependent_graph_fallback(
         );
         if remaining <= request.destination_tolerance_nm {
             let chain = route_chain(nodes, entry.node);
-            if validate_delivered_route(request, &chain).is_ok() {
-                return Ok(Some(entry.node));
+            match validate_delivered_route(request, &chain) {
+                Ok(_) => return Ok(Some(entry.node)),
+                Err(error) => {
+                    let chain_indices = route_chain_indices(nodes, entry.node);
+                    remember_invalid_prefix(&error, &chain_indices, nodes.len(), invalid_prefixes);
+                }
             }
         }
         if remaining <= 60.0 && direct_attempts < 8 {
@@ -2538,8 +2747,17 @@ fn time_dependent_graph_fallback(
                 corridor,
             )? {
                 let chain = route_chain(nodes, index);
-                if validate_delivered_route(request, &chain).is_ok() {
-                    return Ok(Some(index));
+                match validate_delivered_route(request, &chain) {
+                    Ok(_) => return Ok(Some(index)),
+                    Err(error) => {
+                        let chain_indices = route_chain_indices(nodes, index);
+                        remember_invalid_prefix(
+                            &error,
+                            &chain_indices,
+                            checkpoint,
+                            invalid_prefixes,
+                        );
+                    }
                 }
             }
             nodes.truncate(checkpoint);
@@ -2669,6 +2887,7 @@ fn calculate_pass(
         incoming_heading: 0.0,
         reached_destination: false,
     }];
+    let mut invalid_prefixes = BTreeSet::new();
     let mut frontier = vec![0usize];
     let max_layers = request.max_hours.saturating_mul(3600) / request.time_step_seconds;
     // `max_states` is a bound on the feasible labels retained by the search,
@@ -2985,6 +3204,7 @@ fn calculate_pass(
             chart_segments.extend(clearance_segments(
                 &segment,
                 request.land_safety_margin_nautical_miles,
+                false,
             ));
             chart_ranges.push(first..chart_segments.len());
         }
@@ -3066,6 +3286,17 @@ fn calculate_pass(
                 request.destination_longitude,
             );
             if candidate.reached_destination || remaining <= request.destination_tolerance_nm {
+                let parent = candidate
+                    .parent
+                    .expect("a propagated arrival candidate must have a parent");
+                if ancestry_has_invalid_prefix(&nodes, parent, &invalid_prefixes) {
+                    forward_rejected_arrivals = forward_rejected_arrivals.saturating_add(1);
+                    last_forward_rejection = Some(
+                        "independent validation already rejected the shared route prefix".into(),
+                    );
+                    continue;
+                }
+                let parent_chain = route_chain_indices(&nodes, parent);
                 match consider_arrival_candidate_with(
                     &mut nodes,
                     candidate,
@@ -3078,6 +3309,12 @@ fn calculate_pass(
                         break;
                     }
                     ArrivalCandidateDecision::Rejected(error) => {
+                        remember_invalid_prefix(
+                            &error,
+                            &parent_chain,
+                            nodes.len(),
+                            &mut invalid_prefixes,
+                        );
                         forward_rejected_arrivals = forward_rejected_arrivals.saturating_add(1);
                         last_forward_rejection = Some(error);
                         continue;
@@ -3199,8 +3436,14 @@ fn calculate_pass(
             ),
         );
         let checkpoint = nodes.len();
-        let reverse =
-            reverse_isochrone_recovery(&request, &mut nodes, &mut examined, corridor, progress)?;
+        let reverse = reverse_isochrone_recovery(
+            &request,
+            &mut nodes,
+            &mut examined,
+            corridor,
+            &mut invalid_prefixes,
+            progress,
+        )?;
         if let Some(index) = reverse.winner {
             winner = Some(index);
             solver_path = "reverse-isocrone recovery";
@@ -3225,7 +3468,7 @@ fn calculate_pass(
 
     if winner.is_none() && examined < request.max_states {
         let graph_mode = if request.use_currents {
-            "resource-aware Dijkstra (currents have no declared upper bound)"
+            "resource-aware A* with polar/motor and provider current bounds"
         } else {
             "resource-aware A* with a polar/motor speed bound"
         };
@@ -3236,9 +3479,14 @@ fn calculate_pass(
                 request.max_states
             ),
         );
-        if let Some(index) =
-            time_dependent_graph_fallback(&request, &mut nodes, &mut examined, corridor, progress)?
-        {
+        if let Some(index) = time_dependent_graph_fallback(
+            &request,
+            &mut nodes,
+            &mut examined,
+            corridor,
+            &mut invalid_prefixes,
+            progress,
+        )? {
             winner = Some(index);
             solver_path = "time-dependent graph fallback";
         } else {
@@ -3258,6 +3506,7 @@ fn calculate_pass(
     let winner_node = &nodes[winner];
     if winner_node.reached_destination {
         let chain = route_chain(&nodes, winner);
+        progress.report(99, "Authoritative final chart/depth corridor validation");
         let validation_samples = validate_delivered_route(&request, &chain)?;
         let statistics = route_statistics(&request, &chain)?;
         let route_environment = route_environment(&chain)?;
@@ -3484,6 +3733,8 @@ mod tests {
             max_wave_metres: Some(8.0),
             max_opposing_wind_current_knots_squared: None,
             land_safety_margin_nautical_miles: 0.4,
+            minimum_chart_depth_metres: 2.0,
+            require_authoritative_chart_safety: true,
             use_currents,
             require_current_data: false,
             use_waves: true,
@@ -3538,6 +3789,35 @@ mod tests {
                 longitude: -4.9,
             },
         }
+    }
+
+    #[test]
+    fn final_clearance_corridor_adds_crossing_diagonals_only_at_delivery() {
+        let segment = test_segment();
+        let propagation = clearance_segments(&segment, 0.4, false);
+        let final_validation = clearance_segments(&segment, 0.4, true);
+
+        assert_eq!(propagation.len(), 3);
+        assert_eq!(final_validation.len(), 5);
+        let same_point = |left: &GeoPoint, right: &GeoPoint| {
+            (left.latitude - right.latitude).abs() < 1e-12
+                && (left.longitude - right.longitude).abs() < 1e-12
+        };
+        assert!(same_point(
+            &final_validation[3].start,
+            &propagation[1].start
+        ));
+        assert!(same_point(&final_validation[3].end, &propagation[2].end));
+        assert!(same_point(
+            &final_validation[4].start,
+            &propagation[2].start
+        ));
+        assert!(same_point(&final_validation[4].end, &propagation[1].end));
+    }
+
+    #[test]
+    fn final_clearance_corridor_collapses_to_the_centre_at_zero_margin() {
+        assert_eq!(clearance_segments(&test_segment(), 0.0, true).len(), 1);
     }
 
     #[test]
@@ -3625,12 +3905,38 @@ mod tests {
     }
 
     #[test]
-    fn graph_heuristic_becomes_dijkstra_when_currents_are_enabled() {
+    fn graph_heuristic_uses_the_provider_current_ceiling() {
         let request = test_request(true);
-        assert_eq!(
-            remaining_time_lower_bound_seconds(&request, &test_node()),
-            0.0
+        let node = test_node();
+        let expected = distance_nm(
+            node.lat,
+            node.lon,
+            request.destination_latitude,
+            request.destination_longitude,
+        ) / (12.0 + MAX_PROVIDER_CURRENT_SPEED_KNOTS)
+            * 3600.0;
+        assert!((remaining_time_lower_bound_seconds(&request, &node) - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn independently_rejected_prefix_invalidates_only_its_descendants() {
+        let mut nodes = vec![test_node(), test_node(), test_node(), test_node()];
+        nodes[0].parent = None;
+        nodes[1].parent = Some(0);
+        nodes[2].parent = Some(1);
+        nodes[3].parent = Some(0);
+        let chain = route_chain_indices(&nodes, 2);
+        let mut invalid = BTreeSet::new();
+        remember_invalid_prefix(
+            "independent validation rejected leg 2: wind-angle policy",
+            &chain,
+            nodes.len(),
+            &mut invalid,
         );
+        assert!(invalid.contains(&2));
+        assert!(ancestry_has_invalid_prefix(&nodes, 2, &invalid));
+        assert!(!ancestry_has_invalid_prefix(&nodes, 1, &invalid));
+        assert!(!ancestry_has_invalid_prefix(&nodes, 3, &invalid));
     }
 
     #[test]
@@ -3660,6 +3966,16 @@ mod tests {
                     segment.end.longitude,
                 ) <= VALIDATION_SEGMENT_NM + 0.01
         }));
+        assert!(segments.iter().any(|segment| {
+            segment.start.unix_time + (segment.end.unix_time - segment.start.unix_time) / 2 == 1800
+        }));
+
+        let mut unbounded = points;
+        unbounded[1].unix_time = VALIDATION_INTERVAL_SECONDS * 256;
+        assert!(matches!(
+            validation_subsegments(&unbounded),
+            Err(error) if error.contains("more than 255")
+        ));
     }
 
     #[test]

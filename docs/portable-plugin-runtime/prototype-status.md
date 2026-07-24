@@ -1,6 +1,6 @@
 # Portable runtime implementation status
 
-Status date: 2026-07-21. Baseline: OpenCPN Release 5.14.0 in the separate
+Status date: 2026-07-24. Baseline: OpenCPN Release 5.14.0 in the separate
 Test-OpenCPN build/profile. The native xGRIB library was disabled and then
 moved to Test-OpenCPN's recoverable `plugins-disabled` directory for the final
 standalone test. The modified working OpenCPN 5.15 setup was not used.
@@ -28,12 +28,21 @@ default.
 - iWeatherRouting's adaptive time-layer route search executes in the portable
   Rust component. The host supplies a schema-validated declarative UI whose
   tabs and required form controls are package metadata, typed
-  iGRIB samples, batched GSHHS checks, cancellation, progress, retained route
+  iGRIB samples, batched host-owned chart checks, cancellation, progress, retained route
   alternatives and user-selected GPX output. A bounded departure window uses
   up to four independent Wasmtime Stores concurrently and selects the earliest
   safe arrival. Route endpoints can be resolved from the live vessel position,
   stable value snapshots of OpenCPN waypoints, the latest chart cursor or
   manual coordinates; no core navigation object crosses the boundary.
+- The standard Portable Plugin Manager now owns a renderer-independent
+  `charts.segment-safety` capability. Its stock-5.14-compatible CM93 decoder
+  reads configured chart roots without an OpenCPN core patch, caches immutable
+  cells and classifies `LNDARE`, `DRGARE`, `ITDARE` and `DEPARE/DRVAL1`.
+  Semantic land/drying checks run during route propagation; every delivered
+  route then undergoes 15-minute/~1.5 NM five-line corridor validation with
+  the configured minimum depth. Strict requests fail closed on missing
+  semantic/depth evidence. The public GSHHS check remains an explicitly
+  advisory fallback only.
 - Host-rendered declarative UI v2 environmental surface with readable UTC timeline
   navigation/playback, chart-cursor values, progress/cancellation,
   open/settings/download/generate actions and native file pickers. Persistent
@@ -210,8 +219,11 @@ Measured conformance values for this machine are recorded in
   metrics); selection consistently drives the emphasized overlay, inspection
   layers and GPX output. Environmental availability for every requested
   departure is checked before compute workers start. Multi-time sampling
-  groups route states by forecast instant so each immutable frame is decoded
-  once. The viewer and router share a byte-budgeted LRU (256 MiB default,
+  groups route states by forecast instant, decodes immutable catalogue frames
+  once and interpolates intermediate route times in-process. Cached immutable
+  frames are sampled outside the decoder mutex so independent departure
+  searches can progress concurrently. The viewer and router use byte-budgeted
+  LRUs (256 MiB default,
   configurable from 32 MiB to 4 GiB) and the viewer prefetches its adjacent
   frame. A single frame larger than the budget remains valid as the sole cache
   entry, so the cache is not a GRIB-area limit. Provider diagnostics cross host
@@ -235,9 +247,9 @@ Measured conformance values for this machine are recorded in
    seccomp/cgroup controls where deployable.
 3. Move runtime entry to a serial supervisor executor and add shutdown/leak
    soak tests.
-4. Replace the prototype GSHHS screen with structured chart-safety evidence,
-   then add immutable dataset handles, crossover-aware multi-polar selection
-   and waypoint sequences without changing the existing environmental batch
-   contract.
+4. Add the stock-compatible S-57 backend and cross-platform CM93 fixtures to
+   the host-owned chart-safety service, then add immutable dataset handles,
+   crossover-aware multi-polar selection and waypoint sequences without
+   changing the existing environmental batch contract.
 5. Complete catalogue trust/revocation/consent and select an owned Wasmtime LTS
    before any production enablement.

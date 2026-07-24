@@ -79,6 +79,7 @@ extern char** environ;
 
 #include "ocpn_plugin.h"
 #include "picosha2.h"
+#include "environment_spatial_index.h"
 
 namespace {
 
@@ -123,11 +124,19 @@ struct DecodedEnvironmentFrame {
   wxString time;
   size_t sample_count = 0;
   std::map<wxString, std::vector<Sample>> fields;
+  std::map<wxString, ppm::EnvironmentSpatialIndex> spatial_indices;
   std::map<wxString, wxString> units;
   std::map<wxString, wxString> source_times;
 };
 
 using DecodedFramePtr = std::shared_ptr<const DecodedEnvironmentFrame>;
+
+void RebuildSpatialIndices(DecodedEnvironmentFrame* frame) {
+  if (!frame) return;
+  frame->spatial_indices.clear();
+  for (const auto& [name, samples] : frame->fields)
+    frame->spatial_indices[name].Build(samples);
+}
 
 size_t EstimatedFrameBytes(const DecodedEnvironmentFrame& frame) {
   size_t bytes = sizeof(frame);
@@ -138,6 +147,8 @@ size_t EstimatedFrameBytes(const DecodedEnvironmentFrame& frame) {
     bytes += (name.length() + value.length()) * sizeof(wxChar);
   for (const auto& [name, value] : frame.source_times)
     bytes += (name.length() + value.length()) * sizeof(wxChar);
+  for (const auto& [name, index] : frame.spatial_indices)
+    bytes += name.length() * sizeof(wxChar) + index.EstimatedBytes();
   return bytes;
 }
 
@@ -197,6 +208,7 @@ DecodedFramePtr InterpolateDecodedFrames(const DecodedFramePtr& first,
     if (source_time != second->source_times.end())
       output->source_times[kind] = source_time->second;
   }
+  RebuildSpatialIndices(output.get());
   return output;
 }
 
@@ -252,6 +264,7 @@ bool ParseDecodedFrame(wxJSONValue& value, DecodedEnvironmentFrame* decoded,
     if (error) *error = "decoded frame contains no supported fields";
     return false;
   }
+  RebuildSpatialIndices(decoded);
   return true;
 }
 
@@ -366,6 +379,7 @@ bool ReadBinaryFrames(const wxString& path,
       if (!source_time.empty()) decoded.source_times[kind] = source_time;
     }
     if (decoded.sample_count != declared_samples) goto incompatible;
+    RebuildSpatialIndices(&decoded);
     decoded_frames.push_back(std::move(decoded));
   }
   if (input.peek() != std::char_traits<char>::eof()) goto incompatible;
@@ -6151,7 +6165,6 @@ bool PortableEnvironmentHost::Impl::SampleBatch(
       *error = "immutable environmental dataset snapshot changed or vanished";
     return false;
   }
-  std::lock_guard<std::mutex> decode_lock(routing_decode_mutex);
   const wxString source = dataset->source;
   const std::vector<wxString>& forecast_times = dataset->forecast_times;
 
@@ -6200,17 +6213,29 @@ bool PortableEnvironmentHost::Impl::SampleBatch(
     if (found == frame.fields.end() || found->second.empty()) return false;
     const Sample* best = nullptr;
     double best_distance = std::numeric_limits<double>::max();
+    size_t best_index = std::numeric_limits<size_t>::max();
     const double lon_scale = std::max(0.1, std::cos(latitude * kPi / 180.0));
-    for (const auto& sample : found->second) {
+    const auto consider = [&](size_t index) {
+      if (index >= found->second.size()) return;
+      const auto& sample = found->second[index];
       if (marine_only && !IsMarinePoint(sample.latitude, sample.longitude))
-        continue;
+        return;
       const double dy = sample.latitude - latitude;
       const double dx = (sample.longitude - longitude) * lon_scale;
       const double distance = dx * dx + dy * dy;
-      if (distance < best_distance) {
+      if (ppm::BetterEnvironmentSample(distance, index, best_distance,
+                                       best_index)) {
         best_distance = distance;
+        best_index = index;
         best = &sample;
       }
+    };
+    const auto spatial = frame.spatial_indices.find(name);
+    if (spatial != frame.spatial_indices.end()) {
+      spatial->second.ForEachCandidate(latitude, longitude, consider);
+    } else {
+      for (size_t index = 0; index < found->second.size(); ++index)
+        consider(index);
     }
     if (!best || best_distance > 4.0) return false;
     *output = best->value;
@@ -6229,24 +6254,34 @@ bool PortableEnvironmentHost::Impl::SampleBatch(
         std::min(u_field->second.size(), v_field->second.size());
     const double lon_scale = std::max(0.1, std::cos(latitude * kPi / 180.0));
     double best_distance = std::numeric_limits<double>::max();
+    size_t best_index = std::numeric_limits<size_t>::max();
     bool found = false;
-    for (size_t index = 0; index < count; ++index) {
+    const auto consider = [&](size_t index) {
+      if (index >= count) return;
       const auto& u = u_field->second[index];
       const auto& v = v_field->second[index];
       if (std::abs(u.latitude - v.latitude) > 0.001 ||
           std::abs(u.longitude - v.longitude) > 0.001 ||
           (marine_only && !IsMarinePoint(u.latitude, u.longitude)) ||
           (marine_only && !PlausibleCurrent(u.value, v.value)))
-        continue;
+        return;
       const double dy = u.latitude - latitude;
       const double dx = (u.longitude - longitude) * lon_scale;
       const double distance = dx * dx + dy * dy;
-      if (distance < best_distance) {
+      if (ppm::BetterEnvironmentSample(distance, index, best_distance,
+                                       best_index)) {
         best_distance = distance;
+        best_index = index;
         *u_output = u.value;
         *v_output = v.value;
         found = true;
       }
+    };
+    const auto spatial = frame.spatial_indices.find(u_name);
+    if (spatial != frame.spatial_indices.end()) {
+      spatial->second.ForEachCandidate(latitude, longitude, consider);
+    } else {
+      for (size_t index = 0; index < count; ++index) consider(index);
     }
     return found && best_distance <= 4.0;
   };
@@ -6257,26 +6292,70 @@ bool PortableEnvironmentHost::Impl::SampleBatch(
       requests_by_time[request_times[index]].push_back(index);
 
   // Route-search frontiers often contain thousands of states at the same
-  // forecast instant. Decode each distinct instant once, then satisfy every
-  // request in that group while the immutable frame is hot in the cache.
+  // forecast instant. Decode each immutable catalogue frame once, interpolate
+  // intermediate route times in-process, then sample outside the cache mutex.
   for (const auto& [request_time, indices] : requests_by_time) {
     const wxString cache_key = FrameCacheKey(source, request_time);
-    auto cached = routing_frames.find(cache_key);
-    if (cached == routing_frames.end()) {
-      DecodedFramePtr decoded;
-      if (!DecodeRoutingFrame(source, request_time, &decoded, error))
+    DecodedFramePtr decoded;
+    {
+      std::lock_guard<std::mutex> decode_lock(routing_decode_mutex);
+      auto cached = routing_frames.find(cache_key);
+      if (cached == routing_frames.end()) {
+        wxDateTime requested;
+        if (!ParseGribTime(request_time, &requested)) {
+          if (error) *error = "environmental route request has an invalid time";
+          return false;
+        }
+        const time_t requested_epoch = requested.GetTicks();
+        auto upper = std::lower_bound(
+            parsed_times.begin(), parsed_times.end(), requested_epoch,
+            [](const ForecastTime& candidate, time_t epoch) {
+              return candidate.epoch < epoch;
+            });
+        auto lower = upper;
+        if (upper == parsed_times.end()) {
+          lower = std::prev(parsed_times.end());
+          upper = lower;
+        } else if (upper != parsed_times.begin() &&
+                   upper->epoch != requested_epoch) {
+          lower = std::prev(upper);
+        }
+
+        auto acquire_catalogue_frame =
+            [&](const ForecastTime& frame_time,
+                DecodedFramePtr* output) -> bool {
+          if (FindCachedFrame(source, frame_time.key, output)) return true;
+          if (!DecodeRoutingFrame(source, frame_time.key, output, error))
+            return false;
+          CacheRoutingFrame(source, frame_time.key, *output);
+          return true;
+        };
+        DecodedFramePtr first;
+        if (!acquire_catalogue_frame(*lower, &first)) return false;
+        if (lower == upper || lower->epoch == upper->epoch) {
+          decoded = std::move(first);
+        } else {
+          DecodedFramePtr second;
+          if (!acquire_catalogue_frame(*upper, &second)) return false;
+          const double factor =
+              static_cast<double>(requested_epoch - lower->epoch) /
+              static_cast<double>(upper->epoch - lower->epoch);
+          decoded = InterpolateDecodedFrames(
+              first, second, request_time, std::clamp(factor, 0.0, 1.0));
+        }
+        CacheRoutingFrame(source, request_time, decoded);
+        cached = routing_frames.find(cache_key);
+      }
+      if (cached == routing_frames.end()) {
+        if (error)
+          *error = "environmental routing frame cache became inconsistent";
         return false;
-      CacheRoutingFrame(source, request_time, decoded);
-      cached = routing_frames.find(cache_key);
+      }
+      routing_frame_lru.remove(cache_key);
+      routing_frame_lru.push_front(cache_key);
+      decoded = cached->second;
     }
-    if (cached == routing_frames.end()) {
-      if (error)
-        *error = "environmental routing frame cache became inconsistent";
-      return false;
-    }
-    routing_frame_lru.remove(cache_key);
-    routing_frame_lru.push_front(cache_key);
-    const auto& frame = *cached->second;
+    const auto& frame = *decoded;
     for (const size_t index : indices) {
       const auto& request = requests[index];
       auto& sample = (*results)[index];

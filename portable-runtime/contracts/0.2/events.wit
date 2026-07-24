@@ -1,0 +1,14 @@
+package opencpn:portable@0.2.0;
+
+interface event-subscriptions {
+  use types.{subscription};
+
+  subscribe: func(request: subscription) -> result<u64, string>;
+  unsubscribe: func(subscription-id: u64) -> result<_, string>;
+}
+
+interface event-sink {
+  use types.{event};
+
+  on-event: func(value: event) -> result<_, string>;
+}

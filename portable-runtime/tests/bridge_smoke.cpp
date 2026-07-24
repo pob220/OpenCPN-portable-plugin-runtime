@@ -135,12 +135,10 @@ int32_t OpenWeatherRouting(void* data) {
   return 0;
 }
 
-int32_t EnvironmentSampleBatch(void* data,
-                               const ocpn_portable_environment_sample_request* requests,
-                               size_t count,
-                               ocpn_portable_environment_sample* results,
-                               size_t result_count, char* error,
-                               size_t error_capacity) {
+int32_t EnvironmentSampleBatch(
+    void* data, const ocpn_portable_environment_sample_request* requests,
+    size_t count, ocpn_portable_environment_sample* results,
+    size_t result_count, char* error, size_t error_capacity) {
   if (static_cast<HostState*>(data)->environment_failure.load()) {
     constexpr char kFailure[] = "decoder deliberately unavailable";
     if (error && error_capacity) {
@@ -190,8 +188,12 @@ int32_t EnvironmentSampleBatch(void* data,
         return (values[lower] + fraction * (values[upper] - values[lower])) *
                kKnotsPerMetreSecond;
       };
-      results[i] = {interpolate(kWindU), interpolate(kWindV),
-                    interpolate(kCurrentU), interpolate(kCurrentV), 0.6, 7};
+      results[i] = {interpolate(kWindU),
+                    interpolate(kWindV),
+                    interpolate(kCurrentU),
+                    interpolate(kCurrentV),
+                    0.6,
+                    7};
     }
     return 0;
   }
@@ -222,12 +224,12 @@ int32_t ChartsQuerySegments(void* data, const ocpn_portable_geo_segment*,
   auto& state = *static_cast<HostState*>(data);
   state.chart_segments_queried = segment_count;
   const size_t call = ++state.chart_query_calls;
-  const bool reject = state.reject_chart_query_call.load() == call ||
-                      (state.reject_reverse_charts.load() &&
-                       state.routing_stage.load() == 1);
+  const bool reject =
+      state.reject_chart_query_call.load() == call ||
+      (state.reject_reverse_charts.load() && state.routing_stage.load() == 1);
   for (size_t i = 0; i < result_count; ++i)
-    results[i] = reject ? ocpn_portable_chart_segment_result{1, 3}
-                        : ocpn_portable_chart_segment_result{0, 3};
+    results[i] = reject ? ocpn_portable_chart_segment_result{1, 3, 1}
+                        : ocpn_portable_chart_segment_result{0, 3, 0};
   return 0;
 }
 
@@ -264,6 +266,29 @@ int32_t UserFileWrite(void*, const char*, size_t, const uint8_t*, size_t) {
   return 0;
 }
 
+int32_t SendPluginMessage(void*, const char*, size_t, const char*, size_t) {
+  return 0;
+}
+
+int32_t ChartsQueryFinalSafety(
+    void* data, const ocpn_portable_geo_segment* segments, size_t segment_count,
+    const ocpn_portable_final_chart_safety_options* options,
+    ocpn_portable_chart_segment_result* results, size_t result_count) {
+  if (!options || !std::isfinite(options->safety_margin_nautical_miles) ||
+      !std::isfinite(options->minimum_depth_metres)) {
+    return -1;
+  }
+  if (!segments || segment_count != result_count) return -1;
+  auto& state = *static_cast<HostState*>(data);
+  state.chart_segments_queried = segment_count;
+  const size_t call = ++state.chart_query_calls;
+  const bool reject = state.reject_chart_query_call.load() == call;
+  for (size_t i = 0; i < result_count; ++i)
+    results[i] = reject ? ocpn_portable_chart_segment_result{1, 3, 1}
+                        : ocpn_portable_chart_segment_result{0, 3, 0};
+  return 0;
+}
+
 ocpn_portable_host_callbacks Callbacks(HostState* state) {
   return {OCPN_PORTABLE_HOST_ABI_VERSION,
           state,
@@ -286,7 +311,9 @@ ocpn_portable_host_callbacks Callbacks(HostState* state) {
           NetworkGetToPrivate,
           StoragePrivateRead,
           UserFileRead,
-          UserFileWrite};
+          UserFileWrite,
+          SendPluginMessage,
+          ChartsQueryFinalSafety};
 }
 
 bool CallSucceeded(int32_t result, const char* operation, const char* error) {
@@ -550,10 +577,9 @@ bool RoutingLifecycle(const char* component_path) {
        result.route_environment_count == result.point_count &&
        result.duration_seconds > 0 && result.diagnostic_len > 0 &&
        state.routing_progress_events > 0 && result.average_speed_knots > 0.0 &&
-       state.saw_corridor_refinement.load() &&
-       result.average_sog_knots > 0.0 && result.maximum_sog_knots > 0.0 &&
-       result.average_wind_knots > 8.0 && result.maximum_wind_knots > 8.0 &&
-       (result.metrics_available & 1) != 0 &&
+       state.saw_corridor_refinement.load() && result.average_sog_knots > 0.0 &&
+       result.maximum_sog_knots > 0.0 && result.average_wind_knots > 8.0 &&
+       result.maximum_wind_knots > 8.0 && (result.metrics_available & 1) != 0 &&
        result.average_current_knots > 0.0 && result.comfort_level >= 1 &&
        result.comfort_level <= 3;
   for (size_t index = 0; ok && index < result.route_environment_count;
@@ -592,11 +618,15 @@ bool RoutingLifecycle(const char* component_path) {
   result.point_count = 0;
   result.diagnostic_len = 0;
   std::memset(error, 0, sizeof(error));
-  const int32_t independently_rejected =
-      ocpn_portable_runtime_calculate_route(runtime, &validation_request,
-                                             &result, error, sizeof(error));
+  const int32_t independently_rejected = ocpn_portable_runtime_calculate_route(
+      runtime, &validation_request, &result, error, sizeof(error));
   ok = ok && baseline_chart_calls > 0 && independently_rejected != 0 &&
-       std::strstr(error, "independent validation rejected") != nullptr;
+       (std::strstr(error, "independent validation rejected") != nullptr ||
+        std::strstr(error, "independent final safety validation rejected") !=
+            nullptr ||
+        std::strstr(error,
+                    "independent final chart-safety validation rejected") !=
+            nullptr);
   if (!ok) {
     std::cerr << "independent replay rejection assertion failed: " << error
               << '\n';
@@ -688,8 +718,9 @@ bool RoutingLifecycle(const char* component_path) {
                       60.0,
                   (points[result.point_count - 1].longitude -
                    irish_sea_request.destination_longitude) *
-                      60.0 * std::cos(irish_sea_request.destination_latitude *
-                                      3.14159265358979323846 / 180.0)) <=
+                      60.0 *
+                      std::cos(irish_sea_request.destination_latitude *
+                               3.14159265358979323846 / 180.0)) <=
            irish_sea_request.destination_tolerance_nm;
   if (!ok) {
     std::cerr << "Irish Sea regression assertions failed: " << error << '\n';
@@ -730,11 +761,10 @@ bool RoutingLifecycle(const char* component_path) {
   result.point_count = 0;
   result.diagnostic_len = 0;
   std::memset(error, 0, sizeof(error));
-  ok = ok && CallSucceeded(ocpn_portable_runtime_calculate_route(
-                               runtime, &reverse_request, &result, error,
-                               sizeof(error)),
-                           "calculate route using reverse-isocrone recovery",
-                           error);
+  ok = ok && CallSucceeded(
+                 ocpn_portable_runtime_calculate_route(
+                     runtime, &reverse_request, &result, error, sizeof(error)),
+                 "calculate route using reverse-isocrone recovery", error);
   ok = ok && state.routing_stage.load() >= 1 &&
        std::string(diagnostic, result.diagnostic_len)
                .find("reverse-isocrone recovery") != std::string::npos;
@@ -752,10 +782,10 @@ bool RoutingLifecycle(const char* component_path) {
   result.point_count = 0;
   result.diagnostic_len = 0;
   std::memset(error, 0, sizeof(error));
-  ok = ok && CallSucceeded(ocpn_portable_runtime_calculate_route(
-                               runtime, &reverse_request, &result, error,
-                               sizeof(error)),
-                           "calculate route using graph fallback", error);
+  ok = ok && CallSucceeded(
+                 ocpn_portable_runtime_calculate_route(
+                     runtime, &reverse_request, &result, error, sizeof(error)),
+                 "calculate route using graph fallback", error);
   ok = ok && state.routing_stage.load() == 2 &&
        std::string(diagnostic, result.diagnostic_len)
                .find("time-dependent graph fallback") != std::string::npos;
@@ -809,21 +839,19 @@ bool RoutingLifecycle(const char* component_path) {
   result.point_count = 0;
   result.diagnostic_len = 0;
   std::memset(error, 0, sizeof(error));
-  ok = ok && CallSucceeded(ocpn_portable_runtime_calculate_route(
-                               runtime, &motor_request, &result, error,
-                               sizeof(error)),
-                           "calculate motor-only route", error);
+  ok = ok && CallSucceeded(
+                 ocpn_portable_runtime_calculate_route(
+                     runtime, &motor_request, &result, error, sizeof(error)),
+                 "calculate motor-only route", error);
   ok = ok && result.point_count >= 2 && result.motor_seconds > 0 &&
        result.estimated_fuel_litres > 0.0 &&
-       result.propulsion_transitions > 0 &&
-       (result.metrics_available & 2) != 0;
+       result.propulsion_transitions > 0 && (result.metrics_available & 2) != 0;
   motor_request.maximum_motor_seconds = 1;
   result.point_count = 0;
   result.diagnostic_len = 0;
   std::memset(error, 0, sizeof(error));
-  const int32_t motor_budget_rejected =
-      ocpn_portable_runtime_calculate_route(runtime, &motor_request, &result,
-                                             error, sizeof(error));
+  const int32_t motor_budget_rejected = ocpn_portable_runtime_calculate_route(
+      runtime, &motor_request, &result, error, sizeof(error));
   ok = ok && motor_budget_rejected != 0 &&
        std::strstr(error, "environmental limits") != nullptr;
 
@@ -886,8 +914,7 @@ bool RoutingLifecycle(const char* component_path) {
       local_result.traces = local_trace_lines.data();
       local_result.trace_capacity = local_trace_lines.size();
       local_result.route_environment = local_route_environment.data();
-      local_result.route_environment_capacity =
-          local_route_environment.size();
+      local_result.route_environment_capacity = local_route_environment.size();
       local_result.diagnostic = local_diagnostic;
       local_result.diagnostic_capacity = sizeof(local_diagnostic);
       replica_results[index] = ocpn_portable_runtime_calculate_route(

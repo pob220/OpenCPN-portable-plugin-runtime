@@ -22,7 +22,7 @@ wasmtime::component::bindgen!({
     world: "plugin-world",
 });
 
-const HOST_ABI_VERSION: u32 = 10;
+const HOST_ABI_VERSION: u32 = 12;
 const ROUTE_POINT_LIMIT: usize = 20_000;
 const ROUTE_INSPECTION_POINT_LIMIT: usize = 200_000;
 const ROUTE_INSPECTION_LINE_LIMIT: usize = 10_000;
@@ -37,19 +37,21 @@ const POLAR_CELL_LIMIT: usize = 200_000;
 const PRIVATE_READ_LIMIT: usize = 8 * 1024 * 1024;
 const USER_FILE_LIMIT: usize = 8 * 1024 * 1024;
 const NAVIGATION_SENTENCE_LIMIT: usize = 1024;
+const PLUGIN_MESSAGE_ID_LIMIT: usize = 256;
+const PLUGIN_MESSAGE_BODY_LIMIT: usize = 64 * 1024;
 const EPOCH_TICK: Duration = Duration::from_millis(100);
 const CALL_EPOCH_DEADLINE: u64 = 50;
 const ROUTING_BASE_FUEL: u64 = 2_000_000_000;
 // Routing may perform an independently bounded coarse pass followed by a
-// fine-corridor pass. Current-aware graph recovery also deliberately uses
-// Dijkstra because the request declares no admissible current-speed bound.
+// fine-corridor pass. Current-aware graph recovery uses the environment
+// service's conservative physical current ceiling as an admissible A* bound.
 // Budget fuel for both while retaining the state and epoch backstops.
 const ROUTING_FUEL_PER_RETAINED_STATE: u64 = 1_500_000;
 const ROUTING_MAX_FUEL: u64 = 250_000_000_000;
 // A routing export can now contain an independently bounded initial pass and
-// fine-corridor pass, and current-aware graph recovery deliberately falls back
-// to Dijkstra. Keep an absolute backstop, but do not abort a healthy default
-// 80,000-state route after the former seven-minute allowance. The resulting
+// fine-corridor pass, including current-aware A* recovery. Keep an absolute
+// backstop, but do not abort a healthy default 80,000-state route after the
+// former seven-minute allowance. The resulting
 // deadline scales from 30 to 60 minutes; ordinary routes still return as soon
 // as they finish and remain cooperatively cancellable throughout.
 const ROUTING_BASE_EPOCH_TICKS: u64 = 18_000;
@@ -84,6 +86,15 @@ pub struct GeoSegment {
 pub struct ChartSegmentResult {
     state: u32,
     charts_considered: u32,
+    reason: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FinalChartSafetyOptions {
+    safety_margin_nautical_miles: f64,
+    minimum_depth_metres: f64,
+    require_authoritative: u8,
 }
 
 #[repr(C)]
@@ -165,6 +176,8 @@ pub struct RouteRequest {
     use_waves: u8,
     require_wave_data: u8,
     limits_available: u32,
+    minimum_chart_depth_metres: f64,
+    require_authoritative_chart_safety: u8,
 }
 
 #[repr(C)]
@@ -339,6 +352,19 @@ pub struct HostCallbacks {
     >,
     user_file_write:
         Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize, *const u8, usize) -> i32>,
+    send_plugin_message: Option<
+        unsafe extern "C" fn(*mut c_void, *const c_char, usize, *const c_char, usize) -> i32,
+    >,
+    charts_query_final_safety: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            *const GeoSegment,
+            usize,
+            *const FinalChartSafetyOptions,
+            *mut ChartSegmentResult,
+            usize,
+        ) -> i32,
+    >,
 }
 
 unsafe impl Send for HostCallbacks {}
@@ -470,6 +496,52 @@ fn prepare_routing_call(runtime: &mut Runtime, requested_states: u32) -> anyhow:
 
 fn callback_error(operation: &str, code: i32) -> String {
     format!("host service {operation} failed with code {code}")
+}
+
+fn chart_segment_results(
+    output: Vec<ChartSegmentResult>,
+) -> Result<Vec<opencpn::portable::host::ChartSegmentResult>, String> {
+    output
+        .into_iter()
+        .map(|result| {
+            let (state, diagnostic) = match result.state {
+                0 => (
+                    opencpn::portable::host::ChartCoverageState::Covered,
+                    if result.charts_considered == 0 {
+                        "advisory coastline fallback found no intersection"
+                    } else {
+                        "authoritative chart safety accepted the segment"
+                    },
+                ),
+                1 => (
+                    opencpn::portable::host::ChartCoverageState::Unsafe,
+                    match result.reason {
+                        1 => "segment intersects chart LNDARE land",
+                        2 => "segment intersects chart DRGARE/ITDARE drying area",
+                        3 => "segment enters a DEPARE shallower than the vessel requirement",
+                        _ => "segment intersects a host chart-safety exclusion",
+                    },
+                ),
+                2 => (
+                    opencpn::portable::host::ChartCoverageState::MissingCoverage,
+                    if result.reason == 4 {
+                        "chart coverage does not establish the required minimum depth"
+                    } else {
+                        "authoritative chart safety data is unavailable or incomplete"
+                    },
+                ),
+                _ => (
+                    opencpn::portable::host::ChartCoverageState::Unknown,
+                    "chart safety could not be determined",
+                ),
+            };
+            Ok(opencpn::portable::host::ChartSegmentResult {
+                state,
+                charts_considered: result.charts_considered,
+                diagnostic: diagnostic.to_string(),
+            })
+        })
+        .collect()
 }
 
 impl opencpn::portable::host::Host for HostState {
@@ -859,34 +931,54 @@ impl opencpn::portable::host::Host for HostState {
         if code != 0 {
             return Err(callback_error("charts-query-segments", code));
         }
-        output
+        chart_segment_results(output)
+    }
+
+    fn charts_query_final_safety(
+        &mut self,
+        segments: Vec<opencpn::portable::host::GeoSegment>,
+        options: opencpn::portable::host::FinalChartSafetyOptions,
+    ) -> Result<Vec<opencpn::portable::host::ChartSegmentResult>, String> {
+        if segments.len() > CHART_SEGMENT_LIMIT {
+            return Err("final chart-safety segment batch limit exceeded".to_string());
+        }
+        let callback = self
+            .callbacks
+            .charts_query_final_safety
+            .ok_or_else(|| "final chart-safety service unavailable".to_string())?;
+        let input: Vec<GeoSegment> = segments
             .into_iter()
-            .map(|result| {
-                let (state, diagnostic) = match result.state {
-                    0 => (
-                        opencpn::portable::host::ChartCoverageState::Covered,
-                        "chart coverage exists at sampled segment points",
-                    ),
-                    1 => (
-                        opencpn::portable::host::ChartCoverageState::Unsafe,
-                        "segment intersects host chart-safety exclusion",
-                    ),
-                    2 => (
-                        opencpn::portable::host::ChartCoverageState::MissingCoverage,
-                        "one or more sampled points lack chart coverage",
-                    ),
-                    _ => (
-                        opencpn::portable::host::ChartCoverageState::Unknown,
-                        "chart coverage could not be determined",
-                    ),
-                };
-                Ok(opencpn::portable::host::ChartSegmentResult {
-                    state,
-                    charts_considered: result.charts_considered,
-                    diagnostic: diagnostic.to_string(),
-                })
+            .map(|segment| GeoSegment {
+                start: GeoPoint {
+                    latitude: segment.start.latitude,
+                    longitude: segment.start.longitude,
+                },
+                end: GeoPoint {
+                    latitude: segment.end.latitude,
+                    longitude: segment.end.longitude,
+                },
             })
-            .collect()
+            .collect();
+        let options = FinalChartSafetyOptions {
+            safety_margin_nautical_miles: options.safety_margin_nautical_miles,
+            minimum_depth_metres: options.minimum_depth_metres,
+            require_authoritative: u8::from(options.require_authoritative),
+        };
+        let mut output = vec![ChartSegmentResult::default(); input.len()];
+        let code = unsafe {
+            callback(
+                self.callbacks.user_data,
+                input.as_ptr(),
+                input.len(),
+                &options,
+                output.as_mut_ptr(),
+                output.len(),
+            )
+        };
+        if code != 0 {
+            return Err(callback_error("charts-query-final-safety", code));
+        }
+        chart_segment_results(output)
     }
 
     fn network_get_to_private(
@@ -985,6 +1077,35 @@ impl opencpn::portable::host::Host for HostState {
         (code == 0)
             .then_some(())
             .ok_or_else(|| callback_error("user-file-write", code))
+    }
+
+    fn send_plugin_message(
+        &mut self,
+        message_id: String,
+        message_body: String,
+    ) -> Result<(), String> {
+        if message_id.is_empty() || message_id.len() > PLUGIN_MESSAGE_ID_LIMIT {
+            return Err("plugin message id is empty or exceeds policy".to_string());
+        }
+        if message_body.len() > PLUGIN_MESSAGE_BODY_LIMIT {
+            return Err("plugin message body exceeds policy".to_string());
+        }
+        let callback = self
+            .callbacks
+            .send_plugin_message
+            .ok_or_else(|| "send-plugin-message service unavailable".to_string())?;
+        let code = unsafe {
+            callback(
+                self.callbacks.user_data,
+                message_id.as_ptr().cast(),
+                message_id.len(),
+                message_body.as_ptr().cast(),
+                message_body.len(),
+            )
+        };
+        (code == 0)
+            .then_some(())
+            .ok_or_else(|| callback_error("send-plugin-message", code))
     }
 }
 
@@ -1378,6 +1499,45 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_navigation_sentence(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn ocpn_portable_runtime_on_plugin_message(
+    runtime: *mut Runtime,
+    message_id: *const c_char,
+    message_id_len: usize,
+    message_body: *const c_char,
+    message_body_len: usize,
+    error: *mut c_char,
+    error_capacity: usize,
+) -> i32 {
+    let Some(runtime) = (unsafe { runtime.as_mut() }) else {
+        write_error(error, error_capacity, "runtime is null");
+        return -1;
+    };
+    let result = (|| -> anyhow::Result<()> {
+        prepare_call(runtime)?;
+        if message_id_len == 0 || message_id_len > PLUGIN_MESSAGE_ID_LIMIT {
+            anyhow::bail!("plugin message id is empty or exceeds policy");
+        }
+        if message_body_len > PLUGIN_MESSAGE_BODY_LIMIT {
+            anyhow::bail!("plugin message body exceeds policy");
+        }
+        let message_id = input_string(message_id, message_id_len)?;
+        let message_body = input_string(message_body, message_body_len)?;
+        runtime
+            .bindings
+            .opencpn_portable_plugin()
+            .call_on_surface_event(
+                &mut runtime.store,
+                "host.plugin-message",
+                &message_id,
+                &message_body,
+            )?
+            .map_err(anyhow::Error::msg)?;
+        Ok(())
+    })();
+    ffi_result(result, error, error_capacity)
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ocpn_portable_runtime_calculate_route(
     runtime: *mut Runtime,
     request: *const RouteRequest,
@@ -1467,6 +1627,8 @@ pub unsafe extern "C" fn ocpn_portable_runtime_calculate_route(
             max_opposing_wind_current_knots_squared: (request.limits_available & 8 != 0)
                 .then_some(request.max_opposing_wind_current_knots_squared),
             land_safety_margin_nautical_miles: request.land_safety_margin_nautical_miles,
+            minimum_chart_depth_metres: request.minimum_chart_depth_metres,
+            require_authoritative_chart_safety: request.require_authoritative_chart_safety != 0,
             use_currents: request.use_currents != 0,
             require_current_data: request.require_current_data != 0,
             use_waves: request.use_waves != 0,
@@ -1720,4 +1882,15 @@ mod tests {
         assert!(message.contains("80000 retained states"));
         assert!(!message.contains("wasm backtrace"));
     }
+}
+
+#[cfg(test)]
+mod portable_api_v02_contract {
+    // Compile the next API contract on every bridge test build. Keeping it in
+    // a separate bindgen module proves the modular WIT remains well-formed
+    // without changing the production 0.1 world or its installed packages.
+    wasmtime::component::bindgen!({
+        path: "../contracts/0.2",
+        world: "plugin-world",
+    });
 }

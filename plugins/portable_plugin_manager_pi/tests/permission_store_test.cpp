@@ -18,6 +18,16 @@
 namespace fs = std::filesystem;
 
 int main() {
+  const auto* receive_messages =
+      ppm::FindPermission("plugin.messages.receive");
+  const auto* send_messages = ppm::FindPermission("plugin.messages.send");
+  CHECK(receive_messages);
+  CHECK(receive_messages->risk == ppm::PermissionRisk::kModerate);
+  CHECK(send_messages);
+  CHECK(send_messages->risk == ppm::PermissionRisk::kHigh);
+  CHECK(ppm::FindPermission("navigation.nmea2000.read"));
+  CHECK(ppm::FindPermission("navigation.signalk.read"));
+
   const auto stamp =
       std::chrono::high_resolution_clock::now().time_since_epoch().count();
   const fs::path root =

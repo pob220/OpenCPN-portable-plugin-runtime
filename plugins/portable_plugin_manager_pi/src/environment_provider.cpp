@@ -72,6 +72,43 @@ std::string TimeKey(std::int64_t unix_time) {
   return value.ToUTC().Format("%Y%m%dT%H%MZ").ToStdString();
 }
 
+std::int64_t DaysFromCivil(int year, unsigned month, unsigned day) {
+  year -= month <= 2;
+  const int era = (year >= 0 ? year : year - 399) / 400;
+  const unsigned year_of_era = static_cast<unsigned>(year - era * 400);
+  const unsigned adjusted_month =
+      static_cast<unsigned>(static_cast<int>(month) + (month > 2 ? -3 : 9));
+  const unsigned day_of_year = (153 * adjusted_month + 2) / 5 + day - 1;
+  const unsigned day_of_era =
+      year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+  return static_cast<std::int64_t>(era) * 146097 +
+         static_cast<std::int64_t>(day_of_era) - 719468;
+}
+
+bool TimeKeyMinutes(const std::string& key, std::int64_t* minutes) {
+  if (!minutes || key.size() != 14 || key[8] != 'T' || key[13] != 'Z')
+    return false;
+  auto number = [&key](std::size_t offset, std::size_t length, int* value) {
+    int parsed = 0;
+    for (std::size_t index = offset; index < offset + length; ++index) {
+      if (key[index] < '0' || key[index] > '9') return false;
+      parsed = parsed * 10 + key[index] - '0';
+    }
+    *value = parsed;
+    return true;
+  };
+  int year = 0, month = 0, day = 0, hour = 0, minute = 0;
+  if (!number(0, 4, &year) || !number(4, 2, &month) || !number(6, 2, &day) ||
+      !number(9, 2, &hour) || !number(11, 2, &minute) || month < 1 ||
+      month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59)
+    return false;
+  *minutes = DaysFromCivil(year, static_cast<unsigned>(month),
+                           static_cast<unsigned>(day)) *
+                 1440 +
+             hour * 60 + minute;
+  return true;
+}
+
 bool ReadJson(const fs::path& path, wxJSONValue* value,
               std::string* diagnostic) {
   std::error_code error;
@@ -121,15 +158,14 @@ bool RunProcess(const std::vector<std::string>& arguments,
   if (capture_stderr) {
     const int flags = fcntl(stderr_pipe[0], F_GETFL, 0);
     capture_stderr = flags >= 0 &&
-                     fcntl(stderr_pipe[0], F_SETFL,
-                           flags | O_NONBLOCK) == 0 &&
+                     fcntl(stderr_pipe[0], F_SETFL, flags | O_NONBLOCK) == 0 &&
                      posix_spawn_file_actions_init(&file_actions) == 0;
     file_actions_initialized = capture_stderr;
   }
   if (capture_stderr) {
     capture_stderr =
         posix_spawn_file_actions_adddup2(&file_actions, stderr_pipe[1],
-                                        STDERR_FILENO) == 0 &&
+                                         STDERR_FILENO) == 0 &&
         posix_spawn_file_actions_addclose(&file_actions, stderr_pipe[0]) == 0 &&
         posix_spawn_file_actions_addclose(&file_actions, stderr_pipe[1]) == 0;
   }
@@ -143,9 +179,9 @@ bool RunProcess(const std::vector<std::string>& arguments,
     stderr_pipe[0] = stderr_pipe[1] = -1;
   }
   pid_t child = -1;
-  const int spawn_error = posix_spawn(
-      &child, argv.front(), capture_stderr ? &file_actions : nullptr, nullptr,
-      argv.data(), environ);
+  const int spawn_error = posix_spawn(&child, argv.front(),
+                                      capture_stderr ? &file_actions : nullptr,
+                                      nullptr, argv.data(), environ);
   if (file_actions_initialized) {
     posix_spawn_file_actions_destroy(&file_actions);
   }
@@ -171,8 +207,7 @@ bool RunProcess(const std::vector<std::string>& arguments,
     if (stderr_pipe[0] < 0) return;
     std::array<char, 2048> buffer{};
     for (;;) {
-      const ssize_t count =
-          read(stderr_pipe[0], buffer.data(), buffer.size());
+      const ssize_t count = read(stderr_pipe[0], buffer.data(), buffer.size());
       if (count > 0) {
         constexpr std::size_t kMaximumCapturedError = 8192;
         const std::size_t available =
@@ -182,8 +217,7 @@ bool RunProcess(const std::vector<std::string>& arguments,
         child_error.append(buffer.data(),
                            std::min<std::size_t>(available, count));
       } else if (count == 0 ||
-                 (errno != EINTR && errno != EAGAIN &&
-                  errno != EWOULDBLOCK)) {
+                 (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)) {
         break;
       }
       if (count < 0 && errno == EINTR) continue;
@@ -276,6 +310,9 @@ std::size_t EstimatedBytes(const EnvironmentFrame& frame) {
   }
   for (const auto& [name, value] : frame.source_times) {
     bytes += name.size() + value.size();
+  }
+  for (const auto& [name, index] : frame.spatial_indices) {
+    bytes += name.size() + index.EstimatedBytes();
   }
   return bytes;
 }
@@ -411,6 +448,8 @@ public:
       restored->state = state;
       restored->display_name =
           display_name.empty() ? source.filename().string() : display_name;
+      std::sort(times.begin(), times.end());
+      times.erase(std::unique(times.begin(), times.end()), times.end());
       restored->times = std::move(times);
       dataset = std::move(restored);
       return;
@@ -633,6 +672,7 @@ public:
       fs::remove(inspection, error);
       return false;
     }
+    std::sort(next->times.begin(), next->times.end());
     fs::remove(inspection, error);
     if (!WriteState(*next, diagnostic)) {
       fs::remove(snapshot, error);
@@ -681,63 +721,159 @@ public:
       by_time[TimeKey(requests[index].unix_time)].push_back(index);
     }
     samples->assign(requests.size(), EnvironmentSample{});
-    std::lock_guard<std::mutex> decode_lock(snapshot->decode_mutex);
-    std::vector<std::string> missing;
-    for (const auto& [time, ignored] : by_time) {
-      (void)ignored;
-      if (snapshot->frames.count(time) == 0) missing.push_back(time);
-    }
-    for (std::size_t offset = 0; offset < missing.size();
-         offset += kMaximumDecodeTimes) {
-      if (stop.load() || (cancelled && cancelled())) {
-        if (diagnostic) *diagnostic = "environment sampling was cancelled";
-        return false;
-      }
-      const auto end = std::min(missing.size(), offset + kMaximumDecodeTimes);
-      const std::vector<std::string> times(missing.begin() + offset,
-                                           missing.begin() + end);
-      const fs::path output =
-          private_root / ("frames-" + std::to_string(snapshot->revision) + "-" +
-                          std::to_string(offset) + ".bin");
-      const auto command = DecoderCommand(snapshot->source, snapshot->index,
-                                          output, times, false, diagnostic);
-      if (command.empty()) {
-        fs::remove(output, error);
-        return false;
-      }
-      if (!RunProcess(command, cancelled, diagnostic)) {
-        const std::string process_diagnostic =
-            diagnostic ? *diagnostic : std::string();
-        wxJSONValue failure;
-        std::string decoder_diagnostic;
-        ReadJson(output, &failure, &decoder_diagnostic);
-        if (diagnostic && !decoder_diagnostic.empty()) {
-          *diagnostic = process_diagnostic;
-          if (!diagnostic->empty()) *diagnostic += ": ";
-          *diagnostic += decoder_diagnostic;
+    std::map<std::string, std::shared_ptr<const EnvironmentFrame>>
+        resolved_frames;
+    {
+      std::lock_guard<std::mutex> decode_lock(snapshot->decode_mutex);
+      struct FrameBracket {
+        std::string lower;
+        std::string upper;
+        double factor = 0.0;
+      };
+      std::map<std::string, FrameBracket> brackets;
+      std::set<std::string> required_catalogue_times;
+      for (const auto& [time, ignored] : by_time) {
+        (void)ignored;
+        const auto cached = snapshot->frames.find(time);
+        if (cached != snapshot->frames.end()) {
+          resolved_frames[time] = cached->second;
+          snapshot->lru.remove(time);
+          snapshot->lru.push_front(time);
+          continue;
         }
-        fs::remove(output, error);
-        return false;
+        std::int64_t requested_minutes = 0;
+        std::int64_t first_minutes = 0;
+        std::int64_t last_minutes = 0;
+        if (!TimeKeyMinutes(time, &requested_minutes) ||
+            !TimeKeyMinutes(snapshot->times.front(), &first_minutes) ||
+            !TimeKeyMinutes(snapshot->times.back(), &last_minutes)) {
+          if (diagnostic)
+            *diagnostic = "environmental forecast timeline is malformed";
+          return false;
+        }
+        constexpr std::int64_t kNearestLimitMinutes = 180;
+        if (requested_minutes < first_minutes - kNearestLimitMinutes ||
+            requested_minutes > last_minutes + kNearestLimitMinutes)
+          continue;
+        auto upper = std::lower_bound(snapshot->times.begin(),
+                                      snapshot->times.end(), time);
+        auto lower = upper;
+        if (upper == snapshot->times.end()) {
+          lower = std::prev(snapshot->times.end());
+          upper = lower;
+        } else if (upper != snapshot->times.begin() && *upper != time) {
+          lower = std::prev(upper);
+        }
+        FrameBracket bracket{*lower, *upper, 0.0};
+        if (lower != upper) {
+          std::int64_t lower_minutes = 0;
+          std::int64_t upper_minutes = 0;
+          if (!TimeKeyMinutes(*lower, &lower_minutes) ||
+              !TimeKeyMinutes(*upper, &upper_minutes) ||
+              upper_minutes <= lower_minutes) {
+            if (diagnostic) {
+              *diagnostic = "environmental forecast timeline is malformed";
+            }
+            return false;
+          }
+          bracket.factor =
+              static_cast<double>(requested_minutes - lower_minutes) /
+              static_cast<double>(upper_minutes - lower_minutes);
+        }
+        brackets[time] = bracket;
+        required_catalogue_times.insert(bracket.lower);
+        required_catalogue_times.insert(bracket.upper);
       }
-      std::vector<EnvironmentFrame> decoded;
-      if (!ReadEnvironmentFrames(output.string(), &decoded, diagnostic)) {
-        fs::remove(output, error);
-        return false;
+      std::map<std::string, std::shared_ptr<const EnvironmentFrame>>
+          catalogue_frames;
+      std::vector<std::string> missing;
+      for (const auto& time : required_catalogue_times) {
+        const auto cached = snapshot->frames.find(time);
+        if (cached == snapshot->frames.end())
+          missing.push_back(time);
+        else
+          catalogue_frames[time] = cached->second;
       }
-      fs::remove(output, error);
-      for (auto& frame : decoded) {
-        const std::string key = frame.time;
-        auto value = std::make_shared<const EnvironmentFrame>(std::move(frame));
+      auto cache_frame = [&](const std::string& key,
+                             std::shared_ptr<const EnvironmentFrame> value) {
         const std::size_t bytes = EstimatedBytes(*value);
         const auto old = snapshot->frame_bytes.find(key);
-        if (old != snapshot->frame_bytes.end()) {
+        if (old != snapshot->frame_bytes.end())
           snapshot->cache_bytes -= old->second;
-        }
-        snapshot->frames[key] = std::move(value);
+        snapshot->frames[key] = value;
         snapshot->frame_bytes[key] = bytes;
         snapshot->cache_bytes += bytes;
         snapshot->lru.remove(key);
         snapshot->lru.push_front(key);
+      };
+      for (std::size_t offset = 0; offset < missing.size();
+           offset += kMaximumDecodeTimes) {
+        if (stop.load() || (cancelled && cancelled())) {
+          if (diagnostic) *diagnostic = "environment sampling was cancelled";
+          return false;
+        }
+        const auto end = std::min(missing.size(), offset + kMaximumDecodeTimes);
+        const std::vector<std::string> times(missing.begin() + offset,
+                                             missing.begin() + end);
+        const fs::path output =
+            private_root / ("frames-" + std::to_string(snapshot->revision) +
+                            "-" + std::to_string(offset) + ".bin");
+        const auto command = DecoderCommand(snapshot->source, snapshot->index,
+                                            output, times, false, diagnostic);
+        if (command.empty()) {
+          fs::remove(output, error);
+          return false;
+        }
+        if (!RunProcess(command, cancelled, diagnostic)) {
+          const std::string process_diagnostic =
+              diagnostic ? *diagnostic : std::string();
+          wxJSONValue failure;
+          std::string decoder_diagnostic;
+          ReadJson(output, &failure, &decoder_diagnostic);
+          if (diagnostic && !decoder_diagnostic.empty()) {
+            *diagnostic = process_diagnostic;
+            if (!diagnostic->empty()) *diagnostic += ": ";
+            *diagnostic += decoder_diagnostic;
+          }
+          fs::remove(output, error);
+          return false;
+        }
+        std::vector<EnvironmentFrame> decoded;
+        if (!ReadEnvironmentFrames(output.string(), &decoded, diagnostic)) {
+          fs::remove(output, error);
+          return false;
+        }
+        fs::remove(output, error);
+        for (auto& frame : decoded) {
+          const std::string key = frame.time;
+          auto value =
+              std::make_shared<const EnvironmentFrame>(std::move(frame));
+          catalogue_frames[key] = value;
+          cache_frame(key, std::move(value));
+        }
+        while (snapshot->lru.size() > 1 &&
+               snapshot->cache_bytes > kFrameCacheBudget) {
+          const std::string key = snapshot->lru.back();
+          snapshot->lru.pop_back();
+          const auto bytes = snapshot->frame_bytes.find(key);
+          if (bytes != snapshot->frame_bytes.end()) {
+            snapshot->cache_bytes -= bytes->second;
+            snapshot->frame_bytes.erase(bytes);
+          }
+          snapshot->frames.erase(key);
+        }
+      }
+      for (const auto& [time, bracket] : brackets) {
+        const auto first = catalogue_frames.find(bracket.lower);
+        const auto second = catalogue_frames.find(bracket.upper);
+        if (first == catalogue_frames.end() || second == catalogue_frames.end())
+          continue;
+        auto frame =
+            InterpolateEnvironmentFrames(first->second, second->second, time,
+                                         std::clamp(bracket.factor, 0.0, 1.0));
+        if (!frame) continue;
+        resolved_frames[time] = frame;
+        cache_frame(time, std::move(frame));
       }
       while (snapshot->lru.size() > 1 &&
              snapshot->cache_bytes > kFrameCacheBudget) {
@@ -751,11 +887,12 @@ public:
         snapshot->frames.erase(key);
       }
     }
+    // Immutable resolved frames are sampled after releasing the decoder/cache
+    // mutex. Parallel departure searches therefore share catalogue frames
+    // without serialising their much larger spatial request batches.
     for (const auto& [time, indices] : by_time) {
-      const auto found = snapshot->frames.find(time);
-      if (found == snapshot->frames.end()) continue;
-      snapshot->lru.remove(time);
-      snapshot->lru.push_front(time);
+      const auto found = resolved_frames.find(time);
+      if (found == resolved_frames.end()) continue;
       for (const auto index : indices) {
         (*samples)[index] =
             SampleEnvironmentFrame(*found->second, requests[index].latitude,

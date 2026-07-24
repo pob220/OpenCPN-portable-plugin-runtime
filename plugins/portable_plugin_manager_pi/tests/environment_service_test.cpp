@@ -10,13 +10,13 @@
 #include <string>
 #include <vector>
 
-#define CHECK(expression)                                                   \
-  do {                                                                      \
-    if (!(expression)) {                                                    \
-      std::cerr << "check failed at " << __FILE__ << ':' << __LINE__       \
-                << ": " #expression "\n";                                  \
-      return 1;                                                             \
-    }                                                                       \
+#define CHECK(expression)                                            \
+  do {                                                               \
+    if (!(expression)) {                                             \
+      std::cerr << "check failed at " << __FILE__ << ':' << __LINE__ \
+                << ": " #expression "\n";                            \
+      return 1;                                                      \
+    }                                                                \
   } while (false)
 
 namespace {
@@ -80,21 +80,20 @@ bool WriteFrame(const fs::path& path, const std::vector<Field>& fields,
 int main() {
   const auto stamp =
       std::chrono::high_resolution_clock::now().time_since_epoch().count();
-  const fs::path root =
-      fs::temp_directory_path() /
-      ("ppm environment service " + std::to_string(stamp));
+  const fs::path root = fs::temp_directory_path() /
+                        ("ppm environment service " + std::to_string(stamp));
   std::error_code error;
   fs::create_directories(root, error);
   CHECK(!error);
-  const std::vector<ppm::EnvironmentGridSample> grid = {
-      {53.0, -5.0, 1.0}, {54.0, -5.0, 2.0}};
-  CHECK(WriteFrame(
-      root / "valid.bin",
-      {{"wind-u", "m s-1", grid},
-       {"wind-v", "m s-1", {{53.0, -5.0, -2.0}, {54.0, -5.0, -3.0}}},
-       {"current-u", "m s-1", {{53.0, -5.0, 0.5}}},
-       {"current-v", "m s-1", {{53.0, -5.0, -0.25}}},
-       {"wave-height", "m", {{53.0, -5.0, 1.75}}}}));
+  const std::vector<ppm::EnvironmentGridSample> grid = {{53.0, -5.0, 1.0},
+                                                        {54.0, -5.0, 2.0}};
+  CHECK(
+      WriteFrame(root / "valid.bin",
+                 {{"wind-u", "m s-1", grid},
+                  {"wind-v", "m s-1", {{53.0, -5.0, -2.0}, {54.0, -5.0, -3.0}}},
+                  {"current-u", "m s-1", {{53.0, -5.0, 0.5}}},
+                  {"current-v", "m s-1", {{53.0, -5.0, -0.25}}},
+                  {"wave-height", "m", {{53.0, -5.0, 1.75}}}}));
   std::vector<ppm::EnvironmentFrame> frames;
   std::string diagnostic;
   CHECK(ppm::ReadEnvironmentFrames((root / "valid.bin").string(), &frames,
@@ -110,11 +109,48 @@ int main() {
   CHECK(std::abs(sample.current_v_knots + 0.4859611225) < 1e-8);
   CHECK(std::abs(sample.wave_height_metres - 1.75) < 1e-8);
   CHECK(ppm::SampleEnvironmentFrame(frames[0], 20.0, 20.0).available == 0);
+  auto unindexed = frames[0];
+  unindexed.spatial_indices.clear();
+  for (double latitude = 51.75; latitude <= 55.25; latitude += 0.125) {
+    for (double longitude = -6.25; longitude <= -3.75; longitude += 0.125) {
+      const auto indexed =
+          ppm::SampleEnvironmentFrame(frames[0], latitude, longitude);
+      const auto scanned =
+          ppm::SampleEnvironmentFrame(unindexed, latitude, longitude);
+      CHECK(indexed.available == scanned.available);
+      CHECK(indexed.wind_u_knots == scanned.wind_u_knots);
+      CHECK(indexed.wind_v_knots == scanned.wind_v_knots);
+      CHECK(indexed.current_u_knots == scanned.current_u_knots);
+      CHECK(indexed.current_v_knots == scanned.current_v_knots);
+      CHECK(indexed.wave_height_metres == scanned.wave_height_metres);
+    }
+  }
+  auto first = std::make_shared<const ppm::EnvironmentFrame>(frames[0]);
+  auto second_value = frames[0];
+  second_value.time = "20260723T1100Z";
+  second_value.fields["wind-u"][0].value = 5.0;
+  second_value.fields["wind-v"][0].value = 2.0;
+  second_value.fields["wave-direction"] = {{53.0, -5.0, 10.0}};
+  second_value.units["wave-direction"] = "degree";
+  auto first_value = frames[0];
+  first_value.fields["wave-direction"] = {{53.0, -5.0, 350.0}};
+  first_value.units["wave-direction"] = "degree";
+  first = std::make_shared<const ppm::EnvironmentFrame>(std::move(first_value));
+  auto second =
+      std::make_shared<const ppm::EnvironmentFrame>(std::move(second_value));
+  const auto interpolated =
+      ppm::InterpolateEnvironmentFrames(first, second, "20260723T1015Z", 0.25);
+  CHECK(interpolated);
+  CHECK(interpolated->time == "20260723T1015Z");
+  CHECK(interpolated->spatial_indices.count("wind-u") == 1);
+  CHECK(std::abs(interpolated->fields.at("wind-u")[0].value - 2.0) < 1e-12);
+  CHECK(std::abs(interpolated->fields.at("wind-v")[0].value + 1.0) < 1e-12);
+  CHECK(std::abs(interpolated->fields.at("wave-direction")[0].value - 355.0) <
+        1e-12);
 
-  CHECK(WriteFrame(root / "trailing.bin",
-                   {{"wind-u", "m s-1", grid}}, true));
-  CHECK(!ppm::ReadEnvironmentFrames((root / "trailing.bin").string(),
-                                    &frames, &diagnostic));
+  CHECK(WriteFrame(root / "trailing.bin", {{"wind-u", "m s-1", grid}}, true));
+  CHECK(!ppm::ReadEnvironmentFrames((root / "trailing.bin").string(), &frames,
+                                    &diagnostic));
   CHECK(diagnostic.find("trailing") != std::string::npos);
   CHECK(WriteFrame(root / "implausible.bin",
                    {{"current-u", "m s-1", {{53.0, -5.0, 9999.0}}}}));

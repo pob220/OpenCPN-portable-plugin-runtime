@@ -47,6 +47,7 @@
 
 #include "ocpn_plugin.h"
 #include "portable_departure_time.h"
+#include "chart_safety_service.h"
 #include "portable_polar.h"
 #include "portable_ui_menu.h"
 
@@ -165,6 +166,9 @@ bool LoadSurface(const wxString& package_root, const wxString& surface_resource,
                                                 "vessel-performance-status",
                                                 "environment-provider",
                                                 "avoid-unsafe",
+                                                "require-authoritative-chart-safety",
+                                                "chart-safety-status",
+                                                "minimum-chart-depth",
                                                 "minimum-wind-angle",
                                                 "maximum-wind-angle",
                                                 "maximum-true-wind",
@@ -766,7 +770,9 @@ private:
              *upwind_efficiency = nullptr, *downwind_efficiency = nullptr,
              *tack_penalty = nullptr, *gybe_penalty = nullptr,
              *maximum_search_angle = nullptr;
-  wxCheckBox *avoid_land = nullptr, *limit_true_wind = nullptr,
+  wxCheckBox *avoid_land = nullptr,
+             *require_authoritative_chart_safety = nullptr,
+             *limit_true_wind = nullptr,
              *limit_apparent_wind = nullptr, *limit_waves = nullptr,
              *limit_opposing_wind_current = nullptr,
              *use_currents = nullptr, *require_current_data = nullptr,
@@ -779,14 +785,16 @@ private:
              *boat_at_grib_time = nullptr;
   wxTextCtrl *max_true_wind = nullptr, *max_apparent_wind = nullptr,
              *max_wave = nullptr, *max_opposing_wind_current = nullptr,
-             *land_safety_margin = nullptr, *destination_tolerance = nullptr,
+             *land_safety_margin = nullptr, *minimum_chart_depth = nullptr,
+             *destination_tolerance = nullptr,
              *spatial_cell = nullptr, *motor_threshold = nullptr,
              *motor_speed = nullptr, *motor_sailing_boost = nullptr,
              *motor_hysteresis = nullptr, *maximum_motor_hours = nullptr,
              *fuel_consumption = nullptr, *maximum_fuel = nullptr;
   wxSpinCtrl *minimum_motor_run = nullptr, *mode_change_penalty = nullptr;
   wxStaticText *provider = nullptr, *vessel_performance_status = nullptr,
-               *status = nullptr, *metrics = nullptr;
+               *chart_safety_status = nullptr, *status = nullptr,
+               *metrics = nullptr;
   wxListCtrl *departure_results = nullptr, *route_schedule = nullptr;
   wxTextCtrl* validation_diagnostics = nullptr;
   wxGauge* gauge = nullptr;
@@ -798,6 +806,8 @@ private:
       std::make_shared<std::atomic<bool>>(true);
   std::atomic<unsigned> departure_runs{1};
   std::atomic<unsigned> departures_completed{0};
+  std::atomic<unsigned> departures_running{0};
+  std::atomic<unsigned> departure_progress_floor{0};
   std::thread worker;
   bool routing_exists = true;
   bool calculation_running = false;
@@ -1294,6 +1304,12 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateSafetyPanel(wxNotebook* book) {
   auto* root = new wxBoxSizer(wxVERTICAL);
   avoid_land = new wxCheckBox(panel, wxID_ANY, Label("avoid-unsafe"));
   avoid_land->SetValue(true);
+  require_authoritative_chart_safety =
+      new wxCheckBox(panel, wxID_ANY,
+                     Label("require-authoritative-chart-safety"));
+  require_authoritative_chart_safety->SetValue(true);
+  chart_safety_status =
+      new wxStaticText(panel, wxID_ANY, ppm::ChartSafetyService().Summary());
   min_wind_angle = new wxSpinCtrl(panel, wxID_ANY);
   min_wind_angle->SetRange(0, 180);
   min_wind_angle->SetValue(40);
@@ -1316,6 +1332,7 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateSafetyPanel(wxNotebook* book) {
   max_opposing_wind_current = new wxTextCtrl(panel, wxID_ANY, "0.0");
   max_opposing_wind_current->Enable(false);
   land_safety_margin = new wxTextCtrl(panel, wxID_ANY, "0.4");
+  minimum_chart_depth = new wxTextCtrl(panel, wxID_ANY, "2.0");
   use_currents = new wxCheckBox(panel, wxID_ANY, Label("use-currents"));
   use_currents->SetValue(true);
   require_current_data =
@@ -1373,12 +1390,16 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateSafetyPanel(wxNotebook* book) {
   grid->Add(limit_opposing_wind_current, 0, wxALIGN_CENTER_VERTICAL);
   grid->Add(max_opposing_wind_current, 1, wxEXPAND);
   AddRow(grid, panel, Label("land-safety-margin"), land_safety_margin);
+  AddRow(grid, panel, Label("minimum-chart-depth"), minimum_chart_depth);
   AddRow(grid, panel, Label("maximum-latitude"), maximum_latitude);
   AddRow(grid, panel, Label("upwind-efficiency"), upwind_efficiency);
   AddRow(grid, panel, Label("downwind-efficiency"), downwind_efficiency);
   AddRow(grid, panel, Label("tack-penalty"), tack_penalty);
   AddRow(grid, panel, Label("gybe-penalty"), gybe_penalty);
   root->Add(avoid_land, 0, wxALL, 12);
+  root->Add(require_authoritative_chart_safety, 0,
+            wxLEFT | wxRIGHT | wxBOTTOM, 12);
+  root->Add(chart_safety_status, 0, wxLEFT | wxRIGHT | wxBOTTOM, 12);
   root->Add(use_currents, 0, wxLEFT | wxRIGHT | wxBOTTOM, 12);
   root->Add(require_current_data, 0, wxLEFT | wxRIGHT | wxBOTTOM, 28);
   root->Add(use_waves, 0, wxLEFT | wxRIGHT | wxBOTTOM, 12);
@@ -1507,7 +1528,7 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateAdvancedPanel(
   compare_departures =
       new wxCheckBox(panel, wxID_ANY, Label("compare-departures"));
   departure_window = new wxSpinCtrl(panel, wxID_ANY);
-  departure_window->SetRange(1, 24);
+  departure_window->SetRange(1, 72);
   departure_window->SetValue(6);
   departure_spacing = new wxSpinCtrl(panel, wxID_ANY);
   departure_spacing->SetRange(1, 12);
@@ -1533,8 +1554,10 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateAdvancedPanel(
   root->Add(grid, 0, wxEXPAND | wxALL, 12);
   root->Add(new wxStaticText(
                 panel, wxID_ANY,
-                "Independent Wasm searches run in parallel up to the selected "
-                "worker limit. "
+                "The selected range is searched before and after the nominal "
+                "departure, starting with the nearest times. Independent Wasm "
+                "searches run in parallel up to the selected worker and "
+                "hardware limits. "
                 "The shortest completed passage is selected; other successful "
                 "routes remain as thin comparison overlays."),
             0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 12);
@@ -1695,6 +1718,8 @@ void PortableWeatherRoutingHost::Impl::LoadSettings() {
   }
   if (have_initial_departure) SetDepartureUnixTime(initial_departure);
   avoid_land->SetValue(config->ReadBool("avoidUnsafeCharts", true));
+  require_authoritative_chart_safety->SetValue(
+      config->ReadBool("requireAuthoritativeChartSafety", true));
   use_opencpn_route->SetValue(config->ReadBool("useOpenCpnRoute", false));
   configured_route_id = config->Read("openCpnRouteId", wxEmptyString);
   min_wind_angle->SetValue(config->ReadLong("minimumTrueWindAngle", 40));
@@ -1710,6 +1735,7 @@ void PortableWeatherRoutingHost::Impl::LoadSettings() {
   max_opposing_wind_current->SetValue(
       config->Read("maximumOpposingWindCurrent", "0.0"));
   land_safety_margin->SetValue(config->Read("landSafetyMarginNm", "0.4"));
+  minimum_chart_depth->SetValue(config->Read("minimumChartDepthM", "2.0"));
   use_currents->SetValue(config->ReadBool("useCurrents", true));
   require_current_data->SetValue(
       config->ReadBool("requireCurrentData", false));
@@ -1809,6 +1835,8 @@ void PortableWeatherRoutingHost::Impl::SaveSettings() {
   config->Write("departureTimeZone",
                  PortableDepartureZoneSetting(SelectedDepartureZone()));
   config->Write("avoidUnsafeCharts", avoid_land->GetValue());
+  config->Write("requireAuthoritativeChartSafety",
+                require_authoritative_chart_safety->GetValue());
   config->Write("useOpenCpnRoute", use_opencpn_route->GetValue());
   if (route_choice && route_choice->GetSelection() != wxNOT_FOUND &&
       static_cast<size_t>(route_choice->GetSelection()) <
@@ -1830,6 +1858,7 @@ void PortableWeatherRoutingHost::Impl::SaveSettings() {
   config->Write("maximumOpposingWindCurrent",
                  max_opposing_wind_current->GetValue());
   config->Write("landSafetyMarginNm", land_safety_margin->GetValue());
+  config->Write("minimumChartDepthM", minimum_chart_depth->GetValue());
   config->Write("useCurrents", use_currents->GetValue());
   config->Write("requireCurrentData", require_current_data->GetValue());
   config->Write("useWaves", use_waves->GetValue());
@@ -2430,6 +2459,14 @@ void PortableWeatherRoutingHost::Impl::Start() {
     status->SetLabel("Land safety margin must be between 0 and 20 NM");
     return;
   }
+  if (!Number(minimum_chart_depth, &request.minimum_chart_depth_metres) ||
+      request.minimum_chart_depth_metres < 0.0 ||
+      request.minimum_chart_depth_metres > 100.0) {
+    status->SetLabel("Minimum charted depth must be between 0 and 100 m");
+    return;
+  }
+  request.require_authoritative_chart_safety =
+      require_authoritative_chart_safety->GetValue();
   if (use_currents->GetValue() &&
       limit_opposing_wind_current->GetValue() &&
       (!Number(max_opposing_wind_current,
@@ -2535,21 +2572,20 @@ void PortableWeatherRoutingHost::Impl::Start() {
   if (use_currents->GetValue() &&
       limit_opposing_wind_current->GetValue())
     request.limits_available |= 8;
-  const unsigned run_count =
+  const std::vector<int64_t> departure_offsets =
       compare_departures->GetValue()
-          ? static_cast<unsigned>(departure_window->GetValue() /
-                                      departure_spacing->GetValue() +
-                                  1)
-          : 1;
-  const int64_t departure_step_seconds =
-      static_cast<int64_t>(departure_spacing->GetValue()) * 3600;
+          ? PortableDepartureOffsetsSeconds(departure_window->GetValue(),
+                                            departure_spacing->GetValue())
+          : std::vector<int64_t>{0};
+  const unsigned run_count =
+      static_cast<unsigned>(departure_offsets.size());
   const unsigned parallel_worker_limit = departure_workers->GetValue();
   std::vector<int64_t> departure_times;
   departure_times.reserve(run_count);
-  for (unsigned run = 0; run < run_count; ++run)
-    departure_times.push_back(request.departure_unix_time +
-                              static_cast<int64_t>(run) *
-                                  departure_step_seconds);
+  for (const int64_t offset : departure_offsets)
+    departure_times.push_back(request.departure_unix_time + offset);
+  const std::vector<size_t> departure_execution_order =
+      PortableDepartureExecutionOrder(departure_offsets);
   wxString begin_error;
   if (!begin_route_attempt || !begin_route_attempt(&begin_error)) {
     status->SetLabel("Could not start routing: " +
@@ -2566,9 +2602,12 @@ void PortableWeatherRoutingHost::Impl::Start() {
   PopulateManagerRouting("Calculating");
   departure_runs.store(run_count);
   departures_completed.store(0);
+  departures_running.store(0);
+  departure_progress_floor.store(0);
   const PortableDepartureZone display_zone = SelectedDepartureZone();
-  worker = std::thread([this, request, run_count, departure_step_seconds,
+  worker = std::thread([this, request, run_count,
                         departure_times = std::move(departure_times),
+                        departure_execution_order,
                         parallel_worker_limit, selected_performance,
                         display_zone,
                         routing_gates = std::move(routing_gates)] {
@@ -2597,7 +2636,12 @@ void PortableWeatherRoutingHost::Impl::Start() {
       }
     }
     std::atomic<unsigned> next_departure{0};
-    const unsigned parallelism = std::min(parallel_worker_limit, run_count);
+    const unsigned available_hardware = std::thread::hardware_concurrency();
+    const unsigned hardware_limit =
+        available_hardware == 0 ? parallel_worker_limit : available_hardware;
+    const unsigned parallelism =
+        std::max(1u, std::min({parallel_worker_limit, hardware_limit,
+                              run_count}));
     std::vector<std::thread> workers;
     workers.reserve(parallelism);
     for (unsigned worker_index = 0; worker_index < parallelism;
@@ -2605,13 +2649,15 @@ void PortableWeatherRoutingHost::Impl::Start() {
       workers.emplace_back([&, worker_index] {
         (void)worker_index;
         while (!cancelled.load()) {
-          const unsigned run = next_departure.fetch_add(1);
-          if (run >= run_count) break;
+          const unsigned execution_index = next_departure.fetch_add(1);
+          if (execution_index >= run_count) break;
+          const unsigned run = static_cast<unsigned>(
+              departure_execution_order[execution_index]);
           auto& departure_result = results[run];
           if (!departure_result.error.empty()) continue;
+          departures_running.fetch_add(1);
           auto candidate_request = request;
-          candidate_request.departure_unix_time +=
-              static_cast<int64_t>(run) * departure_step_seconds;
+          candidate_request.departure_unix_time = departure_times[run];
           RoutingOutcome passage;
           passage.departure_unix_time = candidate_request.departure_unix_time;
           const int64_t passage_deadline =
@@ -2692,11 +2738,13 @@ void PortableWeatherRoutingHost::Impl::Start() {
           }
           if (!ok) {
             departure_result.error = leg_error;
+            departures_running.fetch_sub(1);
             departures_completed.fetch_add(1);
             continue;
           }
           departure_result.outcome = std::move(passage);
           departure_result.success = true;
+          departures_running.fetch_sub(1);
           departures_completed.fetch_add(1);
         }
       });
@@ -2973,11 +3021,23 @@ void PortableWeatherRoutingHost::Impl::ReportProgress(unsigned percent,
   if (!frame || stopped.load()) return;
   const unsigned runs = std::max(1u, departure_runs.load());
   const unsigned completed = std::min(departures_completed.load(), runs);
-  const unsigned overall =
-      runs > 1 ? std::min(99u, completed * 100 / runs) : percent;
+  const unsigned running =
+      std::min(departures_running.load(), runs - completed);
+  const unsigned queued = runs - completed - running;
+  unsigned overall =
+      runs > 1
+          ? std::min(99u, (completed * 100 + std::min(percent, 99u)) / runs)
+          : percent;
+  unsigned floor = departure_progress_floor.load();
+  while (overall > floor &&
+         !departure_progress_floor.compare_exchange_weak(floor, overall)) {
+  }
+  overall = std::max(overall, floor);
   const wxString labelled =
-      runs > 1 ? wxString::Format("Parallel departures — %u/%u complete — %s",
-                                  completed, runs, message)
+      runs > 1 ? wxString::Format(
+                     "Departure optimisation — %u/%u complete · %u active · "
+                     "%u queued — %s",
+                     completed, runs, running, queued, message)
                : message;
   const auto live = alive;
   wxTheApp->CallAfter([this, live, overall, labelled] {

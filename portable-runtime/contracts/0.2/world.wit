@@ -1,0 +1,10 @@
+package opencpn:portable@0.2.0;
+
+world plugin-world {
+  import event-subscriptions;
+  import plugin-messages;
+  import chart-safety;
+  export lifecycle;
+  export event-sink;
+  export plugin-message-sink;
+}

@@ -15,7 +15,7 @@
   },
   "permissions": ["ui.commands", "navigation.position.read", "navigation.objects.read",
                   "weather-routing.compute", "environment.consume",
-                  "charts.coverage", "storage.user-selected",
+                  "charts.coverage", "charts.segment-safety", "storage.user-selected",
                   "navigation.routes.write"],
   "resources": ["resources/iweather-routing.svg",
                 "resources/Nicholson35_Mk1_cruising_realistic.pol",

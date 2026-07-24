@@ -51,6 +51,21 @@ int main() {
              "fixed-offset departure did not format clearly"))
     return 1;
 
+  const std::vector<int64_t> offsets = PortableDepartureOffsetsSeconds(6, 2);
+  const std::vector<int64_t> expected_offsets = {-21600, -14400, -7200, 0,
+                                                 7200,   14400,  21600};
+  const std::vector<size_t> expected_order = {3, 2, 4, 1, 5, 0, 6};
+  if (!Check(offsets == expected_offsets,
+             "symmetric departure offsets were not generated") ||
+      !Check(PortableDepartureExecutionOrder(offsets) == expected_order,
+             "departure execution did not start nominal then expand") ||
+      !Check(PortableDepartureOffsetsSeconds(5, 2) ==
+                 std::vector<int64_t>({-14400, -7200, 0, 7200, 14400}),
+             "a partial range produced asymmetric departure offsets") ||
+      !Check(PortableDepartureOffsetsSeconds(0, 2) == std::vector<int64_t>({0}),
+             "disabled departure comparison did not retain nominal time"))
+    return 1;
+
 #ifndef _WIN32
   setenv("TZ", "Europe/London", 1);
   tzset();

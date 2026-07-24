@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define OCPN_PORTABLE_HOST_ABI_VERSION 10u
+#define OCPN_PORTABLE_HOST_ABI_VERSION 12u
 
 typedef struct ocpn_portable_runtime ocpn_portable_runtime;
 
@@ -34,7 +34,16 @@ typedef struct ocpn_portable_chart_segment_result {
   /* 0 covered, 1 unsafe, 2 missing coverage, 3 unknown. */
   uint32_t state;
   uint32_t charts_considered;
+  /* 0 none/safe, 1 land, 2 drying, 3 shallow, 4 unknown depth,
+     5 no chart, 6 provider error. */
+  uint32_t reason;
 } ocpn_portable_chart_segment_result;
+
+typedef struct ocpn_portable_final_chart_safety_options {
+  double safety_margin_nautical_miles;
+  double minimum_depth_metres;
+  uint8_t require_authoritative;
+} ocpn_portable_final_chart_safety_options;
 
 typedef struct ocpn_portable_environment_sample_request {
   double latitude;
@@ -112,6 +121,8 @@ typedef struct ocpn_portable_route_request {
   uint32_t limits_available; /* bit 0 true wind, bit 1 waves, bit 2 apparent,
                                 bit 3 opposing wind/current, bit 4 maximum
                                 motor time, bit 5 fuel rate, bit 6 fuel */
+  double minimum_chart_depth_metres;
+  uint8_t require_authoritative_chart_safety;
 } ocpn_portable_route_request;
 
 typedef struct ocpn_portable_route_point {
@@ -241,6 +252,15 @@ typedef struct ocpn_portable_host_callbacks {
   int32_t (*user_file_write)(void* user_data, const char* grant_token,
                              size_t grant_token_len, const uint8_t* value,
                              size_t value_len);
+  int32_t (*send_plugin_message)(void* user_data, const char* message_id,
+                                 size_t message_id_len,
+                                 const char* message_body,
+                                 size_t message_body_len);
+  int32_t (*charts_query_final_safety)(
+      void* user_data, const ocpn_portable_geo_segment* segments,
+      size_t segment_count,
+      const ocpn_portable_final_chart_safety_options* options,
+      ocpn_portable_chart_segment_result* results, size_t result_count);
 } ocpn_portable_host_callbacks;
 
 ocpn_portable_runtime* ocpn_portable_runtime_create(
@@ -281,6 +301,10 @@ int32_t ocpn_portable_runtime_on_job_event(
 int32_t ocpn_portable_runtime_on_navigation_sentence(
     ocpn_portable_runtime* runtime, const char* sentence,
     size_t sentence_len, char* error, size_t error_capacity);
+int32_t ocpn_portable_runtime_on_plugin_message(
+    ocpn_portable_runtime* runtime, const char* message_id,
+    size_t message_id_len, const char* message_body, size_t message_body_len,
+    char* error, size_t error_capacity);
 int32_t ocpn_portable_runtime_calculate_route(
     ocpn_portable_runtime* runtime, const ocpn_portable_route_request* request,
     ocpn_portable_route_result* result, char* error, size_t error_capacity);

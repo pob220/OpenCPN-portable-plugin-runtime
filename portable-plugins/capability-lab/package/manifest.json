@@ -1,0 +1,31 @@
+{
+  "format_version": 1,
+  "id": "org.opencpn.capability-lab",
+  "name": "Portable Capability Lab",
+  "version": "0.1.0",
+  "description": "Development-only probes for portable runtime capabilities",
+  "component": "component/capability-lab.wasm",
+  "runtime": ">=0.1.0 <0.2.0",
+  "portable_api": ">=0.1.0 <0.2.0",
+  "event_subscriptions": [
+    {
+      "event": "navigation.nmea0183",
+      "topic_prefix": "$GPGGA",
+      "queue_limit": 8
+    },
+    {
+      "event": "opencpn.plugin-message",
+      "topic_prefix": "CAPABILITY_IN",
+      "queue_limit": 8
+    }
+  ],
+  "permissions": [
+    "ui.commands",
+    "navigation.nmea.read",
+    "plugin.messages.receive",
+    "plugin.messages.send"
+  ],
+  "resources": [],
+  "licenses": ["GPL-2.0-or-later"],
+  "development": true
+}

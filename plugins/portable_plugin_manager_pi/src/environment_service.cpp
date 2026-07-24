@@ -90,9 +90,8 @@ bool ReadString(std::istream& input, std::string* value) {
 }
 
 bool NearestVector(const EnvironmentFrame& frame, const std::string& u_name,
-                   const std::string& v_name, double latitude,
-                   double longitude, double* u_output, double* v_output,
-                   bool current) {
+                   const std::string& v_name, double latitude, double longitude,
+                   double* u_output, double* v_output, bool current) {
   const auto u_field = frame.fields.find(u_name);
   const auto v_field = frame.fields.find(v_name);
   if (!u_output || !v_output || u_field == frame.fields.end() ||
@@ -104,25 +103,34 @@ bool NearestVector(const EnvironmentFrame& frame, const std::string& u_name,
   const double longitude_scale =
       std::max(0.1, std::cos(latitude * kPi / 180.0));
   double best_distance = std::numeric_limits<double>::max();
+  std::size_t best_index = std::numeric_limits<std::size_t>::max();
   bool found = false;
-  for (std::size_t index = 0; index < count; ++index) {
+  const auto consider = [&](std::size_t index) {
+    if (index >= count) return;
     const auto& u = u_field->second[index];
     const auto& v = v_field->second[index];
     if (std::abs(u.latitude - v.latitude) > 0.001 ||
         std::abs(u.longitude - v.longitude) > 0.001 ||
-        (current && std::hypot(u.value, v.value) >=
-                        kMaximumCurrentMetresPerSecond)) {
-      continue;
+        (current &&
+         std::hypot(u.value, v.value) >= kMaximumCurrentMetresPerSecond)) {
+      return;
     }
     const double dy = u.latitude - latitude;
     const double dx = (u.longitude - longitude) * longitude_scale;
     const double distance = dx * dx + dy * dy;
-    if (distance < best_distance) {
+    if (BetterEnvironmentSample(distance, index, best_distance, best_index)) {
       best_distance = distance;
+      best_index = index;
       *u_output = u.value;
       *v_output = v.value;
       found = true;
     }
+  };
+  const auto spatial = frame.spatial_indices.find(u_name);
+  if (spatial != frame.spatial_indices.end()) {
+    spatial->second.ForEachCandidate(latitude, longitude, consider);
+  } else {
+    for (std::size_t index = 0; index < count; ++index) consider(index);
   }
   return found && best_distance <= 4.0;
 }
@@ -136,15 +144,26 @@ bool NearestScalar(const EnvironmentFrame& frame, const std::string& name,
   const double longitude_scale =
       std::max(0.1, std::cos(latitude * kPi / 180.0));
   double best_distance = std::numeric_limits<double>::max();
+  std::size_t best_index = std::numeric_limits<std::size_t>::max();
   const EnvironmentGridSample* best = nullptr;
-  for (const auto& sample : field->second) {
+  const auto consider = [&](std::size_t index) {
+    if (index >= field->second.size()) return;
+    const auto& sample = field->second[index];
     const double dy = sample.latitude - latitude;
     const double dx = (sample.longitude - longitude) * longitude_scale;
     const double distance = dx * dx + dy * dy;
-    if (distance < best_distance) {
+    if (BetterEnvironmentSample(distance, index, best_distance, best_index)) {
       best_distance = distance;
+      best_index = index;
       best = &sample;
     }
+  };
+  const auto spatial = frame.spatial_indices.find(name);
+  if (spatial != frame.spatial_indices.end()) {
+    spatial->second.ForEachCandidate(latitude, longitude, consider);
+  } else {
+    for (std::size_t index = 0; index < field->second.size(); ++index)
+      consider(index);
   }
   if (!best || best_distance > 4.0) return false;
   *output = best->value;
@@ -171,11 +190,11 @@ bool ReadEnvironmentFrames(const std::string& path,
   std::ifstream input(path, std::ios::binary);
   std::array<char, 8> magic{};
   constexpr std::array<char, 8> expected = {'O', 'C', 'P', 'N',
-                                             'F', 'R', 'M', '1'};
+                                            'F', 'R', 'M', '1'};
   std::uint32_t frame_count = 0;
   if (!input || !ReadExact(input, magic.data(), magic.size()) ||
-      magic != expected || !ReadU32(input, &frame_count) ||
-      frame_count == 0 || frame_count > kMaximumFrames) {
+      magic != expected || !ReadU32(input, &frame_count) || frame_count == 0 ||
+      frame_count > kMaximumFrames) {
     if (diagnostic) {
       *diagnostic = "decoder returned an incompatible frame header";
     }
@@ -191,8 +210,7 @@ bool ReadEnvironmentFrames(const std::string& path,
     std::uint64_t declared_samples = 0;
     if (!ReadString(input, &frame.time) || frame.time.empty() ||
         !ReadU32(input, &field_count) || field_count == 0 ||
-        field_count > kMaximumFields ||
-        !ReadU64(input, &declared_samples) ||
+        field_count > kMaximumFields || !ReadU64(input, &declared_samples) ||
         declared_samples > kMaximumDeclaredSamples) {
       if (diagnostic) *diagnostic = "decoder returned malformed frame metadata";
       return false;
@@ -233,13 +251,15 @@ bool ReadEnvironmentFrames(const std::string& path,
         samples.push_back(sample);
       }
       frame.sample_count += samples.size();
+      frame.spatial_indices[kind].Build(samples);
       frame.units.emplace(kind, std::move(unit));
       if (!source_time.empty()) {
         frame.source_times.emplace(kind, std::move(source_time));
       }
     }
     if (frame.sample_count != declared_samples) {
-      if (diagnostic) *diagnostic = "decoder frame sample count is inconsistent";
+      if (diagnostic)
+        *diagnostic = "decoder frame sample count is inconsistent";
       return false;
     }
     decoded.push_back(std::move(frame));
@@ -253,9 +273,67 @@ bool ReadEnvironmentFrames(const std::string& path,
   return true;
 }
 
+std::shared_ptr<const EnvironmentFrame> InterpolateEnvironmentFrames(
+    const std::shared_ptr<const EnvironmentFrame>& first,
+    const std::shared_ptr<const EnvironmentFrame>& second,
+    const std::string& requested_time, double factor) {
+  if (!first) return second;
+  if (!second || factor <= 0.0) return first;
+  if (factor >= 1.0) return second;
+  auto output = std::make_shared<EnvironmentFrame>();
+  output->time = requested_time;
+  output->units = first->units;
+  output->source_times = first->source_times;
+  for (const auto& [kind, left_samples] : first->fields) {
+    const auto right = second->fields.find(kind);
+    if (right == second->fields.end() ||
+        right->second.size() != left_samples.size()) {
+      output->fields[kind] = right == second->fields.end() || factor < 0.5
+                                 ? left_samples
+                                 : right->second;
+      output->sample_count += output->fields[kind].size();
+      continue;
+    }
+    auto& samples = output->fields[kind];
+    samples.reserve(left_samples.size());
+    bool compatible = true;
+    for (std::size_t index = 0; index < left_samples.size(); ++index) {
+      const auto& left = left_samples[index];
+      const auto& right_sample = right->second[index];
+      if (std::abs(left.latitude - right_sample.latitude) > 1e-6 ||
+          std::abs(left.longitude - right_sample.longitude) > 1e-6) {
+        compatible = false;
+        break;
+      }
+      double value = left.value + factor * (right_sample.value - left.value);
+      if (kind == "wave-direction") {
+        const double delta =
+            std::fmod(right_sample.value - left.value + 540.0, 360.0) - 180.0;
+        value = std::fmod(left.value + factor * delta + 360.0, 360.0);
+      }
+      samples.push_back({left.latitude, left.longitude, value});
+    }
+    if (!compatible) samples = factor < 0.5 ? left_samples : right->second;
+    output->sample_count += samples.size();
+    output->source_times[kind] = requested_time;
+  }
+  for (const auto& [kind, right_samples] : second->fields) {
+    if (output->fields.count(kind)) continue;
+    output->fields[kind] = right_samples;
+    output->sample_count += right_samples.size();
+    const auto unit = second->units.find(kind);
+    if (unit != second->units.end()) output->units[kind] = unit->second;
+    const auto source_time = second->source_times.find(kind);
+    if (source_time != second->source_times.end())
+      output->source_times[kind] = source_time->second;
+  }
+  for (const auto& [kind, samples] : output->fields)
+    output->spatial_indices[kind].Build(samples);
+  return output;
+}
+
 EnvironmentSample SampleEnvironmentFrame(const EnvironmentFrame& frame,
-                                         double latitude,
-                                         double longitude) {
+                                         double latitude, double longitude) {
   EnvironmentSample result;
   if (!std::isfinite(latitude) || !std::isfinite(longitude) ||
       latitude < -90.0 || latitude > 90.0 || longitude < -180.0 ||

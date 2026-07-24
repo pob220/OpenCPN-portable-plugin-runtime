@@ -46,6 +46,12 @@ interface host {
     diagnostic: string,
   }
 
+  record final-chart-safety-options {
+    safety-margin-nautical-miles: f64,
+    minimum-depth-metres: f64,
+    require-authoritative: bool,
+  }
+
   record environment-sample-request {
     latitude: f64,
     longitude: f64,
@@ -78,11 +84,14 @@ interface host {
   routing-progress: func(percent: u8, message: string);
   routing-cancelled: func() -> bool;
   charts-query-segments: func(segments: list<geo-segment>) -> result<list<chart-segment-result>, string>;
+  charts-query-final-safety: func(segments: list<geo-segment>,
+                                  options: final-chart-safety-options) -> result<list<chart-segment-result>, string>;
   network-get-to-private: func(request-id: string, url: string,
                                private-name: string, max-bytes: u64) -> result<_, string>;
   storage-private-read: func(private-name: string) -> result<list<u8>, string>;
   user-file-read: func(grant-token: string) -> result<list<u8>, string>;
   user-file-write: func(grant-token: string, value: list<u8>) -> result<_, string>;
+  send-plugin-message: func(message-id: string, message-body: string) -> result<_, string>;
 }
 
 interface plugin {
@@ -129,6 +138,8 @@ interface plugin {
     max-wave-metres: option<f64>,
     max-opposing-wind-current-knots-squared: option<f64>,
     land-safety-margin-nautical-miles: f64,
+    minimum-chart-depth-metres: f64,
+    require-authoritative-chart-safety: bool,
     use-currents: bool,
     require-current-data: bool,
     use-waves: bool,

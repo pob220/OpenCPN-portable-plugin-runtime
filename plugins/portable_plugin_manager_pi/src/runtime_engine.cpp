@@ -32,6 +32,8 @@
 
 #include "ocpn_plugin.h"
 #include "ocpn_portable_runtime.h"
+#include "capability_event_broker.h"
+#include "chart_safety_service.h"
 #include "declarative_ui.h"
 #include "environment_provider.h"
 #include "job_scheduler.h"
@@ -434,6 +436,7 @@ public:
     std::atomic_uint64_t disable_count{0};
     std::atomic_bool routing_cancelled{false};
     std::atomic_bool routing_running{false};
+    std::atomic_bool event_pump_scheduled{false};
     std::size_t routing_call_count = 0;
     mutable std::mutex routing_mutex;
     std::condition_variable routing_changed;
@@ -469,6 +472,9 @@ public:
   }
   void SetRoutingCompletedCallback(RoutingCompleted callback) {
     routing_completed = std::move(callback);
+  }
+  void SetPluginMessageSender(PluginMessageSender callback) {
+    plugin_message_sender = std::move(callback);
   }
   bool RefreshPackage(const std::string& package_id, bool developer_mode,
                       std::string* diagnostic);
@@ -513,6 +519,9 @@ public:
   bool WaitForIdle(const std::string& package_id,
                    std::chrono::milliseconds timeout);
   void DeliverNavigationSentence(const std::string& sentence);
+  void DeliverPluginMessage(const std::string& message_id,
+                            const std::string& message_body);
+  void ScheduleEvents(Instance& instance);
   void Fail(Instance& instance, const std::string& operation,
             const std::string& diagnostic);
   Instance* Find(const std::string& package_id);
@@ -638,6 +647,12 @@ public:
       void* user_data, const ocpn_portable_geo_segment* segments,
       std::size_t segment_count, ocpn_portable_chart_segment_result* results,
       std::size_t result_count);
+  static std::int32_t ChartsQueryFinalSafety(
+      void* user_data, const ocpn_portable_geo_segment* segments,
+      std::size_t segment_count,
+      const ocpn_portable_final_chart_safety_options* options,
+      ocpn_portable_chart_segment_result* results,
+      std::size_t result_count);
   static std::int32_t NetworkGetToPrivate(void*, const char*, std::size_t,
                                           const char*, std::size_t, const char*,
                                           std::size_t, std::uint64_t) {
@@ -658,6 +673,11 @@ public:
                                     std::size_t grant_token_length,
                                     const std::uint8_t* value,
                                     std::size_t value_length);
+  static std::int32_t SendPluginMessage(void* user_data,
+                                        const char* message_id,
+                                        std::size_t message_id_length,
+                                        const char* message_body,
+                                        std::size_t message_body_length);
   void DeliverJobEvent(Instance* instance, const JobEvent& event);
 
   fs::path storage_root;
@@ -669,7 +689,10 @@ public:
   SurfaceResponse surface_response;
   RoutingProgress routing_progress;
   RoutingCompleted routing_completed;
+  PluginMessageSender plugin_message_sender;
   JobScheduler jobs;
+  CapabilityEventBroker events;
+  ChartSafetyService chart_safety;
   std::vector<std::unique_ptr<Instance>> instances;
   bool stopped = false;
   mutable std::mutex position_mutex;
@@ -1245,6 +1268,31 @@ std::int32_t RuntimeEngine::Impl::UserFileWrite(void* user_data,
   return 0;
 }
 
+std::int32_t RuntimeEngine::Impl::SendPluginMessage(
+    void* user_data, const char* message_id, std::size_t message_id_length,
+    const char* message_body, std::size_t message_body_length) {
+  auto* instance = static_cast<Instance*>(user_data);
+  const std::string id = Text(message_id, message_id_length);
+  const std::string body = Text(message_body, message_body_length);
+  if (!instance || !instance->owner || !instance->enabled ||
+      instance->failed || id.empty() ||
+      id.size() > CapabilityEventBroker::kMaximumTopicBytes ||
+      body.size() > CapabilityEventBroker::kMaximumPayloadBytes ||
+      !instance->owner->Permitted(*instance, "plugin.messages.send") ||
+      !instance->owner->plugin_message_sender ||
+      !std::all_of(id.begin(), id.end(), [](unsigned char character) {
+        return character >= 0x20 && character != 0x7f;
+      })) {
+    return -1;
+  }
+  const auto sender = instance->owner->plugin_message_sender;
+  return instance->owner->RunUiService(
+             [sender, id, body]() { sender(id, body); },
+             std::chrono::seconds(2))
+             ? 0
+             : -2;
+}
+
 void RuntimeEngine::Impl::Log(void* user_data, std::uint32_t level,
                               const char* message, std::size_t message_length) {
   const auto* instance = static_cast<Instance*>(user_data);
@@ -1527,16 +1575,15 @@ std::int32_t RuntimeEngine::Impl::ChartsQuerySegments(
       std::make_shared<std::vector<ocpn_portable_chart_segment_result>>(
           segment_count);
   if (!instance->owner->RunUiService(
-          [input, output]() {
+          [owner = instance->owner, input, output]() {
+            for (auto& result : *output) result = {3U, 0U, 6U};
+            const auto assessments = owner->chart_safety.QueryFinal(
+                input, ChartSafetyServiceOptions{0.0, 0.0, false});
+            if (assessments.size() != input.size()) return;
             for (std::size_t index = 0; index < input.size(); ++index) {
-              const auto& segment = input[index];
-              (*output)[index] = {
-                  PlugIn_GSHHS_CrossesLand(
-                      segment.start.latitude, segment.start.longitude,
-                      segment.end.latitude, segment.end.longitude)
-                      ? 1U
-                      : 0U,
-                  1U};
+              (*output)[index] = {assessments[index].state,
+                                  assessments[index].charts_considered,
+                                  assessments[index].reason};
             }
           },
           std::chrono::seconds(5))) {
@@ -1544,6 +1591,42 @@ std::int32_t RuntimeEngine::Impl::ChartsQuerySegments(
     return -2;
   }
   std::copy(output->begin(), output->end(), results);
+  return 0;
+}
+
+std::int32_t RuntimeEngine::Impl::ChartsQueryFinalSafety(
+    void* user_data, const ocpn_portable_geo_segment* segments,
+    std::size_t segment_count,
+    const ocpn_portable_final_chart_safety_options* options,
+    ocpn_portable_chart_segment_result* results,
+    std::size_t result_count) {
+  auto* instance = static_cast<Instance*>(user_data);
+  if (!instance || !instance->owner || !segments || !options || !results ||
+      result_count != segment_count || segment_count > 10'000 ||
+      !instance->owner->Permitted(*instance, "charts.segment-safety")) {
+    return -1;
+  }
+  const std::vector<ocpn_portable_geo_segment> input(segments,
+                                                     segments + segment_count);
+  const ChartSafetyServiceOptions service_options{
+      options->safety_margin_nautical_miles, options->minimum_depth_metres,
+      options->require_authoritative != 0};
+  auto output = std::make_shared<std::vector<ChartSafetyServiceResult>>();
+  if (!instance->owner->RunUiService(
+          [owner = instance->owner, input, service_options, output]() {
+            *output = owner->chart_safety.QueryFinal(input, service_options);
+          },
+          std::chrono::seconds(15))) {
+    wxLogWarning(
+        "PPM final chart-safety service timed out waiting for the UI thread");
+    return -2;
+  }
+  if (output->size() != segment_count) return -3;
+  for (std::size_t index = 0; index < segment_count; ++index) {
+    results[index] = {(*output)[index].state,
+                      (*output)[index].charts_considered,
+                      (*output)[index].reason};
+  }
   return 0;
 }
 
@@ -1637,6 +1720,8 @@ bool RuntimeEngine::Impl::Start(Instance& instance, std::string* diagnostic) {
     callbacks.storage_private_read = StoragePrivateRead;
     callbacks.user_file_read = UserFileRead;
     callbacks.user_file_write = UserFileWrite;
+    callbacks.send_plugin_message = SendPluginMessage;
+    callbacks.charts_query_final_safety = ChartsQueryFinalSafety;
     instance.runtime =
         ocpn_portable_runtime_create(instance.component_path.c_str(),
                                      &callbacks, error.data(), error.size());
@@ -1652,6 +1737,8 @@ bool RuntimeEngine::Impl::Start(Instance& instance, std::string* diagnostic) {
       instance.failed = true;
       instance.diagnostic =
           error[0] ? error.data() : "runtime initialization failed";
+      wxLogError("PPM package-initialize-failed id=%s diagnostic=%s",
+                 instance.id, instance.diagnostic);
       if (diagnostic) *diagnostic = instance.diagnostic;
       return false;
     }
@@ -1674,6 +1761,8 @@ bool RuntimeEngine::Impl::Start(Instance& instance, std::string* diagnostic) {
     instance.registered_actions.clear();
     instance.failed = true;
     instance.diagnostic = error[0] ? error.data() : "runtime enable failed";
+    wxLogError("PPM package-enable-failed id=%s diagnostic=%s", instance.id,
+               instance.diagnostic);
     if (diagnostic) *diagnostic = instance.diagnostic;
     return false;
   }
@@ -1717,6 +1806,8 @@ bool RuntimeEngine::Impl::Stop(Instance& instance, bool destroy,
   instance.routing_cancelled = true;
   const bool was_enabled = instance.enabled.exchange(false);
   instance.executor.AdvanceGeneration();
+  events.ClearPending(instance.id);
+  instance.event_pump_scheduled = false;
   jobs.CancelOwner(instance.id);
   if (!WaitForRoute(instance.id, std::chrono::seconds(10))) {
     const std::string message =
@@ -1849,6 +1940,74 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
       break;
     }
     instance->requested_permissions.insert(permission);
+  }
+  const bool declares_event_subscriptions =
+      manifest.HasMember("event_subscriptions");
+  if (!instance->failed && declares_event_subscriptions) {
+    const wxJSONValue subscriptions = manifest["event_subscriptions"];
+    if (!subscriptions.IsArray() || subscriptions.Size() > 32) {
+      instance->failed = true;
+      instance->diagnostic =
+          "manifest event subscriptions are invalid or exceed policy";
+    } else {
+      for (int index = 0; index < subscriptions.Size(); ++index) {
+        const wxJSONValue declared = subscriptions.ItemAt(index);
+        const wxJSONValue event_value = declared.ItemAt("event");
+        const wxJSONValue prefix_value = declared.ItemAt("topic_prefix");
+        const wxJSONValue queue_value = declared.ItemAt("queue_limit");
+        CapabilityEventKind kind;
+        const std::string event_name =
+            event_value.IsString() ? event_value.AsString().ToStdString()
+                                   : std::string();
+        const std::string prefix =
+            !declared.HasMember("topic_prefix")
+                ? std::string()
+                : (prefix_value.IsString()
+                       ? prefix_value.AsString().ToStdString()
+                       : std::string(CapabilityEventBroker::kMaximumTopicBytes +
+                                         1,
+                                     'x'));
+        const std::size_t queue_limit =
+            !declared.HasMember("queue_limit")
+                ? 32
+                : (queue_value.IsInt() && queue_value.AsInt() > 0
+                       ? static_cast<std::size_t>(queue_value.AsInt())
+                       : 0);
+        CapabilityEventSubscription subscription{
+            instance->id, CapabilityEventKind::kNmea0183, prefix,
+            queue_limit};
+        std::string subscription_error;
+        if (!declared.IsObject() ||
+            !ParseCapabilityEventKind(event_name, &kind) ||
+            instance->requested_permissions.count(
+                CapabilityEventPermission(kind)) == 0) {
+          instance->failed = true;
+          instance->diagnostic =
+              "manifest event subscription is invalid or lacks its "
+              "corresponding permission";
+          break;
+        }
+        subscription.kind = kind;
+        if (!events.Subscribe(subscription, &subscription_error)) {
+          instance->failed = true;
+          instance->diagnostic =
+              "manifest event subscription is invalid: " +
+              subscription_error;
+          break;
+        }
+      }
+    }
+  }
+  if (!instance->failed && !declares_event_subscriptions &&
+      instance->requested_permissions.count("navigation.nmea.read") != 0) {
+    std::string subscription_error;
+    if (!events.Subscribe(
+            {instance->id, CapabilityEventKind::kNmea0183, "", 64},
+            &subscription_error)) {
+      instance->failed = true;
+      instance->diagnostic =
+          "legacy navigation subscription failed: " + subscription_error;
+    }
   }
   const std::set<std::string> known_services = {
       "org.opencpn.environment.provider",
@@ -2005,6 +2164,7 @@ bool RuntimeEngine::Impl::RefreshPackage(const std::string& package_id,
       state_changed();
       return false;
     }
+    events.RemovePackage(package_id);
     instances.erase(item);
     break;
   }
@@ -2245,35 +2405,89 @@ void RuntimeEngine::Impl::DeliverNavigationSentence(
       })) {
     return;
   }
+  const std::size_t topic_end = sentence.find_first_of(",*");
+  const std::string topic =
+      sentence.substr(0, std::min(topic_end, sentence.size()));
+  events.Publish(
+      {CapabilityEventKind::kNmea0183, topic, sentence});
   for (auto& item : instances) {
-    Instance* instance = item.get();
-    if (!instance->enabled || instance->failed || !instance->runtime ||
-        !Permitted(*instance, "navigation.nmea.read")) {
-      continue;
-    }
-    const std::uint64_t generation = instance->executor.Generation();
-    instance->executor.Post(
-        generation, [instance, sentence](std::uint64_t task_generation) {
-          if (task_generation != instance->executor.Generation() ||
-              !instance->enabled || instance->failed) {
-            return;
+    ScheduleEvents(*item);
+  }
+}
+
+void RuntimeEngine::Impl::DeliverPluginMessage(
+    const std::string& message_id, const std::string& message_body) {
+  std::string diagnostic;
+  if (message_id.empty() ||
+      !events.Publish({CapabilityEventKind::kPluginMessage, message_id,
+                       message_body},
+                      &diagnostic)) {
+    if (!diagnostic.empty())
+      wxLogWarning("PPM plugin-message-rejected diagnostic=%s", diagnostic);
+    return;
+  }
+  for (auto& item : instances) ScheduleEvents(*item);
+}
+
+void RuntimeEngine::Impl::ScheduleEvents(Instance& instance) {
+  if (!instance.enabled || instance.failed || !instance.runtime ||
+      events.Pending(instance.id) == 0) {
+    return;
+  }
+  bool expected = false;
+  if (!instance.event_pump_scheduled.compare_exchange_strong(expected, true))
+    return;
+  const std::uint64_t generation = instance.executor.Generation();
+  const auto posted = instance.executor.Post(
+      generation, [this, &instance](std::uint64_t task_generation) {
+        const auto finish = [this, &instance]() {
+          instance.event_pump_scheduled = false;
+          if (instance.enabled && !instance.failed &&
+              events.Pending(instance.id) != 0) {
+            ScheduleEvents(instance);
           }
-          std::lock_guard<std::mutex> lock(instance->runtime_mutex);
-          if (!instance->runtime ||
-              task_generation != instance->executor.Generation()) {
-            return;
+        };
+        if (task_generation != instance.executor.Generation() ||
+            !instance.enabled || instance.failed) {
+          finish();
+          return;
+        }
+        const auto pending = events.Drain(instance.id, 64);
+        std::lock_guard<std::mutex> lock(instance.runtime_mutex);
+        for (const auto& event : pending) {
+          if (!instance.runtime ||
+              task_generation != instance.executor.Generation() ||
+              !instance.enabled || instance.failed) {
+            break;
           }
           std::array<char, kErrorCapacity> error{};
-          if (ocpn_portable_runtime_on_navigation_sentence(
-                  instance->runtime, sentence.data(), sentence.size(),
-                  error.data(), error.size()) != 0) {
-            instance->owner->Fail(
-                *instance, "navigation sentence",
-                error[0] ? error.data()
-                         : "portable navigation sentence handler failed");
+          int result = 0;
+          std::string operation;
+          if (event.kind == CapabilityEventKind::kNmea0183) {
+            operation = "navigation sentence";
+            result = ocpn_portable_runtime_on_navigation_sentence(
+                instance.runtime, event.payload.data(), event.payload.size(),
+                error.data(), error.size());
+          } else if (event.kind == CapabilityEventKind::kPluginMessage) {
+            operation = "plugin message " + event.topic;
+            result = ocpn_portable_runtime_on_plugin_message(
+                instance.runtime, event.topic.data(), event.topic.size(),
+                event.payload.data(), event.payload.size(), error.data(),
+                error.size());
+          } else {
+            continue;
           }
-        });
-  }
+          if (result != 0) {
+            Fail(instance, operation,
+                 error[0] ? error.data()
+                          : "portable event handler failed");
+            break;
+          }
+        }
+        finish();
+      });
+  if (posted != SerialExecutor::PostResult::kAccepted)
+    instance.event_pump_scheduled = false;
 }
 
 void RuntimeEngine::Impl::Shutdown() {
@@ -2316,6 +2530,10 @@ void RuntimeEngine::SetRoutingProgressCallback(RoutingProgress callback) {
 
 void RuntimeEngine::SetRoutingCompletedCallback(RoutingCompleted callback) {
   impl_->SetRoutingCompletedCallback(std::move(callback));
+}
+
+void RuntimeEngine::SetPluginMessageSender(PluginMessageSender callback) {
+  impl_->SetPluginMessageSender(std::move(callback));
 }
 
 bool RuntimeEngine::RefreshPackage(const std::string& package_id,
@@ -2446,6 +2664,11 @@ void RuntimeEngine::SetPositionFix(const PlugIn_Position_Fix_Ex& fix) {
 
 void RuntimeEngine::DeliverNavigationSentence(const std::string& sentence) {
   impl_->DeliverNavigationSentence(sentence);
+}
+
+void RuntimeEngine::DeliverPluginMessage(const std::string& message_id,
+                                         const std::string& message_body) {
+  impl_->DeliverPluginMessage(message_id, message_body);
 }
 
 std::vector<PackageSnapshot> RuntimeEngine::Packages() const {

@@ -3,8 +3,11 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
+
+#include "environment_spatial_index.h"
 
 namespace ppm {
 
@@ -33,6 +36,7 @@ struct EnvironmentFrame {
   std::string time;
   std::size_t sample_count = 0;
   std::map<std::string, std::vector<EnvironmentGridSample>> fields;
+  std::map<std::string, EnvironmentSpatialIndex> spatial_indices;
   std::map<std::string, std::string> units;
   std::map<std::string, std::string> source_times;
 };
@@ -45,14 +49,18 @@ bool ReadEnvironmentFrames(const std::string& path,
                            std::vector<EnvironmentFrame>* frames,
                            std::string* diagnostic);
 
+std::shared_ptr<const EnvironmentFrame> InterpolateEnvironmentFrames(
+    const std::shared_ptr<const EnvironmentFrame>& first,
+    const std::shared_ptr<const EnvironmentFrame>& second,
+    const std::string& requested_time, double factor);
+
 /**
  * Samples one decoded frame at the nearest valid grid location. Vector
  * components must have matching coordinates and values farther than two
  * degrees from the request are considered unavailable.
  */
 EnvironmentSample SampleEnvironmentFrame(const EnvironmentFrame& frame,
-                                         double latitude,
-                                         double longitude);
+                                         double latitude, double longitude);
 
 }  // namespace ppm
 

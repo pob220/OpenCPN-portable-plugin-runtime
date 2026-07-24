@@ -1,0 +1,28 @@
+package opencpn:portable@0.2.0;
+
+interface types {
+  enum event-kind {
+    nmea0183,
+    nmea2000,
+    signal-k,
+    navigation-position,
+    ais-target,
+    active-leg,
+    cursor,
+    viewport,
+    plugin-message,
+  }
+
+  record event {
+    kind: event-kind,
+    topic: string,
+    payload: string,
+    sequence: u64,
+  }
+
+  record subscription {
+    kind: event-kind,
+    topic-prefix: string,
+    queue-limit: u16,
+  }
+}

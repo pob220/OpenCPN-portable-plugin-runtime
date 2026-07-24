@@ -1,0 +1,48 @@
+package opencpn:portable@0.2.0;
+
+interface chart-safety {
+  record geo-point {
+    latitude: f64,
+    longitude: f64,
+  }
+
+  record geo-segment {
+    start: geo-point,
+    end: geo-point,
+  }
+
+  enum status {
+    safe,
+    crosses-land,
+    within-land-margin,
+    unsafe-area,
+    drying-area,
+    too-shallow,
+    unknown-depth,
+    missing-coverage,
+    unavailable,
+  }
+
+  enum source {
+    vector-chart,
+    cm93,
+    coastline-fallback,
+    none,
+  }
+
+  record options {
+    safety-margin-nautical-miles: f64,
+    minimum-depth-metres: f64,
+    require-authoritative: bool,
+    final-validation: bool,
+  }
+
+  record assessment {
+    status: status,
+    source: source,
+    diagnostic: string,
+  }
+
+  query-segments: func(segments: list<geo-segment>,
+                       options: options) -> result<list<assessment>, string>;
+}

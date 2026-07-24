@@ -66,6 +66,9 @@ add_subdirectory("${OPENCPN_SOURCE_DIR}/libs/pugixml"
 
 add_library(portable_plugin_manager_pi MODULE
   src/action_registry.cpp
+  src/capability_event_broker.cpp
+  src/chart_safety_service.cpp
+  src/cm93_semantic_reader.cpp
   src/declarative_ui.cpp
   src/environment_service.cpp
   src/environment_provider.cpp
@@ -140,6 +143,36 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+  add_executable(ppm_cm93_semantic_reader_test
+    src/cm93_semantic_reader.cpp
+    tests/cm93_semantic_reader_test.cpp
+  )
+  target_include_directories(ppm_cm93_semantic_reader_test PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include")
+  if(MSVC)
+    target_compile_options(ppm_cm93_semantic_reader_test PRIVATE /W4)
+  else()
+    target_compile_options(ppm_cm93_semantic_reader_test PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
+  add_test(NAME ppm_cm93_semantic_reader
+           COMMAND ppm_cm93_semantic_reader_test)
+
+  add_executable(ppm_capability_event_broker_test
+    src/capability_event_broker.cpp
+    tests/capability_event_broker_test.cpp
+  )
+  target_include_directories(ppm_capability_event_broker_test PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include")
+  if(MSVC)
+    target_compile_options(ppm_capability_event_broker_test PRIVATE /W4)
+  else()
+    target_compile_options(ppm_capability_event_broker_test PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
+  add_test(NAME ppm_capability_event_broker
+           COMMAND ppm_capability_event_broker_test)
+
   add_executable(ppm_action_registry_test
     src/action_registry.cpp
     tests/action_registry_test.cpp
@@ -372,6 +405,9 @@ if(BUILD_TESTING)
   endif()
 
   add_executable(ppm_routing_probe
+    src/capability_event_broker.cpp
+    src/chart_safety_service.cpp
+    src/cm93_semantic_reader.cpp
     src/declarative_ui.cpp
     src/environment_provider.cpp
     src/environment_service.cpp
@@ -475,7 +511,73 @@ if(BUILD_TESTING)
   add_custom_target(ppm_test_ipolars_component
                     DEPENDS "${PPM_TEST_IPOLARS_WASM}")
 
+  set(PPM_TEST_CAPABILITY_TARGET_DIR
+      "${CMAKE_CURRENT_BINARY_DIR}/ppm-test-capability-target")
+  set(PPM_TEST_CAPABILITY_WASM
+      "${PPM_TEST_CAPABILITY_TARGET_DIR}/wasm32-wasip2/release/capability_lab_portable_component.wasm")
+  file(GLOB_RECURSE PPM_TEST_CAPABILITY_SOURCES CONFIGURE_DEPENDS
+    "${OPENCPN_SOURCE_DIR}/portable-plugins/capability-lab/component/src/*.rs")
+  add_custom_command(
+    OUTPUT "${PPM_TEST_CAPABILITY_WASM}"
+    COMMAND ${CMAKE_COMMAND} -E env
+            "CARGO_TARGET_DIR=${PPM_TEST_CAPABILITY_TARGET_DIR}"
+            "${PPM_CARGO_EXECUTABLE}" build --locked --offline --release
+            --target wasm32-wasip2
+            --manifest-path
+            "${OPENCPN_SOURCE_DIR}/portable-plugins/capability-lab/component/Cargo.toml"
+    DEPENDS ${PPM_TEST_CAPABILITY_SOURCES}
+            "${OPENCPN_SOURCE_DIR}/portable-plugins/capability-lab/component/Cargo.toml"
+            "${OPENCPN_SOURCE_DIR}/portable-plugins/capability-lab/component/Cargo.lock"
+            "${OPENCPN_SOURCE_DIR}/portable-runtime/wit/opencpn-portable.wit"
+    COMMENT "Building the portable capability-lab component"
+    VERBATIM)
+  add_custom_target(ppm_test_capability_component
+                    DEPENDS "${PPM_TEST_CAPABILITY_WASM}")
+
+  add_executable(ppm_capability_runtime_test
+    src/capability_event_broker.cpp
+    src/chart_safety_service.cpp
+    src/cm93_semantic_reader.cpp
+    src/declarative_ui.cpp
+    src/environment_provider.cpp
+    src/environment_service.cpp
+    src/job_scheduler.cpp
+    src/permission_store.cpp
+    src/runtime_engine.cpp
+    src/serial_executor.cpp
+    tests/capability_runtime_test.cpp
+  )
+  add_dependencies(ppm_capability_runtime_test
+                   ppm_test_capability_component)
+  target_include_directories(ppm_capability_runtime_test PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include"
+    "${OPENCPN_SOURCE_DIR}/include"
+    "${OPENCPN_SOURCE_DIR}/libs/wxJSON/include"
+    "${PPM_RUNTIME_SOURCE_DIR}/bridge/include")
+  target_compile_definitions(ppm_capability_runtime_test PRIVATE
+    PPM_TEST_CAPABILITY_WASM="${PPM_TEST_CAPABILITY_WASM}")
+  target_link_libraries(ppm_capability_runtime_test PRIVATE
+    ${wxWidgets_LIBRARIES}
+    ocpn::wxjson
+    OpenSSL::Crypto
+    ppm_runtime_bridge
+    Threads::Threads
+    ${CMAKE_DL_LIBS})
+  if(UNIX AND NOT APPLE)
+    target_link_libraries(ppm_capability_runtime_test PRIVATE m)
+  endif()
+  if(MSVC)
+    target_compile_options(ppm_capability_runtime_test PRIVATE /W4)
+  else()
+    target_compile_options(ppm_capability_runtime_test PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
+  add_test(NAME ppm_capability_runtime COMMAND ppm_capability_runtime_test)
+
   add_executable(ppm_runtime_engine_test
+    src/capability_event_broker.cpp
+    src/chart_safety_service.cpp
+    src/cm93_semantic_reader.cpp
     src/declarative_ui.cpp
     src/environment_provider.cpp
     src/environment_service.cpp
@@ -516,6 +618,9 @@ if(BUILD_TESTING)
   add_test(NAME ppm_runtime_engine COMMAND ppm_runtime_engine_test)
 
   add_executable(ppm_ipolars_runtime_test
+    src/capability_event_broker.cpp
+    src/chart_safety_service.cpp
+    src/cm93_semantic_reader.cpp
     src/declarative_ui.cpp
     src/environment_provider.cpp
     src/environment_service.cpp
