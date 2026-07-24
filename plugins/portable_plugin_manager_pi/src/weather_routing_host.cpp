@@ -50,6 +50,7 @@
 #include "chart_safety_service.h"
 #include "portable_polar.h"
 #include "portable_ui_menu.h"
+#include "wind_barb_geometry.h"
 
 #if defined(__WXOSX__)
 #include <OpenGL/gl.h>
@@ -557,62 +558,62 @@ wxPoint Project(PlugIn_ViewPort* viewport, double latitude, double longitude) {
 
 void DrawRouteWindBarb(wxDC& dc, const wxPoint& origin, double east_knots,
                        double north_knots, const wxColour& colour) {
-  const double speed = std::hypot(east_knots, north_knots);
-  if (!std::isfinite(speed) || speed < 0.1) return;
+  const auto geometry = ppm::BuildWindBarbGeometry(east_knots, north_knots);
+  if (!geometry.visible) return;
   dc.SetPen(wxPen(colour, 2, wxPENSTYLE_SOLID));
   dc.SetBrush(wxBrush(colour));
-  if (speed < 2.5) {
+  if (geometry.calm) {
     dc.SetBrush(*wxTRANSPARENT_BRUSH);
-    dc.DrawCircle(origin, 3);
+    dc.DrawCircle(origin, static_cast<int>(std::lround(geometry.calm_radius)));
     return;
   }
-  const double staff_x = -east_knots / speed;
-  const double staff_y = north_knots / speed;
-  const double perpendicular_x = -staff_y;
-  const double perpendicular_y = staff_x;
-  constexpr double length = 24.0;
-  const wxPoint tip(origin.x + static_cast<int>(std::lround(staff_x * length)),
-                    origin.y + static_cast<int>(std::lround(staff_y * length)));
-  dc.DrawLine(origin.x, origin.y, tip.x, tip.y);
-  int remaining = static_cast<int>(std::floor((speed + 2.5) / 5.0)) * 5;
-  double offset = 0.0;
-  while (remaining >= 50) {
-    const wxPoint first(
-        tip.x - static_cast<int>(std::lround(staff_x * offset)),
-        tip.y - static_cast<int>(std::lround(staff_y * offset)));
-    const wxPoint second(
-        tip.x - static_cast<int>(std::lround(staff_x * (offset + 5.0))),
-        tip.y - static_cast<int>(std::lround(staff_y * (offset + 5.0))));
-    wxPoint triangle[3] = {
-        first, second,
-        wxPoint(first.x + static_cast<int>(std::lround(perpendicular_x * 10.0 +
-                                                       staff_x * 3.0)),
-                first.y + static_cast<int>(std::lround(perpendicular_y * 10.0 +
-                                                       staff_y * 3.0)))};
+  const auto point = [&origin](const ppm::WindBarbPoint& value) {
+    return wxPoint(origin.x + static_cast<int>(std::lround(value.x)),
+                   origin.y + static_cast<int>(std::lround(value.y)));
+  };
+  for (const auto& line : geometry.lines) {
+    const wxPoint start = point(line.start);
+    const wxPoint end = point(line.end);
+    dc.DrawLine(start.x, start.y, end.x, end.y);
+  }
+  for (const auto& pennant : geometry.pennants) {
+    wxPoint triangle[3] = {point(pennant[0]), point(pennant[1]),
+                           point(pennant[2])};
     dc.DrawPolygon(3, triangle);
-    remaining -= 50;
-    offset += 7.0;
   }
-  while (remaining >= 10) {
-    const wxPoint base(tip.x - static_cast<int>(std::lround(staff_x * offset)),
-                       tip.y - static_cast<int>(std::lround(staff_y * offset)));
-    dc.DrawLine(base.x, base.y,
-                base.x + static_cast<int>(std::lround(perpendicular_x * 10.0 +
-                                                      staff_x * 3.0)),
-                base.y + static_cast<int>(std::lround(perpendicular_y * 10.0 +
-                                                      staff_y * 3.0)));
-    remaining -= 10;
-    offset += 5.0;
+}
+
+void DrawRouteWindBarbGl(const wxPoint& origin, double east_knots,
+                         double north_knots) {
+  const auto geometry = ppm::BuildWindBarbGeometry(east_knots, north_knots);
+  if (!geometry.visible) return;
+  if (geometry.calm) {
+    constexpr int kCircleSegments = 16;
+    glBegin(GL_LINE_LOOP);
+    for (int index = 0; index < kCircleSegments; ++index) {
+      const double angle =
+          2.0 * std::acos(-1.0) * static_cast<double>(index) /
+          static_cast<double>(kCircleSegments);
+      glVertex2d(origin.x + std::cos(angle) * geometry.calm_radius,
+                 origin.y + std::sin(angle) * geometry.calm_radius);
+    }
+    glEnd();
+    return;
   }
-  if (remaining >= 5) {
-    const wxPoint base(
-        tip.x - static_cast<int>(std::lround(staff_x * (offset + 1.5))),
-        tip.y - static_cast<int>(std::lround(staff_y * (offset + 1.5))));
-    dc.DrawLine(base.x, base.y,
-                base.x + static_cast<int>(std::lround(perpendicular_x * 6.0 +
-                                                      staff_x * 2.0)),
-                base.y + static_cast<int>(std::lround(perpendicular_y * 6.0 +
-                                                      staff_y * 2.0)));
+
+  glBegin(GL_LINES);
+  for (const auto& line : geometry.lines) {
+    glVertex2d(origin.x + line.start.x, origin.y + line.start.y);
+    glVertex2d(origin.x + line.end.x, origin.y + line.end.y);
+  }
+  glEnd();
+  if (!geometry.pennants.empty()) {
+    glBegin(GL_TRIANGLES);
+    for (const auto& pennant : geometry.pennants) {
+      for (const auto& point : pennant)
+        glVertex2d(origin.x + point.x, origin.y + point.y);
+    }
+    glEnd();
   }
 }
 }  // namespace
@@ -3185,11 +3186,7 @@ bool PortableWeatherRoutingHost::Impl::RenderGL(PlugIn_ViewPort* viewport) {
                      std::numeric_limits<int>::min());
     glColor4ub(185, 20, 155, 255);
     glLineWidth(2.0F);
-    glBegin(GL_LINES);
     for (const auto& environment : route_environment) {
-      const double speed =
-          std::hypot(environment.wind_u_knots, environment.wind_v_knots);
-      if (!std::isfinite(speed) || speed < 2.5) continue;
       const wxPoint origin =
           Project(viewport, environment.latitude, environment.longitude);
       const long dx = static_cast<long>(origin.x) - previous.x;
@@ -3197,14 +3194,10 @@ bool PortableWeatherRoutingHost::Impl::RenderGL(PlugIn_ViewPort* viewport) {
       if (previous.x != std::numeric_limits<int>::min() &&
           dx * dx + dy * dy < 45L * 45L)
         continue;
-      const double staff_x = -environment.wind_u_knots / speed;
-      const double staff_y = environment.wind_v_knots / speed;
-      glVertex2i(origin.x, origin.y);
-      glVertex2i(origin.x + static_cast<int>(std::lround(staff_x * 24.0)),
-                 origin.y + static_cast<int>(std::lround(staff_y * 24.0)));
+      DrawRouteWindBarbGl(origin, environment.wind_u_knots,
+                          environment.wind_v_knots);
       previous = origin;
     }
-    glEnd();
   }
 
   if (route_to_cursor && route_to_cursor->GetValue() && cursor_position) {

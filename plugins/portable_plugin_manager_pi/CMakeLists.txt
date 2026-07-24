@@ -88,6 +88,7 @@ add_library(portable_plugin_manager_pi MODULE
   src/serial_executor.cpp
   src/surface_dialog.cpp
   src/weather_routing_host.cpp
+  src/wind_barb_geometry.cpp
   src/window_activation.cpp
 )
 set_target_properties(portable_plugin_manager_pi PROPERTIES
@@ -175,6 +176,21 @@ if(BUILD_TESTING)
   endif()
   add_test(NAME ppm_capability_event_broker
            COMMAND ppm_capability_event_broker_test)
+
+  add_executable(ppm_wind_barb_geometry_test
+    src/wind_barb_geometry.cpp
+    tests/wind_barb_geometry_test.cpp
+  )
+  target_include_directories(ppm_wind_barb_geometry_test PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include")
+  if(MSVC)
+    target_compile_options(ppm_wind_barb_geometry_test PRIVATE /W4)
+  else()
+    target_compile_options(ppm_wind_barb_geometry_test PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
+  add_test(NAME ppm_wind_barb_geometry
+           COMMAND ppm_wind_barb_geometry_test)
 
   add_executable(ppm_action_registry_test
     src/action_registry.cpp
