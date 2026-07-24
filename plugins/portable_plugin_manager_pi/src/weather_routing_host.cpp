@@ -1,5 +1,7 @@
 #include "weather_routing_host.h"
 
+#include "window_activation.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -1931,8 +1933,7 @@ void PortableWeatherRoutingHost::Impl::ShowEditor(size_t tab) {
   RefreshEnvironmentSummary();
   RelayoutRoutePanel();
   editor->Layout();
-  editor->Show();
-  editor->Raise();
+  ppm::ShowAndActivateWindow(editor);
 }
 
 void PortableWeatherRoutingHost::Impl::RefreshEnvironmentSummary() {
@@ -2221,8 +2222,7 @@ bool PortableWeatherRoutingHost::Impl::Show(wxString* error) {
   RefreshEnvironmentSummary();
   RelayoutRoutePanel();
   frame->Layout();
-  frame->Show();
-  frame->Raise();
+  ppm::ShowAndActivateWindow(frame);
   return true;
 }
 

@@ -4,6 +4,8 @@
 
 #include "environment_workbench.h"
 
+#include "window_activation.h"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -2835,8 +2837,7 @@ bool PortableEnvironmentHost::Impl::Show(wxString* error) {
     return false;
   }
   if (!frame) CreateFrame();
-  frame->Show();
-  frame->Raise();
+  ppm::ShowAndActivateWindow(frame);
   return true;
 }
 
@@ -2969,8 +2970,7 @@ void PortableEnvironmentHost::Impl::ShowWeatherTable() {
   if (selected_file.empty()) return;
   if (!weather_table_dialog) CreateWeatherTableDialog();
   RefreshWeatherTablePositions(false);
-  weather_table_dialog->Show();
-  weather_table_dialog->Raise();
+  ppm::ShowAndActivateWindow(weather_table_dialog);
   if (!process &&
       (weather_table->GetItemCount() == 0 ||
        weather_table_dataset_revision != dataset_revision))
@@ -4198,8 +4198,7 @@ void PortableEnvironmentHost::Impl::HandleWeatherTable(wxJSONValue& value) {
     }
   }
   weather_table_dataset_revision = dataset_revision;
-  weather_table_dialog->Show();
-  weather_table_dialog->Raise();
+  ppm::ShowAndActivateWindow(weather_table_dialog);
 }
 
 void PortableEnvironmentHost::Impl::CacheRoutingFrame(

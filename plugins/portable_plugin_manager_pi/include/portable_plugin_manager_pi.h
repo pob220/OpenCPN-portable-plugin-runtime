@@ -34,7 +34,7 @@ class PortablePluginManagerPi final : public opencpn_plugin_121 {
   int GetAPIVersionMinor() override { return 21; }
   int GetPlugInVersionMajor() override { return 0; }
   int GetPlugInVersionMinor() override { return 2; }
-  int GetPlugInVersionPatch() override { return 0; }
+  int GetPlugInVersionPatch() override { return 1; }
   int GetToolbarToolCount() override { return 1; }
   wxBitmap* GetPlugInBitmap() override { return &plugin_bitmap_; }
   wxString GetCommonName() override { return "Portable Plugin Manager"; }

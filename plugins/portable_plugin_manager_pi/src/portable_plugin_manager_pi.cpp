@@ -25,6 +25,7 @@
 #include "environment_workbench.h"
 #include "surface_dialog.h"
 #include "weather_routing_host.h"
+#include "window_activation.h"
 
 #ifndef DECL_EXP
 #ifdef __WXMSW__
@@ -239,7 +240,7 @@ int PortablePluginManagerPi::Init() {
   }
   initialized_ = true;
   storage_root_ = ResolveStorageRoot();
-  wxLogMessage("PPM event=init api=1.21 version=0.2.0");
+  wxLogMessage("PPM event=init api=1.21 version=0.2.1");
   wxLogMessage("PPM event=storage-root path=%s", storage_root_);
   if (!RegisterManagerAction()) {
     wxLogError("PPM event=manager-action-registration-failed");
@@ -491,15 +492,14 @@ void PortablePluginManagerPi::ShowManager(wxWindow* parent) {
     callbacks.revoke_permissions = [this](const std::string& id) {
       RevokePackagePermissions(id);
     };
-    manager_dialog_ =
-        std::make_unique<ManagerDialog>(parent, std::move(callbacks));
+    manager_dialog_ = std::make_unique<ManagerDialog>(
+        ResolveOpenCpnTopLevelParent(parent), std::move(callbacks));
     manager_dialog_->SetRuntimeSummary(
         "Host plugin loaded in stock OpenCPN.\nPackage store: " +
         storage_root_);
   }
   RefreshManager();
-  manager_dialog_->Show();
-  manager_dialog_->Raise();
+  ShowAndActivateWindow(manager_dialog_.get());
   wxLogMessage("PPM event=manager-shown");
 }
 
@@ -530,7 +530,8 @@ void PortablePluginManagerPi::OpenPackageSurface(
         }
       }
       environment_workbench_ = std::make_unique<PortableEnvironmentHost>(
-          nullptr, wxString::FromUTF8(package_id), package_root,
+          ResolveOpenCpnTopLevelParent(), wxString::FromUTF8(package_id),
+          package_root,
           "ui/igrib-viewer.ui.json", credential_access,
           [this, package_id](const wxString& control_id,
                              const wxString& value_json, wxString* error,
@@ -615,7 +616,7 @@ void PortablePluginManagerPi::OpenPackageSurface(
           storage_root_ + separator + "packages" + separator +
           wxString::FromUTF8(package_id);
       weather_routing_host_ = std::make_unique<PortableWeatherRoutingHost>(
-          nullptr, GetOCPNConfigObject(),
+          ResolveOpenCpnTopLevelParent(), GetOCPNConfigObject(),
           [this, package_id](RoutingRequest request, RoutingOutcome* outcome,
                              std::string* diagnostic) {
             return runtime_engine_ &&
@@ -678,12 +679,11 @@ void PortablePluginManagerPi::OpenPackageSurface(
   const std::string key = package_id + "\n" + surface.id;
   const auto existing = surface_dialogs_.find(key);
   if (existing != surface_dialogs_.end()) {
-    existing->second->Show();
-    existing->second->Raise();
+    ShowAndActivateWindow(existing->second.get());
     return;
   }
   auto dialog = std::make_unique<SurfaceDialog>(
-      nullptr, surface,
+      ResolveOpenCpnTopLevelParent(), surface,
       [this, package_id, surface_id = surface.id](
           const std::string& control_id, const std::string& value_json,
           const std::vector<SurfaceDialog::UserFileSelection>& selections) {
@@ -744,8 +744,7 @@ void PortablePluginManagerPi::OpenPackageSurface(
                                "Package is disabled, busy, or unavailable.");
         }
       });
-  dialog->Show();
-  dialog->Raise();
+  ShowAndActivateWindow(dialog.get());
   surface_dialogs_.emplace(key, std::move(dialog));
   if (runtime_engine_)
     runtime_engine_->HandleSurfaceEvent(package_id, surface.id,

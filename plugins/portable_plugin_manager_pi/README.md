@@ -31,6 +31,8 @@ a successful module build alone is not runtime evidence.
 - bounded Wasm execution, supervised helpers and failure diagnostics;
 - one ordinary OpenCPN toolbar action per enabled portable package;
 - declarative modeless and modal surfaces plus package-scoped file grants;
+- modeless surfaces owned by the OpenCPN frame, with deferred foreground
+  activation after toolbar events;
 - versioned navigation, environmental, chart, routing and overlay services;
 - iPolars, iGRIB and iWeatherRouting as complete reference workloads.
 
