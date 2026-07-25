@@ -7,7 +7,7 @@
   "component": "component/iweather-routing.wasm",
   "runtime": ">=0.1.0 <0.2.0",
   "portable_api": ">=0.2.0 <0.3.0",
-  "portable_world": "weather-routing-plugin",
+  "portable_world": "passage-weather-routing-plugin",
   "requires": [
     {"interface": "org.opencpn.environment.provider", "range": ">=0.1.0 <0.2.0"}
   ],

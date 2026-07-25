@@ -46,11 +46,13 @@ class PortablePluginManagerPi final : public opencpn_plugin_121 {
   wxString GetLongDescription() override;
   void OnToolbarToolCallback(int id) override;
   void OnContextMenuItemCallback(int id) override;
+  void PrepareContextMenu(int canvas_index) override;
   void ShowPreferencesDialog(wxWindow* parent) override;
   void SetPositionFixEx(PlugIn_Position_Fix_Ex& fix) override;
   void SetNMEASentence(wxString& sentence) override;
   void SetAISSentence(wxString& sentence) override;
   void SetActiveLegInfo(Plugin_Active_Leg_Info& leg_info) override;
+  void SetColorScheme(PI_ColorScheme scheme) override;
   void SetPluginMessage(wxString& message_id,
                         wxString& message_body) override;
   void SetCursorLatLon(double latitude, double longitude) override;
@@ -128,6 +130,7 @@ class PortablePluginManagerPi final : public opencpn_plugin_121 {
   std::unique_ptr<::PortableEnvironmentHost> environment_workbench_;
   std::unique_ptr<::PortableWeatherRoutingHost> weather_routing_host_;
   std::unique_ptr<ManagerDialog> manager_dialog_;
+  wxString pending_weather_route_guid_;
   double vessel_latitude_ = 0.0;
   double vessel_longitude_ = 0.0;
   double cursor_latitude_ = 0.0;
@@ -144,6 +147,7 @@ class PortablePluginManagerPi final : public opencpn_plugin_121 {
   bool developer_opengl_overlay_logged_ = false;
   bool developer_mode_ = false;
   bool initialized_ = false;
+  PI_ColorScheme colour_scheme_ = PI_GLOBAL_COLOR_SCHEME_DAY;
   std::map<std::string,
            std::deque<std::chrono::steady_clock::time_point>>
       nmea_output_history_;

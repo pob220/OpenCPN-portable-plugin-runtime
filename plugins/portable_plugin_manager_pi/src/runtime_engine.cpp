@@ -51,6 +51,7 @@ namespace {
 namespace fs = std::filesystem;
 
 constexpr std::size_t kErrorCapacity = 4096;
+constexpr std::size_t kPassageDiagnosticCapacity = 256 * 1024;
 constexpr std::size_t kSettingCapacity = 64 * 1024;
 constexpr std::size_t kOverlayPointLimit = 1'000'000;
 constexpr std::size_t kPrivateReadLimit = 8 * 1024 * 1024;
@@ -170,8 +171,7 @@ bool ParseOverlayPoint(wxJSONValue value, OverlayPoint* point) {
   }
   point->latitude = value["latitude"].AsDouble();
   point->longitude = value["longitude"].AsDouble();
-  return std::isfinite(point->latitude) &&
-         std::isfinite(point->longitude) &&
+  return std::isfinite(point->latitude) && std::isfinite(point->longitude) &&
          std::abs(point->latitude) <= 90.0 &&
          std::abs(point->longitude) <= 180.0;
 }
@@ -186,8 +186,7 @@ bool ParseOverlayColor(wxJSONValue value, OverlayColor* color) {
       blue > 255 || alpha < 0 || alpha > 255) {
     return false;
   }
-  *color = {static_cast<unsigned char>(red),
-            static_cast<unsigned char>(green),
+  *color = {static_cast<unsigned char>(red), static_cast<unsigned char>(green),
             static_cast<unsigned char>(blue),
             static_cast<unsigned char>(alpha)};
   return true;
@@ -203,10 +202,9 @@ bool ParseOverlayStyle(wxJSONValue value, OverlayStyle* style) {
   }
   if (style->has_fill && !ParseOverlayColor(value["fill"], &style->fill))
     return false;
-  style->width_pixels =
-      static_cast<float>(value["width_pixels"].AsDouble());
-  return std::isfinite(style->width_pixels) &&
-         style->width_pixels >= 0.5F && style->width_pixels <= 64.0F;
+  style->width_pixels = static_cast<float>(value["width_pixels"].AsDouble());
+  return std::isfinite(style->width_pixels) && style->width_pixels >= 0.5F &&
+         style->width_pixels <= 64.0F;
 }
 
 std::int64_t UnixMillisecondsNow() {
@@ -273,6 +271,30 @@ bool ValidateRoutingRequest(const RoutingRequest& request,
     total_cells += wind_count * angle_count;
   }
   return true;
+}
+
+bool ValidatePassageRequest(const RoutingPassageRequest& request,
+                            std::string* diagnostic) {
+  if (request.gates.size() < 2 || request.gates.size() > 64) {
+    if (diagnostic) *diagnostic = "passage routing requires 2-64 gates";
+    return false;
+  }
+  for (std::size_t index = 0; index < request.gates.size(); ++index) {
+    const auto& gate = request.gates[index];
+    if (gate.id.empty() || gate.id.size() > 1024 || gate.name.empty() ||
+        gate.name.size() > 1024 || !std::isfinite(gate.latitude) ||
+        !std::isfinite(gate.longitude) || std::abs(gate.latitude) > 90.0 ||
+        std::abs(gate.longitude) > 180.0 ||
+        (index > 0 &&
+         std::abs(gate.latitude - request.gates[index - 1].latitude) < 1e-9 &&
+         std::abs(gate.longitude - request.gates[index - 1].longitude) <
+             1e-9)) {
+      if (diagnostic)
+        *diagnostic = "passage contains an invalid or duplicate gate";
+      return false;
+    }
+  }
+  return ValidateRoutingRequest(request.route, diagnostic);
 }
 
 bool ValidRoutePoint(const ocpn_portable_route_point& point) {
@@ -482,6 +504,241 @@ RoutingExecution ExecuteRoute(ocpn_portable_runtime* replica,
   return execution;
 }
 
+RoutingExecution ExecutePassage(ocpn_portable_runtime* replica,
+                                RoutingPassageRequest request) noexcept {
+  RoutingExecution execution;
+  std::unique_ptr<ocpn_portable_runtime,
+                  decltype(&ocpn_portable_runtime_destroy)>
+      worker_runtime(replica, ocpn_portable_runtime_destroy);
+  try {
+    std::vector<ocpn_portable_polar_grid> polar_views;
+    polar_views.reserve(request.route.polars.size());
+    for (const auto& polar : request.route.polars) {
+      polar_views.push_back({polar.identity.data(), polar.identity.size(),
+                             polar.true_wind_speeds_knots.data(),
+                             polar.true_wind_speeds_knots.size(),
+                             polar.true_wind_angles_degrees.data(),
+                             polar.true_wind_angles_degrees.size(),
+                             polar.boat_speeds_knots.data(),
+                             polar.boat_speeds_knots.size()});
+    }
+    request.route.parameters.polars = polar_views.data();
+    request.route.parameters.polar_count = polar_views.size();
+    std::vector<ocpn_portable_passage_gate> gate_views;
+    gate_views.reserve(request.gates.size());
+    for (const auto& gate : request.gates) {
+      gate_views.push_back({gate.id.data(), gate.id.size(), gate.name.data(),
+                            gate.name.size(), gate.latitude, gate.longitude});
+    }
+
+    std::vector<ocpn_portable_route_point> points(kRoutePointLimit);
+    std::vector<ocpn_portable_route_environment_point> environment(
+        kRoutePointLimit);
+    std::vector<ocpn_portable_route_point> isochrone_points(
+        kRouteInspectionPointLimit);
+    std::vector<ocpn_portable_route_line> isochrones(kRouteInspectionLineLimit);
+    std::vector<ocpn_portable_route_point> trace_points(
+        kRouteInspectionPointLimit);
+    std::vector<ocpn_portable_route_line> traces(kRouteInspectionLineLimit);
+    std::vector<ocpn_portable_passage_leg> legs(request.gates.size() - 1);
+    std::array<char, kErrorCapacity> error{};
+    std::vector<char> result_diagnostic(kPassageDiagnosticCapacity);
+    ocpn_portable_passage_request passage_request{};
+    passage_request.route = request.route.parameters;
+    passage_request.gates = gate_views.data();
+    passage_request.gate_count = gate_views.size();
+    passage_request.departure_offset_seconds = request.departure_offset_seconds;
+    ocpn_portable_passage_result result{};
+    result.route.points = points.data();
+    result.route.point_capacity = points.size();
+    result.route.isochrone_points = isochrone_points.data();
+    result.route.isochrone_point_capacity = isochrone_points.size();
+    result.route.isochrones = isochrones.data();
+    result.route.isochrone_capacity = isochrones.size();
+    result.route.trace_points = trace_points.data();
+    result.route.trace_point_capacity = trace_points.size();
+    result.route.traces = traces.data();
+    result.route.trace_capacity = traces.size();
+    result.route.route_environment = environment.data();
+    result.route.route_environment_capacity = environment.size();
+    result.route.diagnostic = result_diagnostic.data();
+    result.route.diagnostic_capacity = result_diagnostic.size();
+    result.legs = legs.data();
+    result.leg_capacity = legs.size();
+
+    const int status = ocpn_portable_runtime_calculate_passage(
+        worker_runtime.get(), &passage_request, &result, error.data(),
+        error.size());
+    worker_runtime.reset();
+
+    const auto& route = result.route;
+    const bool bounded =
+        route.point_count <= points.size() &&
+        route.route_environment_count <= environment.size() &&
+        route.isochrone_point_count <= isochrone_points.size() &&
+        route.isochrone_count <= isochrones.size() &&
+        route.trace_point_count <= trace_points.size() &&
+        route.trace_count <= traces.size() &&
+        route.diagnostic_len < result_diagnostic.size() &&
+        result.leg_count <= legs.size();
+    auto valid_lines = [](const auto& lines, std::size_t line_count,
+                          std::size_t point_count) {
+      for (std::size_t index = 0; index < line_count; ++index) {
+        if (lines[index].point_offset > point_count ||
+            lines[index].point_count >
+                point_count - lines[index].point_offset) {
+          return false;
+        }
+      }
+      return true;
+    };
+    const bool valid_spans =
+        bounded &&
+        valid_lines(isochrones, route.isochrone_count,
+                    route.isochrone_point_count) &&
+        valid_lines(traces, route.trace_count, route.trace_point_count);
+    const bool valid_points =
+        bounded &&
+        std::all_of(points.begin(), points.begin() + route.point_count,
+                    ValidRoutePoint) &&
+        std::all_of(isochrone_points.begin(),
+                    isochrone_points.begin() + route.isochrone_point_count,
+                    ValidRoutePoint) &&
+        std::all_of(trace_points.begin(),
+                    trace_points.begin() + route.trace_point_count,
+                    ValidRoutePoint);
+    bool chronological = true;
+    for (std::size_t index = 1; index < route.point_count; ++index) {
+      if (points[index].unix_time <= points[index - 1].unix_time) {
+        chronological = false;
+        break;
+      }
+    }
+    const bool valid_environment =
+        bounded && route.route_environment_count == route.point_count &&
+        std::all_of(environment.begin(),
+                    environment.begin() + route.route_environment_count,
+                    [](const auto& point) {
+                      return std::isfinite(point.latitude) &&
+                             std::isfinite(point.longitude) &&
+                             std::isfinite(point.wind_u_knots) &&
+                             std::isfinite(point.wind_v_knots) &&
+                             std::isfinite(point.current_u_knots) &&
+                             std::isfinite(point.current_v_knots) &&
+                             std::isfinite(point.wave_height_metres) &&
+                             (point.available & ~std::uint8_t{3}) == 0;
+                    });
+    bool environment_matches_route = valid_environment;
+    for (std::size_t index = 0;
+         environment_matches_route && index < route.point_count; ++index) {
+      environment_matches_route =
+          environment[index].latitude == points[index].latitude &&
+          environment[index].longitude == points[index].longitude &&
+          environment[index].unix_time == points[index].unix_time;
+    }
+    bool valid_legs = bounded && result.leg_count == request.gates.size() - 1;
+    for (std::size_t index = 0; valid_legs && index < result.leg_count;
+         ++index) {
+      const auto& leg = legs[index];
+      valid_legs =
+          leg.start_gate_index == index && leg.end_gate_index == index + 1 &&
+          leg.point_count >= 2 && leg.point_offset <= route.point_count &&
+          leg.point_count <= route.point_count - leg.point_offset &&
+          leg.arrival_unix_time > leg.departure_unix_time &&
+          points[leg.point_offset].unix_time == leg.departure_unix_time &&
+          points[leg.point_offset + leg.point_count - 1].unix_time ==
+              leg.arrival_unix_time &&
+          std::isfinite(leg.distance_nautical_miles) &&
+          leg.distance_nautical_miles >= 0.0;
+    }
+    const std::array<double, 10> metrics = {
+        route.distance_nautical_miles, route.average_speed_knots,
+        route.maximum_speed_knots,     route.average_sog_knots,
+        route.maximum_sog_knots,       route.average_wind_knots,
+        route.maximum_wind_knots,      route.average_current_knots,
+        route.maximum_current_knots,   route.estimated_fuel_litres};
+    const bool valid_metrics =
+        std::all_of(metrics.begin(), metrics.end(),
+                    [](double value) {
+                      return std::isfinite(value) && value >= 0.0;
+                    }) &&
+        route.comfort_level >= 1 && route.comfort_level <= 3 &&
+        (route.metrics_available & ~std::uint8_t{3}) == 0;
+    const bool valid_success =
+        status != 0 ||
+        (route.point_count >= 2 && chronological && environment_matches_route &&
+         valid_legs && valid_metrics);
+    execution.success =
+        status == 0 && bounded && valid_spans && valid_points && valid_success;
+    if (!bounded || !valid_spans || !valid_points || !valid_success) {
+      execution.failure =
+          "passage-routing component returned an invalid or oversized result";
+      return execution;
+    }
+
+    auto& outcome = execution.outcome;
+    outcome.points.assign(points.begin(), points.begin() + route.point_count);
+    outcome.route_environment.assign(
+        environment.begin(),
+        environment.begin() + route.route_environment_count);
+    auto copy_lines = [](const auto& source_points, const auto& source_lines,
+                         std::size_t line_count, auto* destination) {
+      destination->reserve(line_count);
+      for (std::size_t index = 0; index < line_count; ++index) {
+        const auto& line = source_lines[index];
+        RoutingInspectionLine copied;
+        copied.unix_time = line.unix_time;
+        copied.points.assign(
+            source_points.begin() + line.point_offset,
+            source_points.begin() + line.point_offset + line.point_count);
+        destination->push_back(std::move(copied));
+      }
+    };
+    copy_lines(isochrone_points, isochrones, route.isochrone_count,
+               &outcome.isochrones);
+    copy_lines(trace_points, traces, route.trace_count, &outcome.traces);
+    outcome.diagnostic.assign(result_diagnostic.data(), route.diagnostic_len);
+    outcome.distance_nautical_miles = route.distance_nautical_miles;
+    outcome.duration_seconds = route.duration_seconds;
+    outcome.states_examined = route.states_examined;
+    outcome.average_speed_knots = route.average_speed_knots;
+    outcome.maximum_speed_knots = route.maximum_speed_knots;
+    outcome.average_sog_knots = route.average_sog_knots;
+    outcome.maximum_sog_knots = route.maximum_sog_knots;
+    outcome.average_wind_knots = route.average_wind_knots;
+    outcome.maximum_wind_knots = route.maximum_wind_knots;
+    outcome.average_current_knots = route.average_current_knots;
+    outcome.maximum_current_knots = route.maximum_current_knots;
+    outcome.tacks = route.tacks;
+    outcome.motor_seconds = route.motor_seconds;
+    outcome.estimated_fuel_litres = route.estimated_fuel_litres;
+    outcome.propulsion_transitions = route.propulsion_transitions;
+    outcome.comfort_level = route.comfort_level;
+    outcome.metrics_available = route.metrics_available;
+    outcome.validation_samples = result.validation_samples;
+    outcome.passage_legs.reserve(result.leg_count);
+    for (std::size_t index = 0; index < result.leg_count; ++index) {
+      const auto& leg = legs[index];
+      outcome.passage_legs.push_back(
+          {leg.start_gate_index, leg.end_gate_index, leg.point_offset,
+           leg.point_count, leg.departure_unix_time, leg.arrival_unix_time,
+           leg.distance_nautical_miles, leg.states_examined});
+    }
+    if (!execution.success) {
+      execution.failure =
+          error[0] ? error.data() : execution.outcome.diagnostic;
+      if (execution.failure.empty())
+        execution.failure = "passage calculation failed";
+    }
+  } catch (const std::exception& exception) {
+    execution.failure =
+        std::string("passage worker failed safely: ") + exception.what();
+  } catch (...) {
+    execution.failure = "passage worker failed safely with an unknown error";
+  }
+  return execution;
+}
+
 }  // namespace
 
 class RuntimeEngine::Impl {
@@ -642,6 +899,10 @@ public:
   bool CalculateRouteBlocking(const std::string& package_id,
                               RoutingRequest request, RoutingOutcome* outcome,
                               std::string* diagnostic);
+  bool CalculatePassageBlocking(const std::string& package_id,
+                                RoutingPassageRequest request,
+                                RoutingOutcome* outcome,
+                                std::string* diagnostic);
   bool BeginRouteAttempt(const std::string& package_id,
                          std::string* diagnostic);
   bool PreflightEnvironment(const std::string& package_id, double latitude,
@@ -659,8 +920,7 @@ public:
     std::string diagnostic;
     if (!events.Publish(std::move(event), &diagnostic)) {
       if (!diagnostic.empty())
-        wxLogWarning("PPM capability-event-rejected diagnostic=%s",
-                     diagnostic);
+        wxLogWarning("PPM capability-event-rejected diagnostic=%s", diagnostic);
       return;
     }
     for (auto& item : instances) ScheduleEvents(*item);
@@ -865,11 +1125,13 @@ public:
                                         std::size_t message_id_length,
                                         const char* message_body,
                                         std::size_t message_body_length);
-  static std::int32_t AuthorServiceCall(
-      void* user_data, const char* operation, std::size_t operation_length,
-      const char* request_json, std::size_t request_json_length,
-      char* response_json, std::size_t response_capacity,
-      std::size_t* response_length);
+  static std::int32_t AuthorServiceCall(void* user_data, const char* operation,
+                                        std::size_t operation_length,
+                                        const char* request_json,
+                                        std::size_t request_json_length,
+                                        char* response_json,
+                                        std::size_t response_capacity,
+                                        std::size_t* response_length);
   void DeliverJobEvent(Instance* instance, const JobEvent& event);
   void RunTimers();
   void CancelPackageTimers(const std::string& package_id);
@@ -977,8 +1239,7 @@ void RuntimeEngine::Impl::DeliverJobEvent(Instance* instance,
       });
 }
 
-void RuntimeEngine::Impl::CancelPackageTimers(
-    const std::string& package_id) {
+void RuntimeEngine::Impl::CancelPackageTimers(const std::string& package_id) {
   {
     std::lock_guard<std::mutex> lock(timer_mutex);
     for (auto item = timers.begin(); item != timers.end();) {
@@ -1014,8 +1275,8 @@ void RuntimeEngine::Impl::RunTimers() {
     {
       std::unique_lock<std::mutex> lock(timer_mutex);
       if (timer_stopped) return;
-      auto wake = std::chrono::steady_clock::now() +
-                  std::chrono::milliseconds(250);
+      auto wake =
+          std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
       for (const auto& [ignored, timer] : timers)
         wake = std::min(wake, timer.due);
       timer_changed.wait_until(lock, wake);
@@ -1056,8 +1317,7 @@ void RuntimeEngine::Impl::RunTimers() {
             if (!instance->runtime) return;
             std::array<char, kErrorCapacity> error{};
             if (ocpn_portable_runtime_on_timer(
-                    instance->runtime, key.timer_id.data(),
-                    key.timer_id.size(),
+                    instance->runtime, key.timer_id.data(), key.timer_id.size(),
                     timer.scheduled_unix_milliseconds, fired, error.data(),
                     error.size()) != 0) {
               instance->owner->Fail(
@@ -1091,9 +1351,8 @@ void RuntimeEngine::Impl::RunTimers() {
       response["diagnostic"] = "portable RPC request timed out";
       const std::string encoded = JsonText(response);
       source->executor.Post(
-          call.source_generation,
-          [source, provider = call.target_package,
-           encoded](std::uint64_t task_generation) {
+          call.source_generation, [source, provider = call.target_package,
+                                   encoded](std::uint64_t task_generation) {
             if (task_generation != source->executor.Generation() ||
                 !source->enabled || source->failed)
               return;
@@ -1104,10 +1363,10 @@ void RuntimeEngine::Impl::RunTimers() {
                     source->runtime, provider.data(), provider.size(),
                     encoded.data(), encoded.size(), error.data(),
                     error.size()) != 0) {
-              source->owner->Fail(
-                  *source, "RPC timeout response",
-                  error[0] ? error.data()
-                           : "portable RPC response handler failed");
+              source->owner->Fail(*source, "RPC timeout response",
+                                  error[0]
+                                      ? error.data()
+                                      : "portable RPC response handler failed");
             }
           });
     }
@@ -1408,6 +1667,64 @@ bool RuntimeEngine::Impl::CalculateRouteBlocking(const std::string& package_id,
   }
 
   RoutingExecution execution = ExecuteRoute(replica, std::move(request));
+  finish_call();
+  *outcome = std::move(execution.outcome);
+  if (diagnostic) *diagnostic = execution.failure;
+  return execution.success;
+}
+
+bool RuntimeEngine::Impl::CalculatePassageBlocking(
+    const std::string& package_id, RoutingPassageRequest request,
+    RoutingOutcome* outcome, std::string* diagnostic) {
+  Instance* instance = Find(package_id);
+  if (!outcome || !instance || !instance->enabled || instance->failed ||
+      !instance->runtime || !Permitted(*instance, "weather-routing.compute")) {
+    if (diagnostic)
+      *diagnostic = !outcome ? "passage output is required"
+                             : "passage-routing package is unavailable";
+    return false;
+  }
+  if (!ValidatePassageRequest(request, diagnostic)) return false;
+
+  {
+    std::lock_guard<std::mutex> route_lock(instance->routing_mutex);
+    if (instance->routing_running) {
+      if (diagnostic) *diagnostic = "a route calculation is already running";
+      return false;
+    }
+    if (instance->routing_call_count == 0) instance->routing_cancelled = false;
+    if (instance->routing_cancelled || !instance->enabled || instance->failed) {
+      if (diagnostic) *diagnostic = "passage calculation was cancelled";
+      return false;
+    }
+    ++instance->routing_call_count;
+  }
+  auto finish_call = [instance]() {
+    {
+      std::lock_guard<std::mutex> route_lock(instance->routing_mutex);
+      if (instance->routing_call_count != 0) --instance->routing_call_count;
+    }
+    instance->routing_changed.notify_all();
+  };
+
+  std::array<char, kErrorCapacity> clone_error{};
+  ocpn_portable_runtime* replica = nullptr;
+  {
+    std::lock_guard<std::mutex> runtime_lock(instance->runtime_mutex);
+    if (instance->enabled && !instance->failed && instance->runtime) {
+      replica = ocpn_portable_runtime_clone_compute(
+          instance->runtime, clone_error.data(), clone_error.size());
+    }
+  }
+  if (!replica) {
+    finish_call();
+    if (diagnostic)
+      *diagnostic = clone_error[0] ? clone_error.data()
+                                   : "could not create passage worker";
+    return false;
+  }
+
+  RoutingExecution execution = ExecutePassage(replica, std::move(request));
   finish_call();
   *outcome = std::move(execution.outcome);
   if (diagnostic) *diagnostic = execution.failure;
@@ -2063,8 +2380,7 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
                   !completed);
     instance->registered_actions.push_back(action);
     wxJSONValue response;
-    response["host_action_id"] =
-        static_cast<wxLongLong_t>(*host_id);
+    response["host_action_id"] = static_cast<wxLongLong_t>(*host_id);
     return finish(0, response);
   }
 
@@ -2072,8 +2388,7 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
     if (!instance->owner->Permitted(*instance, "overlay.submit"))
       return fail(-4, "permission-denied",
                   "scene submission permission was not granted");
-    const std::string scene_id =
-        request["scene_id"].AsString().ToStdString();
+    const std::string scene_id = request["scene_id"].AsString().ToStdString();
     if (!IsSafeName(scene_id))
       return fail(-5, "invalid-scene", "scene identifier is invalid");
     {
@@ -2091,12 +2406,10 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
     OverlayScene update;
     update.package_id = instance->id;
     update.scene_id = request["scene_id"].AsString().ToStdString();
-    update.revision =
-        static_cast<std::uint64_t>(request["revision"].AsLong());
+    update.revision = static_cast<std::uint64_t>(request["revision"].AsLong());
     if (!IsSafeName(update.scene_id) || update.revision == 0 ||
         !request["layers"].IsArray() ||
-        static_cast<std::size_t>(request["layers"].Size()) >
-            kSceneLayerLimit) {
+        static_cast<std::size_t>(request["layers"].Size()) > kSceneLayerLimit) {
       return fail(-5, "invalid-scene", "scene update is invalid");
     }
 
@@ -2108,21 +2421,18 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
          ++layer_index) {
       wxJSONValue layer_value = request["layers"][layer_index];
       OverlayLayer layer;
-      layer.layer_id =
-          layer_value["layer_id"].AsString().ToStdString();
+      layer.layer_id = layer_value["layer_id"].AsString().ToStdString();
       layer.z_index = static_cast<int>(layer_value["z_index"].AsLong());
       layer.visible = layer_value["visible"].AsBool();
       if (!IsSafeName(layer.layer_id) ||
           !layer_ids.insert(layer.layer_id).second ||
           !layer_value["primitives"].IsArray()) {
-        return fail(-5, "invalid-layer",
-                    "scene layer definition is invalid");
+        return fail(-5, "invalid-layer", "scene layer definition is invalid");
       }
       primitive_count +=
           static_cast<std::size_t>(layer_value["primitives"].Size());
       if (primitive_count > kScenePrimitiveLimit)
-        return fail(-7, "scene-too-large",
-                    "scene exceeds the primitive limit");
+        return fail(-7, "scene-too-large", "scene exceeds the primitive limit");
 
       for (int primitive_index = 0;
            primitive_index < layer_value["primitives"].Size();
@@ -2143,12 +2453,10 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
         const std::string kind =
             primitive_value["kind"].AsString().ToStdString();
         if (kind == "polyline" || kind == "polygon") {
-          primitive.kind = kind == "polyline"
-                               ? OverlayPrimitiveKind::kPolyline
-                               : OverlayPrimitiveKind::kPolygon;
+          primitive.kind = kind == "polyline" ? OverlayPrimitiveKind::kPolyline
+                                              : OverlayPrimitiveKind::kPolygon;
           if (!primitive_value["points"].IsArray() ||
-              !ParseOverlayStyle(primitive_value["style"],
-                                 &primitive.style)) {
+              !ParseOverlayStyle(primitive_value["style"], &primitive.style)) {
             return fail(-5, "invalid-primitive",
                         "line or polygon primitive is invalid");
           }
@@ -2161,11 +2469,10 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
                         "scene point count is invalid or exceeds policy");
           primitive.points.reserve(count);
           for (int point_index = 0;
-               point_index < primitive_value["points"].Size();
-               ++point_index) {
+               point_index < primitive_value["points"].Size(); ++point_index) {
             OverlayPoint point;
-            if (!ParseOverlayPoint(
-                    primitive_value["points"][point_index], &point)) {
+            if (!ParseOverlayPoint(primitive_value["points"][point_index],
+                                   &point)) {
               return fail(-5, "invalid-coordinate",
                           "scene coordinate is invalid");
             }
@@ -2174,17 +2481,14 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
           point_count += count;
         } else if (kind == "circle") {
           primitive.kind = OverlayPrimitiveKind::kCircle;
-          primitive.radius_metres =
-              primitive_value["radius_metres"].AsDouble();
+          primitive.radius_metres = primitive_value["radius_metres"].AsDouble();
           if (!ParseOverlayPoint(primitive_value["centre"],
                                  &primitive.centre) ||
-              !ParseOverlayStyle(primitive_value["style"],
-                                 &primitive.style) ||
+              !ParseOverlayStyle(primitive_value["style"], &primitive.style) ||
               !std::isfinite(primitive.radius_metres) ||
               primitive.radius_metres <= 0.0 ||
               primitive.radius_metres > 2'000'000.0) {
-            return fail(-5, "invalid-circle",
-                        "circle primitive is invalid");
+            return fail(-5, "invalid-circle", "circle primitive is invalid");
           }
         } else if (kind == "icon") {
           primitive.kind = OverlayPrimitiveKind::kIcon;
@@ -2199,25 +2503,21 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
               !SafeRelativePath(resource_name) ||
               !std::isfinite(primitive.width_pixels) ||
               !std::isfinite(primitive.height_pixels) ||
-              primitive.width_pixels < 1.0F ||
-              primitive.height_pixels < 1.0F ||
+              primitive.width_pixels < 1.0F || primitive.height_pixels < 1.0F ||
               primitive.width_pixels > 512.0F ||
               primitive.height_pixels > 512.0F) {
             return fail(-5, "invalid-icon", "icon primitive is invalid");
           }
           const fs::path resource =
-              (instance->package_root /
-               fs::path(resource_name.ToStdString()))
+              (instance->package_root / fs::path(resource_name.ToStdString()))
                   .lexically_normal();
           std::error_code error;
           if (!fs::is_regular_file(resource, error))
-            return fail(-6, "not-found",
-                        "scene icon resource was not found");
+            return fail(-6, "not-found", "scene icon resource was not found");
           primitive.resource_path = resource.string();
         } else if (kind == "text") {
           primitive.kind = OverlayPrimitiveKind::kText;
-          primitive.text =
-              primitive_value["value"].AsString().ToStdString();
+          primitive.text = primitive_value["value"].AsString().ToStdString();
           primitive.size_pixels =
               static_cast<float>(primitive_value["size_pixels"].AsDouble());
           if (!ParseOverlayPoint(primitive_value["position"],
@@ -2226,8 +2526,7 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
                                  &primitive.text_color) ||
               primitive.text.empty() || primitive.text.size() > 4096 ||
               !std::isfinite(primitive.size_pixels) ||
-              primitive.size_pixels < 6.0F ||
-              primitive.size_pixels > 128.0F) {
+              primitive.size_pixels < 6.0F || primitive.size_pixels > 128.0F) {
             return fail(-5, "invalid-text", "text primitive is invalid");
           }
         } else {
@@ -2244,19 +2543,17 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
       const auto existing = instance->scenes.find(update.scene_id);
       if (existing != instance->scenes.end() &&
           update.revision <= existing->second.revision) {
-        return fail(-8, "stale-revision",
-                    "scene update revision is not newer");
+        return fail(-8, "stale-revision", "scene update revision is not newer");
       }
-      if (!request["replace"].AsBool() &&
-          existing != instance->scenes.end()) {
+      if (!request["replace"].AsBool() && existing != instance->scenes.end()) {
         OverlayScene merged = existing->second;
         merged.revision = update.revision;
         for (auto& incoming_layer : update.layers) {
-          auto layer = std::find_if(
-              merged.layers.begin(), merged.layers.end(),
-              [&](const OverlayLayer& value) {
-                return value.layer_id == incoming_layer.layer_id;
-              });
+          auto layer =
+              std::find_if(merged.layers.begin(), merged.layers.end(),
+                           [&](const OverlayLayer& value) {
+                             return value.layer_id == incoming_layer.layer_id;
+                           });
           if (layer == merged.layers.end()) {
             merged.layers.push_back(std::move(incoming_layer));
             continue;
@@ -2267,8 +2564,7 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
             auto primitive = std::find_if(
                 layer->primitives.begin(), layer->primitives.end(),
                 [&](const OverlayPrimitive& value) {
-                  return value.primitive_id ==
-                         incoming_primitive.primitive_id;
+                  return value.primitive_id == incoming_primitive.primitive_id;
                 });
             if (primitive == layer->primitives.end())
               layer->primitives.push_back(std::move(incoming_primitive));
@@ -2288,8 +2584,7 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
                         "merged scene exceeds the primitive limit");
           merged_primitive_count += layer.primitives.size();
           for (const auto& primitive : layer.primitives) {
-            if (merged_point_count >
-                kScenePointLimit - primitive.points.size())
+            if (merged_point_count > kScenePointLimit - primitive.points.size())
               return fail(-7, "scene-too-large",
                           "merged scene exceeds the point limit");
             merged_point_count += primitive.points.size();
@@ -2320,8 +2615,7 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
       if (!okay)
         return fail(-6, "not-found", "private storage entry was not found");
       wxJSONValue response;
-      response["base64"] =
-          wxBase64Encode(contents.data(), contents.size());
+      response["base64"] = wxBase64Encode(contents.data(), contents.size());
       return finish(0, response);
     }
     if (operation_name == "storage.write-atomic") {
@@ -2382,22 +2676,20 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
     if (operation_name == "storage.list") {
       const std::string prefix = request["prefix"].AsString().ToStdString();
       if ((!prefix.empty() && !IsSafeName(prefix)) || prefix.size() > 128)
-        return fail(-5, "invalid-prefix",
-                    "private storage prefix is invalid");
+        return fail(-5, "invalid-prefix", "private storage prefix is invalid");
       wxJSONValue response(wxJSONTYPE_ARRAY);
       std::error_code error;
       std::vector<std::string> names;
       for (fs::directory_iterator item(instance->private_root, error), end;
-           !error && item != end && names.size() < 4096; item.increment(error)) {
+           !error && item != end && names.size() < 4096;
+           item.increment(error)) {
         if (!item->is_regular_file(error)) continue;
         const std::string candidate = item->path().filename().string();
-        if (!IsSafeName(candidate) || candidate.rfind(prefix, 0) != 0)
-          continue;
+        if (!IsSafeName(candidate) || candidate.rfind(prefix, 0) != 0) continue;
         names.push_back(candidate);
       }
       if (error)
-        return fail(-8, "host-failure",
-                    "could not enumerate private storage");
+        return fail(-8, "host-failure", "could not enumerate private storage");
       std::sort(names.begin(), names.end());
       for (const auto& name_value : names)
         response.Append(wxString::FromUTF8(name_value));
@@ -2444,8 +2736,7 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
     if (!instance->owner->Permitted(*instance, "timers.schedule"))
       return fail(-4, "permission-denied",
                   "timer scheduling permission was not granted");
-    const std::string timer_id =
-        request["timer_id"].AsString().ToStdString();
+    const std::string timer_id = request["timer_id"].AsString().ToStdString();
     if (!IsSafeName(timer_id))
       return fail(-5, "invalid-timer", "timer identifier is invalid");
     const TimerKey key{instance->id, timer_id};
@@ -2489,8 +2780,7 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
       timer.generation = instance->executor.Generation();
       timer.due = std::chrono::steady_clock::now() +
                   std::chrono::milliseconds(delay_value);
-      timer.scheduled_unix_milliseconds =
-          UnixMillisecondsNow() + delay_value;
+      timer.scheduled_unix_milliseconds = UnixMillisecondsNow() + delay_value;
       timer.repeat_milliseconds =
           repeating ? static_cast<std::uint32_t>(repeat_value) : 0;
       instance->owner->timers[key] = timer;
@@ -2500,8 +2790,8 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
   }
 
   if (operation_name.rfind("rpc.", 0) == 0) {
-    const bool registration = operation_name == "rpc.register" ||
-                              operation_name == "rpc.unregister";
+    const bool registration =
+        operation_name == "rpc.register" || operation_name == "rpc.unregister";
     if (registration &&
         !instance->owner->Permitted(*instance, "plugin.rpc.provide"))
       return fail(-4, "permission-denied",
@@ -2516,11 +2806,9 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
                   "RPC provider permission was not granted");
 
     if (registration) {
-      const std::string service =
-          request["service"].AsString().ToStdString();
+      const std::string service = request["service"].AsString().ToStdString();
       if (!IsSafeName(service))
-        return fail(-5, "invalid-service",
-                    "RPC service identifier is invalid");
+        return fail(-5, "invalid-service", "RPC service identifier is invalid");
       std::lock_guard<std::mutex> lock(instance->owner->rpc_mutex);
       if (operation_name == "rpc.unregister") {
         const auto found = instance->owner->rpc_services.find(service);
@@ -2532,8 +2820,7 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
         return finish(0, wxJSONValue(wxJSONTYPE_OBJECT));
       }
       std::size_t owned = 0;
-      for (const auto& [ignored, package] :
-           instance->owner->rpc_services) {
+      for (const auto& [ignored, package] : instance->owner->rpc_services) {
         if (package == instance->id) ++owned;
       }
       const auto found = instance->owner->rpc_services.find(service);
@@ -2563,10 +2850,8 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
       wxJSONValue rpc = request["request"];
       const std::string correlation_id =
           rpc["correlation_id"].AsString().ToStdString();
-      const std::string service =
-          rpc["service"].AsString().ToStdString();
-      const std::string method =
-          rpc["method"].AsString().ToStdString();
+      const std::string service = rpc["service"].AsString().ToStdString();
+      const std::string method = rpc["method"].AsString().ToStdString();
       const std::string content_type =
           rpc["content_type"].AsString().ToStdString();
       const std::string payload =
@@ -2583,8 +2868,7 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
       const RpcCallKey call_key{instance->id, correlation_id};
       {
         std::lock_guard<std::mutex> lock(instance->owner->rpc_mutex);
-        const auto service_owner =
-            instance->owner->rpc_services.find(service);
+        const auto service_owner = instance->owner->rpc_services.find(service);
         if (service_owner == instance->owner->rpc_services.end() ||
             service_owner->second != target_package)
           return fail(-6, "service-unavailable",
@@ -2601,11 +2885,10 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
           return fail(-7, "resource-limit",
                       "package already has too many outstanding RPC calls");
         instance->owner->rpc_calls.emplace(
-            call_key,
-            RpcCall{instance, instance->executor.Generation(),
-                    target_package, service,
-                    std::chrono::steady_clock::now() +
-                        std::chrono::milliseconds(timeout)});
+            call_key, RpcCall{instance, instance->executor.Generation(),
+                              target_package, service,
+                              std::chrono::steady_clock::now() +
+                                  std::chrono::milliseconds(timeout)});
       }
       const std::string encoded = JsonText(rpc);
       const std::uint64_t generation = target->executor.Generation();
@@ -2630,8 +2913,8 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
       if (posted != SerialExecutor::PostResult::kAccepted) {
         std::lock_guard<std::mutex> lock(instance->owner->rpc_mutex);
         instance->owner->rpc_calls.erase(call_key);
-        return fail(-10, "target-busy",
-                    "RPC target queue is unavailable", true);
+        return fail(-10, "target-busy", "RPC target queue is unavailable",
+                    true);
       }
       instance->owner->timer_changed.notify_all();
       return finish(0, wxJSONValue(wxJSONTYPE_OBJECT));
@@ -2643,8 +2926,7 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
     const long status = rpc["status"].AsLong();
     const std::string content_type =
         rpc["content_type"].AsString().ToStdString();
-    const std::string payload =
-        rpc["payload_base64"].AsString().ToStdString();
+    const std::string payload = rpc["payload_base64"].AsString().ToStdString();
     const std::string response_diagnostic =
         rpc["diagnostic"].AsString().ToStdString();
     if (!IsSafeName(correlation_id) || status < 0 || status > 65'535 ||
@@ -2675,9 +2957,8 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
           if (!target->runtime) return;
           std::array<char, kErrorCapacity> error{};
           if (ocpn_portable_runtime_on_rpc_response(
-                  target->runtime, source.data(), source.size(),
-                  encoded.data(), encoded.size(), error.data(),
-                  error.size()) != 0) {
+                  target->runtime, source.data(), source.size(), encoded.data(),
+                  encoded.size(), error.data(), error.size()) != 0) {
             wxLogWarning(
                 "PPM RPC response handler failed target=%s diagnostic=%s",
                 target->id, error.data());
@@ -2691,13 +2972,10 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
 
   const bool action_operation = operation_name.rfind("actions.", 0) == 0;
   const bool navigation_read =
-      operation_name == "navigation.list" ||
-      operation_name == "navigation.get";
+      operation_name == "navigation.list" || operation_name == "navigation.get";
   const bool navigation_write = operation_name == "navigation.mutate";
-  const bool navigation_output =
-      operation_name == "navigation.send-nmea0183";
-  if (action_operation &&
-      !instance->owner->Permitted(*instance, "ui.commands"))
+  const bool navigation_output = operation_name == "navigation.send-nmea0183";
+  if (action_operation && !instance->owner->Permitted(*instance, "ui.commands"))
     return fail(-4, "permission-denied",
                 "command registration permission was not granted");
   if (navigation_read &&
@@ -2729,8 +3007,7 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
         std::chrono::seconds(30));
     if (!completed)
       return fail(-11, "timeout",
-                  "OpenCPN did not complete the requested UI operation",
-                  true);
+                  "OpenCPN did not complete the requested UI operation", true);
     wxJSONValue value;
     if (response->empty()) {
       value = wxJSONValue(wxJSONTYPE_OBJECT);
@@ -2831,11 +3108,9 @@ bool RuntimeEngine::Impl::Start(Instance& instance, std::string* diagnostic) {
     callbacks.send_plugin_message = SendPluginMessage;
     callbacks.charts_query_final_safety = ChartsQueryFinalSafety;
     callbacks.author_service_call = AuthorServiceCall;
-    instance.runtime =
-        ocpn_portable_runtime_create(instance.component_path.c_str(),
-                                     &callbacks, instance.portable_api,
-                                     instance.portable_world, error.data(),
-                                     error.size());
+    instance.runtime = ocpn_portable_runtime_create(
+        instance.component_path.c_str(), &callbacks, instance.portable_api,
+        instance.portable_world, error.data(), error.size());
     if (!instance.runtime ||
         ocpn_portable_runtime_initialize(
             instance.runtime, instance.id.data(), instance.id.size(),
@@ -3007,13 +3282,13 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
   const bool portable_api_v01 = portable_api == ">=0.1.0 <0.2.0";
   const bool portable_api_v02 = portable_api == ">=0.2.0 <0.3.0";
   const bool portable_api_v03 = portable_api == ">=0.3.0 <0.4.0";
-  const wxString portable_world =
-      manifest["portable_world"].IsString()
-          ? manifest["portable_world"].AsString()
-          : "plugin";
+  const wxString portable_world = manifest["portable_world"].IsString()
+                                      ? manifest["portable_world"].AsString()
+                                      : "plugin";
   const bool supported_world =
       portable_world == "plugin" ||
-      portable_world == "weather-routing-plugin";
+      portable_world == "weather-routing-plugin" ||
+      portable_world == "passage-weather-routing-plugin";
   const bool development = manifest["development"].AsBool();
   const bool typed =
       manifest["format_version"].IsInt() &&
@@ -3026,8 +3301,7 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
       !IsSemanticVersion(version) || !SafeRelativePath(component) ||
       manifest["runtime"].AsString() != ">=0.1.0 <0.2.0" ||
       (!portable_api_v01 && !portable_api_v02 && !portable_api_v03) ||
-      !supported_world ||
-      (portable_api_v01 && portable_world != "plugin") ||
+      !supported_world || (portable_api_v01 && portable_world != "plugin") ||
       ((portable_api_v02 || portable_api_v03) &&
        !manifest["portable_world"].IsString()) ||
       (portable_api_v03 && portable_world != "plugin") ||
@@ -3049,12 +3323,12 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
   instance->portable_api =
       portable_api_v03
           ? OCPN_PORTABLE_API_V03
-          : (portable_api_v02 ? OCPN_PORTABLE_API_V02
-                              : OCPN_PORTABLE_API_V01);
-  instance->portable_world =
-      portable_world == "weather-routing-plugin"
-          ? OCPN_PORTABLE_WORLD_WEATHER_ROUTING
-          : OCPN_PORTABLE_WORLD_PLUGIN;
+          : (portable_api_v02 ? OCPN_PORTABLE_API_V02 : OCPN_PORTABLE_API_V01);
+  instance->portable_world = portable_world == "passage-weather-routing-plugin"
+                                 ? OCPN_PORTABLE_WORLD_PASSAGE_ROUTING
+                             : portable_world == "weather-routing-plugin"
+                                 ? OCPN_PORTABLE_WORLD_WEATHER_ROUTING
+                                 : OCPN_PORTABLE_WORLD_PLUGIN;
   if (development && !developer_mode) {
     instance->failed = true;
     instance->diagnostic =
@@ -3598,8 +3872,8 @@ void RuntimeEngine::Impl::ScheduleEvents(Instance& instance) {
             break;
           }
           std::array<char, kErrorCapacity> error{};
-          const std::string operation =
-              std::string("capability event ") + CapabilityEventName(event.kind);
+          const std::string operation = std::string("capability event ") +
+                                        CapabilityEventName(event.kind);
           const int result = ocpn_portable_runtime_on_event(
               instance.runtime, static_cast<std::uint32_t>(event.kind),
               event.topic.data(), event.topic.size(), event.payload.data(),
@@ -3752,6 +4026,14 @@ bool RuntimeEngine::CalculateRouteBlocking(const std::string& package_id,
                                        diagnostic);
 }
 
+bool RuntimeEngine::CalculatePassageBlocking(const std::string& package_id,
+                                             RoutingPassageRequest request,
+                                             RoutingOutcome* outcome,
+                                             std::string* diagnostic) {
+  return impl_->CalculatePassageBlocking(package_id, std::move(request),
+                                         outcome, diagnostic);
+}
+
 bool RuntimeEngine::BeginRouteAttempt(const std::string& package_id,
                                       std::string* diagnostic) {
   return impl_->BeginRouteAttempt(package_id, diagnostic);
@@ -3781,8 +4063,8 @@ bool RuntimeEngine::WaitForIdle(const std::string& package_id,
 
 void RuntimeEngine::SetPositionFix(const PlugIn_Position_Fix_Ex& fix) {
   const bool valid = std::isfinite(fix.Lat) && std::isfinite(fix.Lon) &&
-                     fix.Lat >= -90.0 && fix.Lat <= 90.0 &&
-                     fix.Lon >= -180.0 && fix.Lon <= 180.0;
+                     fix.Lat >= -90.0 && fix.Lat <= 90.0 && fix.Lon >= -180.0 &&
+                     fix.Lon <= 180.0;
   {
     std::lock_guard<std::mutex> lock(impl_->position_mutex);
     impl_->position_valid = valid;
@@ -3824,12 +4106,11 @@ void RuntimeEngine::SetCursorPosition(double latitude, double longitude) {
 }
 
 void RuntimeEngine::SetViewport(double west, double south, double east,
-                                double north, double scale_ppm,
-                                double rotation, int canvas_index) {
-  if (!std::isfinite(west) || !std::isfinite(south) ||
-      !std::isfinite(east) || !std::isfinite(north) ||
-      !std::isfinite(scale_ppm) || !std::isfinite(rotation) ||
-      west >= east || south >= north)
+                                double north, double scale_ppm, double rotation,
+                                int canvas_index) {
+  if (!std::isfinite(west) || !std::isfinite(south) || !std::isfinite(east) ||
+      !std::isfinite(north) || !std::isfinite(scale_ppm) ||
+      !std::isfinite(rotation) || west >= east || south >= north)
     return;
   wxJSONValue payload;
   payload["west"] = west;
@@ -3839,17 +4120,17 @@ void RuntimeEngine::SetViewport(double west, double south, double east,
   payload["scale_pixels_per_metre"] = scale_ppm;
   payload["rotation_radians"] = rotation;
   payload["canvas_index"] = canvas_index;
-  impl_->PublishCapabilityEvent(
-      {CapabilityEventKind::kViewport, std::to_string(canvas_index),
-       JsonText(payload)});
+  impl_->PublishCapabilityEvent({CapabilityEventKind::kViewport,
+                                 std::to_string(canvas_index),
+                                 JsonText(payload)});
 }
 
 void RuntimeEngine::SetActiveLeg(double cross_track_error_nm,
                                  double bearing_degrees, double distance_nm,
                                  const std::string& waypoint_name,
                                  bool arrival) {
-  if (!std::isfinite(cross_track_error_nm) ||
-      !std::isfinite(bearing_degrees) || !std::isfinite(distance_nm))
+  if (!std::isfinite(cross_track_error_nm) || !std::isfinite(bearing_degrees) ||
+      !std::isfinite(distance_nm))
     return;
   wxJSONValue payload;
   payload["cross_track_error_nm"] = cross_track_error_nm;
@@ -3865,9 +4146,9 @@ void RuntimeEngine::DeliverNavigationSentence(const std::string& sentence) {
   impl_->DeliverNavigationSentence(sentence);
 }
 
-void RuntimeEngine::DeliverNmea2000(
-    std::uint32_t pgn, const std::string& source,
-    const std::vector<std::uint8_t>& payload) {
+void RuntimeEngine::DeliverNmea2000(std::uint32_t pgn,
+                                    const std::string& source,
+                                    const std::vector<std::uint8_t>& payload) {
   if (pgn == 0 || payload.empty() || payload.size() > 2048 ||
       source.size() > 256)
     return;
@@ -3882,9 +4163,9 @@ void RuntimeEngine::DeliverNmea2000(
   value["pgn"] = static_cast<long>(pgn);
   value["source"] = wxString::FromUTF8(source);
   value["payload_hex"] = wxString::FromUTF8(encoded);
-  impl_->PublishCapabilityEvent(
-      {CapabilityEventKind::kNmea2000, "pgn/" + std::to_string(pgn),
-       JsonText(value)});
+  impl_->PublishCapabilityEvent({CapabilityEventKind::kNmea2000,
+                                 "pgn/" + std::to_string(pgn),
+                                 JsonText(value)});
 }
 
 void RuntimeEngine::DeliverAisSentence(const std::string& sentence) {
@@ -3927,8 +4208,7 @@ bool RuntimeEngine::DeliverPointerEvent(
         error.size());
     if (status != 0) {
       impl_->Fail(instance, "pointer event",
-                  error[0] ? error.data()
-                           : "portable pointer event failed");
+                  error[0] ? error.data() : "portable pointer event failed");
     } else if (handled != 0) {
       return true;
     }
@@ -3951,12 +4231,11 @@ bool RuntimeEngine::DeliverKeyEvent(std::uint32_t key_code,
     std::uint8_t handled = 0;
     const int status = ocpn_portable_runtime_on_key_event(
         instance.runtime, key_code, unicode, has_unicode ? 1U : 0U,
-        pressed ? 1U : 0U, repeat ? 1U : 0U, modifiers, &handled,
-        error.data(), error.size());
+        pressed ? 1U : 0U, repeat ? 1U : 0U, modifiers, &handled, error.data(),
+        error.size());
     if (status != 0) {
       impl_->Fail(instance, "keyboard event",
-                  error[0] ? error.data()
-                           : "portable keyboard event failed");
+                  error[0] ? error.data() : "portable keyboard event failed");
     } else if (handled != 0) {
       return true;
     }

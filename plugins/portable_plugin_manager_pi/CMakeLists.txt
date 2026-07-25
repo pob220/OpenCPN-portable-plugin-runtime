@@ -88,8 +88,11 @@ add_library(portable_plugin_manager_pi MODULE
   src/serial_executor.cpp
   src/surface_dialog.cpp
   src/weather_routing_host.cpp
+  src/weather_routing_departure_coordinator.cpp
+  src/weather_routing_stability.cpp
   src/wind_barb_geometry.cpp
   src/window_activation.cpp
+  src/weather_routing_display.cpp
 )
 set_target_properties(portable_plugin_manager_pi PROPERTIES
   PREFIX "lib"
@@ -229,6 +232,58 @@ if(BUILD_TESTING)
   endif()
   add_test(NAME ppm_wind_barb_geometry
            COMMAND ppm_wind_barb_geometry_test)
+
+  add_executable(ppm_weather_routing_display_test
+    src/weather_routing_display.cpp
+    tests/weather_routing_display_test.cpp
+  )
+  target_include_directories(ppm_weather_routing_display_test PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include")
+  if(MSVC)
+    target_compile_options(ppm_weather_routing_display_test PRIVATE /W4)
+  else()
+    target_compile_options(ppm_weather_routing_display_test PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
+  add_test(NAME ppm_weather_routing_display
+           COMMAND ppm_weather_routing_display_test)
+
+  add_executable(ppm_weather_routing_departure_coordinator_test
+    src/portable_departure_time.cpp
+    src/weather_routing_departure_coordinator.cpp
+    tests/weather_routing_departure_coordinator_test.cpp
+  )
+  target_include_directories(
+    ppm_weather_routing_departure_coordinator_test PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include"
+    "${PPM_RUNTIME_SOURCE_DIR}/bridge/include")
+  target_link_libraries(ppm_weather_routing_departure_coordinator_test PRIVATE
+    ${wxWidgets_LIBRARIES} Threads::Threads)
+  if(MSVC)
+    target_compile_options(
+      ppm_weather_routing_departure_coordinator_test PRIVATE /W4)
+  else()
+    target_compile_options(
+      ppm_weather_routing_departure_coordinator_test PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
+  add_test(NAME ppm_weather_routing_departure_coordinator
+           COMMAND ppm_weather_routing_departure_coordinator_test)
+
+  add_executable(ppm_weather_routing_stability_test
+    src/weather_routing_stability.cpp
+    tests/weather_routing_stability_test.cpp
+  )
+  target_include_directories(ppm_weather_routing_stability_test PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include")
+  if(MSVC)
+    target_compile_options(ppm_weather_routing_stability_test PRIVATE /W4)
+  else()
+    target_compile_options(ppm_weather_routing_stability_test PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
+  add_test(NAME ppm_weather_routing_stability
+           COMMAND ppm_weather_routing_stability_test)
 
   add_executable(ppm_action_registry_test
     src/action_registry.cpp

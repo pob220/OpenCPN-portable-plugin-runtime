@@ -14,6 +14,7 @@ extern "C" {
 #define OCPN_PORTABLE_API_V03 3u
 #define OCPN_PORTABLE_WORLD_PLUGIN 0u
 #define OCPN_PORTABLE_WORLD_WEATHER_ROUTING 1u
+#define OCPN_PORTABLE_WORLD_PASSAGE_ROUTING 2u
 
 typedef struct ocpn_portable_runtime ocpn_portable_runtime;
 
@@ -198,6 +199,41 @@ typedef struct ocpn_portable_route_result {
   size_t diagnostic_len;
 } ocpn_portable_route_result;
 
+typedef struct ocpn_portable_passage_gate {
+  const char* id;
+  size_t id_len;
+  const char* name;
+  size_t name_len;
+  double latitude;
+  double longitude;
+} ocpn_portable_passage_gate;
+
+typedef struct ocpn_portable_passage_request {
+  ocpn_portable_route_request route;
+  const ocpn_portable_passage_gate* gates;
+  size_t gate_count;
+  int64_t departure_offset_seconds;
+} ocpn_portable_passage_request;
+
+typedef struct ocpn_portable_passage_leg {
+  uint32_t start_gate_index;
+  uint32_t end_gate_index;
+  size_t point_offset;
+  size_t point_count;
+  int64_t departure_unix_time;
+  int64_t arrival_unix_time;
+  double distance_nautical_miles;
+  uint32_t states_examined;
+} ocpn_portable_passage_leg;
+
+typedef struct ocpn_portable_passage_result {
+  ocpn_portable_route_result route;
+  ocpn_portable_passage_leg* legs;
+  size_t leg_capacity;
+  size_t leg_count;
+  uint64_t validation_samples;
+} ocpn_portable_passage_result;
+
 typedef struct ocpn_portable_host_callbacks {
   uint32_t abi_version;
   void* user_data;
@@ -273,10 +309,11 @@ typedef struct ocpn_portable_host_callbacks {
    * the public contract. The bridge supplies a policy-bounded output buffer
    * and the host reports the actual response length.
    */
-  int32_t (*author_service_call)(
-      void* user_data, const char* operation, size_t operation_len,
-      const char* request_json, size_t request_json_len, char* response_json,
-      size_t response_capacity, size_t* response_len);
+  int32_t (*author_service_call)(void* user_data, const char* operation,
+                                 size_t operation_len, const char* request_json,
+                                 size_t request_json_len, char* response_json,
+                                 size_t response_capacity,
+                                 size_t* response_len);
 } ocpn_portable_host_callbacks;
 
 ocpn_portable_runtime* ocpn_portable_runtime_create(
@@ -329,20 +366,23 @@ int32_t ocpn_portable_runtime_on_plugin_message(
     char* error, size_t error_capacity);
 int32_t ocpn_portable_runtime_on_pointer_event(
     ocpn_portable_runtime* runtime, uint32_t kind, uint32_t button,
-    uint32_t canvas_index, int32_t x_pixels, int32_t y_pixels,
-    double latitude, double longitude, uint8_t has_position,
-    int32_t wheel_rotation, uint32_t modifiers, const char* hit_scene_id,
-    size_t hit_scene_id_len, const char* hit_primitive_id,
-    size_t hit_primitive_id_len, uint8_t* handled, char* error,
-    size_t error_capacity);
-int32_t ocpn_portable_runtime_on_key_event(
-    ocpn_portable_runtime* runtime, uint32_t key_code, uint32_t unicode,
-    uint8_t has_unicode, uint8_t pressed, uint8_t repeat, uint32_t modifiers,
-    uint8_t* handled, char* error, size_t error_capacity);
-int32_t ocpn_portable_runtime_on_timer(
-    ocpn_portable_runtime* runtime, const char* timer_id, size_t timer_id_len,
-    int64_t scheduled_unix_milliseconds, int64_t fired_unix_milliseconds,
+    uint32_t canvas_index, int32_t x_pixels, int32_t y_pixels, double latitude,
+    double longitude, uint8_t has_position, int32_t wheel_rotation,
+    uint32_t modifiers, const char* hit_scene_id, size_t hit_scene_id_len,
+    const char* hit_primitive_id, size_t hit_primitive_id_len, uint8_t* handled,
     char* error, size_t error_capacity);
+int32_t ocpn_portable_runtime_on_key_event(ocpn_portable_runtime* runtime,
+                                           uint32_t key_code, uint32_t unicode,
+                                           uint8_t has_unicode, uint8_t pressed,
+                                           uint8_t repeat, uint32_t modifiers,
+                                           uint8_t* handled, char* error,
+                                           size_t error_capacity);
+int32_t ocpn_portable_runtime_on_timer(ocpn_portable_runtime* runtime,
+                                       const char* timer_id,
+                                       size_t timer_id_len,
+                                       int64_t scheduled_unix_milliseconds,
+                                       int64_t fired_unix_milliseconds,
+                                       char* error, size_t error_capacity);
 int32_t ocpn_portable_runtime_on_rpc_request(
     ocpn_portable_runtime* runtime, const char* source_package,
     size_t source_package_len, const char* request_json,
@@ -354,6 +394,10 @@ int32_t ocpn_portable_runtime_on_rpc_response(
 int32_t ocpn_portable_runtime_calculate_route(
     ocpn_portable_runtime* runtime, const ocpn_portable_route_request* request,
     ocpn_portable_route_result* result, char* error, size_t error_capacity);
+int32_t ocpn_portable_runtime_calculate_passage(
+    ocpn_portable_runtime* runtime,
+    const ocpn_portable_passage_request* request,
+    ocpn_portable_passage_result* result, char* error, size_t error_capacity);
 int32_t ocpn_portable_runtime_test_trap(ocpn_portable_runtime* runtime,
                                         char* error, size_t error_capacity);
 

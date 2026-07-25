@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <string>
 #include <thread>
@@ -27,11 +28,15 @@ struct HostState {
   bool environmental_viewer_opened = false;
   bool weather_routing_opened = false;
   std::atomic<bool> environment_failure{false};
+  std::atomic<int64_t> environment_unavailable_after{
+      std::numeric_limits<int64_t>::max()};
+  std::atomic<double> environment_unavailable_north_of{91.0};
   std::atomic<bool> use_reported_irish_sea_weather{false};
   std::atomic<bool> routing_cancelled{false};
   std::atomic<unsigned> routing_progress_events{0};
   std::atomic<bool> saw_corridor_refinement{false};
   std::atomic<bool> saw_graph_fallback{false};
+  std::atomic<bool> saw_passage_progress{false};
   std::atomic<unsigned> routing_stage{0};
   std::atomic<bool> reject_reverse_charts{false};
   std::atomic<size_t> chart_segments_queried{0};
@@ -198,7 +203,16 @@ int32_t EnvironmentSampleBatch(
     }
     return 0;
   }
-  for (size_t i = 0; i < count; ++i) results[i] = {8.0, 2.0, 0.4, 0.1, 1.2, 7};
+  const int64_t unavailable_after =
+      static_cast<HostState*>(data)->environment_unavailable_after.load();
+  const double unavailable_north_of =
+      static_cast<HostState*>(data)->environment_unavailable_north_of.load();
+  for (size_t i = 0; i < count; ++i)
+    results[i] =
+        requests[i].unix_time >= unavailable_after ||
+                requests[i].latitude >= unavailable_north_of
+            ? ocpn_portable_environment_sample{0, 0, 0, 0, 0, 0}
+            : ocpn_portable_environment_sample{8.0, 2.0, 0.4, 0.1, 1.2, 7};
   return 0;
 }
 
@@ -208,6 +222,9 @@ void RoutingProgress(void* data, uint8_t, const char* message, size_t length) {
   const auto text = Text(message, length);
   if (text.find("Corridor refinement") != std::string::npos)
     state.saw_corridor_refinement = true;
+  if (text.find("Departure +0:00") != std::string::npos &&
+      text.find("passage leg 2 of 2") != std::string::npos)
+    state.saw_passage_progress = true;
   if (text.find("Reverse-isocrone recovery") != std::string::npos)
     state.routing_stage = 1;
   else if (text.find("Time-dependent graph fallback") != std::string::npos) {
@@ -492,7 +509,7 @@ bool RoutingLifecycle(const char* component_path) {
   char error[4096] = {};
   auto* runtime = ocpn_portable_runtime_create(
       component_path, &callbacks, OCPN_PORTABLE_API_V02,
-      OCPN_PORTABLE_WORLD_WEATHER_ROUTING, error, sizeof(error));
+      OCPN_PORTABLE_WORLD_PASSAGE_ROUTING, error, sizeof(error));
   if (!runtime) return false;
   const std::string id = "org.opencpn.iweather-routing";
   const std::string name = "iWeatherRouting";
@@ -604,6 +621,107 @@ bool RoutingLifecycle(const char* component_path) {
   }
   if (!ok) {
     std::cerr << "initial portable route assertions failed\n";
+    ocpn_portable_runtime_destroy(runtime);
+    return false;
+  }
+  const std::array<ocpn_portable_passage_gate, 3> gates = {
+      ocpn_portable_passage_gate{"start", 5, "Start", 5, 50.0, -4.0},
+      ocpn_portable_passage_gate{"gate", 4, "Intermediate gate", 17, 50.025,
+                                 -3.975},
+      ocpn_portable_passage_gate{"finish", 6, "Finish", 6, 50.05, -3.95}};
+  ocpn_portable_passage_request passage_request{};
+  passage_request.route = request;
+  passage_request.gates = gates.data();
+  passage_request.gate_count = gates.size();
+  std::array<ocpn_portable_passage_leg, 2> passage_legs{};
+  std::array<char, 16384> passage_diagnostic{};
+  ocpn_portable_passage_result passage_result{};
+  passage_result.route = result;
+  passage_result.route.point_count = 0;
+  passage_result.route.isochrone_point_count = 0;
+  passage_result.route.isochrone_count = 0;
+  passage_result.route.trace_point_count = 0;
+  passage_result.route.trace_count = 0;
+  passage_result.route.route_environment_count = 0;
+  passage_result.route.diagnostic = passage_diagnostic.data();
+  passage_result.route.diagnostic_capacity = passage_diagnostic.size();
+  passage_result.route.diagnostic_len = 0;
+  passage_result.legs = passage_legs.data();
+  passage_result.leg_capacity = passage_legs.size();
+  state.chart_query_calls = 0;
+  ok = ok && CallSucceeded(ocpn_portable_runtime_calculate_passage(
+                               runtime, &passage_request, &passage_result,
+                               error, sizeof(error)),
+                           "calculate continuous passage", error);
+  ok = ok && passage_result.leg_count == 2 &&
+       passage_result.route.point_count >= 3 &&
+       passage_result.route.route_environment_count ==
+           passage_result.route.point_count &&
+       passage_result.validation_samples > 0 &&
+       state.saw_passage_progress.load() &&
+       passage_legs[0].start_gate_index == 0 &&
+       passage_legs[0].end_gate_index == 1 &&
+       passage_legs[1].start_gate_index == 1 &&
+       passage_legs[1].end_gate_index == 2 &&
+       passage_legs[0].point_offset == 0 && passage_legs[0].point_count >= 2 &&
+       passage_legs[1].point_offset + 1 == passage_legs[0].point_count &&
+       passage_legs[1].point_count >= 2 &&
+       passage_legs[1].departure_unix_time ==
+           passage_legs[0].arrival_unix_time &&
+       passage_legs[1].point_offset + passage_legs[1].point_count ==
+           passage_result.route.point_count &&
+       std::strstr(passage_diagnostic.data(), "complete 2-leg passage") !=
+           nullptr;
+  if (!ok) {
+    std::cerr << "continuous passage assertions failed: " << error
+              << " legs=" << passage_result.leg_count
+              << " points=" << passage_result.route.point_count
+              << " environment=" << passage_result.route.route_environment_count
+              << " validation=" << passage_result.validation_samples
+              << " first-span=" << passage_legs[0].point_offset << "+"
+              << passage_legs[0].point_count
+              << " second-span=" << passage_legs[1].point_offset << "+"
+              << passage_legs[1].point_count
+              << " seam-times=" << passage_legs[0].arrival_unix_time << "/"
+              << passage_legs[1].departure_unix_time
+              << " diagnostic=" << passage_diagnostic.data() << '\n';
+    ocpn_portable_runtime_destroy(runtime);
+    return false;
+  }
+  const size_t baseline_passage_chart_calls = state.chart_query_calls.load();
+  const std::vector<ocpn_portable_route_point> serial_passage_points(
+      points.begin(), points.begin() + passage_result.route.point_count);
+  state.environment_unavailable_north_of = 50.03;
+  passage_result.route.point_count = 0;
+  passage_result.route.diagnostic_len = 0;
+  passage_result.leg_count = 0;
+  std::memset(error, 0, sizeof(error));
+  const int32_t missing_later_weather = ocpn_portable_runtime_calculate_passage(
+      runtime, &passage_request, &passage_result, error, sizeof(error));
+  ok = ok && missing_later_weather != 0 &&
+       std::strstr(error, "leg 2 of 2") != nullptr;
+  state.environment_unavailable_north_of = 91.0;
+  if (!ok) {
+    std::cerr << "later-gate weather coverage was not rejected: " << error
+              << '\n';
+    ocpn_portable_runtime_destroy(runtime);
+    return false;
+  }
+  state.chart_query_calls = 0;
+  state.reject_chart_query_call = baseline_passage_chart_calls;
+  passage_result.route.point_count = 0;
+  passage_result.route.diagnostic_len = 0;
+  passage_result.leg_count = 0;
+  std::memset(error, 0, sizeof(error));
+  const int32_t unsafe_whole_passage = ocpn_portable_runtime_calculate_passage(
+      runtime, &passage_request, &passage_result, error, sizeof(error));
+  ok = ok && baseline_passage_chart_calls > 0 && unsafe_whole_passage != 0 &&
+       std::strstr(error, "whole-passage independent validation failed") !=
+           nullptr;
+  state.reject_chart_query_call = 0;
+  if (!ok) {
+    std::cerr << "unsafe whole passage was not rejected independently: "
+              << error << '\n';
     ocpn_portable_runtime_destroy(runtime);
     return false;
   }
@@ -923,7 +1041,7 @@ bool RoutingLifecycle(const char* component_path) {
       std::vector<ocpn_portable_route_line> local_trace_lines(2000);
       std::vector<ocpn_portable_route_environment_point>
           local_route_environment(1000);
-      char local_diagnostic[4096] = {};
+      char local_diagnostic[16384] = {};
       char local_error[4096] = {};
       ocpn_portable_route_result local_result{};
       local_result.points = local_points.data();
@@ -940,10 +1058,28 @@ bool RoutingLifecycle(const char* component_path) {
       local_result.route_environment_capacity = local_route_environment.size();
       local_result.diagnostic = local_diagnostic;
       local_result.diagnostic_capacity = sizeof(local_diagnostic);
-      replica_results[index] = ocpn_portable_runtime_calculate_route(
-                                   replicas[index], &request, &local_result,
-                                   local_error, sizeof(local_error)) == 0 &&
-                               local_result.point_count >= 2;
+      std::array<ocpn_portable_passage_leg, 2> local_legs{};
+      ocpn_portable_passage_result local_passage{};
+      local_passage.route = local_result;
+      local_passage.legs = local_legs.data();
+      local_passage.leg_capacity = local_legs.size();
+      replica_results[index] =
+          ocpn_portable_runtime_calculate_passage(
+              replicas[index], &passage_request, &local_passage, local_error,
+              sizeof(local_error)) == 0 &&
+          local_passage.leg_count == 2 &&
+          local_passage.route.point_count == serial_passage_points.size();
+      for (size_t point_index = 0;
+           replica_results[index] && point_index < serial_passage_points.size();
+           ++point_index) {
+        replica_results[index] =
+            local_points[point_index].latitude ==
+                serial_passage_points[point_index].latitude &&
+            local_points[point_index].longitude ==
+                serial_passage_points[point_index].longitude &&
+            local_points[point_index].unix_time ==
+                serial_passage_points[point_index].unix_time;
+      }
     });
   }
   for (auto& thread : threads) thread.join();
@@ -964,8 +1100,11 @@ bool RoutingLifecycle(const char* component_path) {
   state.environment_failure = false;
   state.routing_cancelled = true;
   std::memset(error, 0, sizeof(error));
-  const int32_t cancelled = ocpn_portable_runtime_calculate_route(
-      runtime, &request, &result, error, sizeof(error));
+  passage_result.route.point_count = 0;
+  passage_result.route.diagnostic_len = 0;
+  passage_result.leg_count = 0;
+  const int32_t cancelled = ocpn_portable_runtime_calculate_passage(
+      runtime, &passage_request, &passage_result, error, sizeof(error));
   ok = ok && cancelled != 0 && std::strstr(error, "cancelled") != nullptr;
   ok = ok && CallSucceeded(
                  ocpn_portable_runtime_disable(runtime, error, sizeof(error)),

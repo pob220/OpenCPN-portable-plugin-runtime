@@ -26,3 +26,8 @@ world weather-routing-plugin-world {
   include plugin-world;
   export weather-routing-engine;
 }
+
+world passage-weather-routing-plugin-world {
+  include weather-routing-plugin-world;
+  export passage-routing-engine;
+}

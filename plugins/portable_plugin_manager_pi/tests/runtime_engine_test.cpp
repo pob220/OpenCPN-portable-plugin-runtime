@@ -17,13 +17,13 @@
 
 #include <wx/init.h>
 
-#define CHECK(expression)                                                   \
-  do {                                                                      \
-    if (!(expression)) {                                                    \
-      std::cerr << "check failed at " << __FILE__ << ':' << __LINE__       \
-                << ": " #expression "\n";                                  \
-      return 1;                                                             \
-    }                                                                       \
+#define CHECK(expression)                                            \
+  do {                                                               \
+    if (!(expression)) {                                             \
+      std::cerr << "check failed at " << __FILE__ << ':' << __LINE__ \
+                << ": " #expression "\n";                            \
+      return 1;                                                      \
+    }                                                                \
   } while (false)
 
 namespace {
@@ -49,7 +49,7 @@ const ppm::PackageSnapshot* Snapshot(
 }
 
 class UiLoop {
- public:
+public:
   UiLoop() : thread_([this]() { Run(); }) {
     std::unique_lock<std::mutex> lock(mutex_);
     changed_.wait(lock, [this]() { return started_; });
@@ -72,15 +72,14 @@ class UiLoop {
   }
   bool WaitIdle(std::chrono::milliseconds timeout) {
     std::unique_lock<std::mutex> lock(mutex_);
-    return changed_.wait_for(lock, timeout,
-                             [this]() { return pending_ == 0; });
+    return changed_.wait_for(lock, timeout, [this]() { return pending_ == 0; });
   }
   std::thread::id ThreadId() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return thread_id_;
   }
 
- private:
+private:
   void Run() {
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -140,42 +139,39 @@ int main() {
   std::error_code error;
   fs::create_directories(package_root / "component", error);
   CHECK(!error);
-  fs::copy_file(PPM_TEST_IGRIB_WASM,
-                package_root / "component" / "igrib.wasm",
+  fs::copy_file(PPM_TEST_IGRIB_WASM, package_root / "component" / "igrib.wasm",
                 fs::copy_options::overwrite_existing, error);
   CHECK(!error);
   fs::create_directories(package_root / "ui", error);
   CHECK(!error);
-  fs::copy_file(PPM_TEST_IGRIB_UI,
-                package_root / "ui" / "igrib-viewer.ui.json",
+  fs::copy_file(PPM_TEST_IGRIB_UI, package_root / "ui" / "igrib-viewer.ui.json",
                 fs::copy_options::overwrite_existing, error);
   CHECK(!error);
   CHECK(Write(package_root / "resources" / "igrib.svg", "<svg/>"));
   CHECK(Write(package_root / "resources" / "fault-test.svg", "<svg/>"));
   CHECK(Write(package_root / "resources" / "http-download.svg", "<svg/>"));
-  CHECK(Write(
-      package_root / "manifest.json",
-      "{"
-      "\"format_version\":1,"
-      "\"id\":\"org.opencpn.igrib\","
-      "\"name\":\"iGRIB\","
-      "\"version\":\"0.1.0\","
-      "\"component\":\"component/igrib.wasm\","
-      "\"runtime\":\">=0.1.0 <0.2.0\","
-      "\"portable_api\":\">=0.2.0 <0.3.0\","
-      "\"portable_world\":\"plugin\","
-      "\"surfaces\":{\"environment.viewer\":"
-      "\"ui/igrib-viewer.ui.json\"},"
-      "\"permissions\":["
-      "\"ui.commands\",\"navigation.position.read\","
-      "\"navigation.objects.read\",\"settings.read-write\","
-      "\"overlay.submit\",\"jobs.compute\",\"environment.datasets\","
-      "\"storage.user-selected\",\"network.providers\","
-      "\"helpers.environment.decode\","
-      "\"helpers.environment.generate\",\"charts.coverage\","
-      "\"network.http\",\"storage.private\",\"credentials.provider\"],"
-      "\"development\":true"
-      "}"));
+  CHECK(Write(package_root / "manifest.json",
+              "{"
+              "\"format_version\":1,"
+              "\"id\":\"org.opencpn.igrib\","
+              "\"name\":\"iGRIB\","
+              "\"version\":\"0.1.0\","
+              "\"component\":\"component/igrib.wasm\","
+              "\"runtime\":\">=0.1.0 <0.2.0\","
+              "\"portable_api\":\">=0.2.0 <0.3.0\","
+              "\"portable_world\":\"plugin\","
+              "\"surfaces\":{\"environment.viewer\":"
+              "\"ui/igrib-viewer.ui.json\"},"
+              "\"permissions\":["
+              "\"ui.commands\",\"navigation.position.read\","
+              "\"navigation.objects.read\",\"settings.read-write\","
+              "\"overlay.submit\",\"jobs.compute\",\"environment.datasets\","
+              "\"storage.user-selected\",\"network.providers\","
+              "\"helpers.environment.decode\","
+              "\"helpers.environment.generate\",\"charts.coverage\","
+              "\"network.http\",\"storage.private\",\"credentials.provider\"],"
+              "\"development\":true"
+              "}"));
   CHECK(Write(test_root / "state" / (package_id + ".enabled"), "1\n"));
 
   std::set<std::string> actions;
@@ -201,15 +197,12 @@ int main() {
   UiLoop ui_loop;
 
   {
-    ppm::RuntimeEngine engine(test_root.string(), register_action,
-                              remove_actions,
-                              [&]() { ++state_changes; },
-                              [&](std::function<void()> task) {
-                                ui_loop.Post(std::move(task));
-                              });
+    ppm::RuntimeEngine engine(
+        test_root.string(), register_action, remove_actions,
+        [&]() { ++state_changes; },
+        [&](std::function<void()> task) { ui_loop.Post(std::move(task)); });
     engine.SetSurfaceOpenedCallback(
-        [&](const std::string& id,
-            const ppm::DeclarativeSurface& surface) {
+        [&](const std::string& id, const ppm::DeclarativeSurface& surface) {
           if (id != package_id || surface.id != "environment.viewer")
             opened_surface_valid = false;
           ++opened_surfaces;
@@ -235,8 +228,8 @@ int main() {
     CHECK(diagnostic == "permission approval is required");
     CHECK(actions.empty());
     diagnostic.clear();
-    CHECK(!engine.SetGrantedPermissions(
-        package_id, {requested.front()}, &diagnostic));
+    CHECK(!engine.SetGrantedPermissions(package_id, {requested.front()},
+                                        &diagnostic));
     CHECK(!diagnostic.empty());
     diagnostic.clear();
     CHECK(engine.SetGrantedPermissions(package_id, requested, &diagnostic));
@@ -341,8 +334,7 @@ int main() {
   CHECK(!error);
   fs::create_directories(provider_root / "ui", error);
   CHECK(!error);
-  fs::copy_file(PPM_TEST_IGRIB_WASM,
-                provider_root / "component" / "igrib.wasm",
+  fs::copy_file(PPM_TEST_IGRIB_WASM, provider_root / "component" / "igrib.wasm",
                 fs::copy_options::overwrite_existing, error);
   CHECK(!error);
   fs::copy_file(PPM_TEST_IGRIB_UI,
@@ -352,31 +344,30 @@ int main() {
   CHECK(Write(provider_root / "resources" / "igrib.svg", "<svg/>"));
   CHECK(Write(provider_root / "resources" / "fault-test.svg", "<svg/>"));
   CHECK(Write(provider_root / "resources" / "http-download.svg", "<svg/>"));
-  CHECK(Write(
-      provider_root / "manifest.json",
-      "{"
-      "\"format_version\":1,"
-      "\"id\":\"org.opencpn.igrib\","
-      "\"name\":\"iGRIB\","
-      "\"version\":\"0.1.0\","
-      "\"component\":\"component/igrib.wasm\","
-      "\"runtime\":\">=0.1.0 <0.2.0\","
-      "\"portable_api\":\">=0.2.0 <0.3.0\","
-      "\"portable_world\":\"plugin\","
-      "\"surfaces\":{\"environment.viewer\":"
-      "\"ui/igrib-viewer.ui.json\"},"
-      "\"provides\":[{\"interface\":"
-      "\"org.opencpn.environment.provider\",\"version\":\"0.1.0\"}],"
-      "\"permissions\":["
-      "\"ui.commands\",\"navigation.position.read\","
-      "\"navigation.objects.read\",\"settings.read-write\","
-      "\"overlay.submit\",\"jobs.compute\",\"environment.datasets\","
-      "\"storage.user-selected\",\"network.providers\","
-      "\"helpers.environment.decode\","
-      "\"helpers.environment.generate\",\"charts.coverage\","
-      "\"network.http\",\"storage.private\",\"credentials.provider\"],"
-      "\"development\":true"
-      "}"));
+  CHECK(Write(provider_root / "manifest.json",
+              "{"
+              "\"format_version\":1,"
+              "\"id\":\"org.opencpn.igrib\","
+              "\"name\":\"iGRIB\","
+              "\"version\":\"0.1.0\","
+              "\"component\":\"component/igrib.wasm\","
+              "\"runtime\":\">=0.1.0 <0.2.0\","
+              "\"portable_api\":\">=0.2.0 <0.3.0\","
+              "\"portable_world\":\"plugin\","
+              "\"surfaces\":{\"environment.viewer\":"
+              "\"ui/igrib-viewer.ui.json\"},"
+              "\"provides\":[{\"interface\":"
+              "\"org.opencpn.environment.provider\",\"version\":\"0.1.0\"}],"
+              "\"permissions\":["
+              "\"ui.commands\",\"navigation.position.read\","
+              "\"navigation.objects.read\",\"settings.read-write\","
+              "\"overlay.submit\",\"jobs.compute\",\"environment.datasets\","
+              "\"storage.user-selected\",\"network.providers\","
+              "\"helpers.environment.decode\","
+              "\"helpers.environment.generate\",\"charts.coverage\","
+              "\"network.http\",\"storage.private\",\"credentials.provider\"],"
+              "\"development\":true"
+              "}"));
   fs::create_directories(consumer_root / "component", error);
   CHECK(!error);
   fs::create_directories(consumer_root / "ui", error);
@@ -389,31 +380,29 @@ int main() {
                 consumer_root / "ui" / "iweather-routing.ui.json",
                 fs::copy_options::overwrite_existing, error);
   CHECK(!error);
-  CHECK(Write(consumer_root / "resources" / "iweather-routing.svg",
-              "<svg/>"));
-  CHECK(Write(
-      consumer_root / "manifest.json",
-      "{"
-      "\"format_version\":1,"
-      "\"id\":\"org.opencpn.iweather-routing\","
-      "\"name\":\"iWeatherRouting\","
-      "\"version\":\"0.1.0\","
-      "\"component\":\"component/iweather-routing.wasm\","
-      "\"runtime\":\">=0.1.0 <0.2.0\","
-      "\"portable_api\":\">=0.2.0 <0.3.0\","
-      "\"portable_world\":\"weather-routing-plugin\","
-      "\"surfaces\":{\"routing.workbench\":"
-      "\"ui/iweather-routing.ui.json\"},"
-      "\"requires\":[{\"interface\":"
-      "\"org.opencpn.environment.provider\","
-      "\"range\":\">=0.1.0 <0.2.0\"}],"
-      "\"permissions\":["
-      "\"ui.commands\",\"navigation.position.read\","
-      "\"navigation.objects.read\",\"weather-routing.compute\","
-      "\"environment.consume\",\"charts.coverage\","
-      "\"storage.user-selected\",\"navigation.routes.write\"],"
-      "\"development\":true"
-      "}"));
+  CHECK(Write(consumer_root / "resources" / "iweather-routing.svg", "<svg/>"));
+  CHECK(Write(consumer_root / "manifest.json",
+              "{"
+              "\"format_version\":1,"
+              "\"id\":\"org.opencpn.iweather-routing\","
+              "\"name\":\"iWeatherRouting\","
+              "\"version\":\"0.1.0\","
+              "\"component\":\"component/iweather-routing.wasm\","
+              "\"runtime\":\">=0.1.0 <0.2.0\","
+              "\"portable_api\":\">=0.2.0 <0.3.0\","
+              "\"portable_world\":\"passage-weather-routing-plugin\","
+              "\"surfaces\":{\"routing.workbench\":"
+              "\"ui/iweather-routing.ui.json\"},"
+              "\"requires\":[{\"interface\":"
+              "\"org.opencpn.environment.provider\","
+              "\"range\":\">=0.1.0 <0.2.0\"}],"
+              "\"permissions\":["
+              "\"ui.commands\",\"navigation.position.read\","
+              "\"navigation.objects.read\",\"weather-routing.compute\","
+              "\"environment.consume\",\"charts.coverage\","
+              "\"storage.user-selected\",\"navigation.routes.write\"],"
+              "\"development\":true"
+              "}"));
   actions.clear();
   {
     ppm::RuntimeEngine services(dependency_root.string(), register_action,
@@ -421,8 +410,7 @@ int main() {
     CHECK(services.LoadInstalled(true));
     const auto service_packages = services.Packages();
     CHECK(service_packages.size() == 2);
-    const auto* provider =
-        Snapshot(service_packages, "org.opencpn.igrib");
+    const auto* provider = Snapshot(service_packages, "org.opencpn.igrib");
     const auto* consumer =
         Snapshot(service_packages, "org.opencpn.iweather-routing");
     CHECK(provider && provider->provided_service_count == 1);
@@ -436,8 +424,8 @@ int main() {
     CHECK(diagnostic.find("no enabled compatible provider") !=
           std::string::npos);
     CHECK(services.SetGrantedPermissions(
-        "org.opencpn.igrib",
-        services.RequestedPermissions("org.opencpn.igrib"), &diagnostic));
+        "org.opencpn.igrib", services.RequestedPermissions("org.opencpn.igrib"),
+        &diagnostic));
     CHECK(services.Enable("org.opencpn.igrib", &diagnostic));
     CHECK(services.Enable("org.opencpn.iweather-routing", &diagnostic));
     CHECK(!services.Disable("org.opencpn.igrib", &diagnostic));
@@ -485,9 +473,9 @@ int main() {
     polar.identity = "Runtime service test";
     polar.true_wind_speeds_knots = {0.0, 10.0, 20.0, 40.0};
     polar.true_wind_angles_degrees = {0.0, 40.0, 90.0, 160.0, 180.0};
-    polar.boat_speeds_knots = {
-        0.0, 0.0,  0.0,  0.0,  0.0, 0.0, 3.86, 5.47, 3.92, 3.76,
-        0.0, 3.98, 6.18, 5.30, 4.90, 0.0, 2.33, 3.99, 3.60, 3.33};
+    polar.boat_speeds_knots = {0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  3.86,
+                               5.47, 3.92, 3.76, 0.0,  3.98, 6.18, 5.30,
+                               4.90, 0.0,  2.33, 3.99, 3.60, 3.33};
     request.polars.push_back(std::move(polar));
     CHECK(!services.CancelRoute("org.opencpn.iweather-routing"));
     diagnostic.clear();
@@ -508,9 +496,9 @@ int main() {
 
     std::vector<std::uint8_t> availability;
     diagnostic.clear();
-    CHECK(!services.PreflightEnvironment(
-        "org.opencpn.iweather-routing", 50.0, -4.0, {1780000000},
-        &availability, &diagnostic));
+    CHECK(!services.PreflightEnvironment("org.opencpn.iweather-routing", 50.0,
+                                         -4.0, {1780000000}, &availability,
+                                         &diagnostic));
     CHECK(!diagnostic.empty());
 
     auto blocking_request = request;
@@ -518,17 +506,37 @@ int main() {
         {"Runtime blocking test",
          {0.0, 10.0, 20.0, 40.0},
          {0.0, 40.0, 90.0, 160.0, 180.0},
-         {0.0, 0.0,  0.0,  0.0,  0.0, 0.0, 3.86, 5.47, 3.92, 3.76,
+         {0.0, 0.0,  0.0,  0.0,  0.0,  0.0, 3.86, 5.47, 3.92, 3.76,
           0.0, 3.98, 6.18, 5.30, 4.90, 0.0, 2.33, 3.99, 3.60, 3.33}});
     auto invalid_blocking_request = blocking_request;
     invalid_blocking_request.polars.front().boat_speeds_knots.front() =
         std::numeric_limits<double>::quiet_NaN();
     ppm::RoutingOutcome invalid_outcome;
     diagnostic.clear();
-    CHECK(!services.CalculateRouteBlocking(
-        "org.opencpn.iweather-routing", std::move(invalid_blocking_request),
-        &invalid_outcome, &diagnostic));
+    CHECK(!services.CalculateRouteBlocking("org.opencpn.iweather-routing",
+                                           std::move(invalid_blocking_request),
+                                           &invalid_outcome, &diagnostic));
     CHECK(diagnostic == "invalid or unbounded polar grid");
+
+    ppm::RoutingPassageRequest invalid_passage;
+    invalid_passage.route = blocking_request;
+    invalid_passage.gates = {{"only", "Only gate", 50.0, -4.0}};
+    diagnostic.clear();
+    CHECK(!services.CalculatePassageBlocking("org.opencpn.iweather-routing",
+                                             std::move(invalid_passage),
+                                             &invalid_outcome, &diagnostic));
+    CHECK(diagnostic == "passage routing requires 2-64 gates");
+
+    ppm::RoutingPassageRequest passage;
+    passage.route = blocking_request;
+    passage.gates = {{"start", "Start", 50.0, -4.0},
+                     {"gate", "Intermediate gate", 50.025, -3.975},
+                     {"finish", "Finish", 50.05, -3.95}};
+    diagnostic.clear();
+    CHECK(!services.CalculatePassageBlocking("org.opencpn.iweather-routing",
+                                             std::move(passage),
+                                             &invalid_outcome, &diagnostic));
+    CHECK(!diagnostic.empty());
 
     std::array<bool, 2> blocking_results{true, true};
     std::array<std::string, 2> blocking_diagnostics;
@@ -562,10 +570,10 @@ int main() {
       author_root / "packages" / author_package_id;
   fs::create_directories(author_package_root / "component", error);
   CHECK(!error);
-  fs::copy_file(PPM_TEST_API_V03_WASM,
-                author_package_root / "component" /
-                    "portable-plugin-template.wasm",
-                fs::copy_options::overwrite_existing, error);
+  fs::copy_file(
+      PPM_TEST_API_V03_WASM,
+      author_package_root / "component" / "portable-plugin-template.wasm",
+      fs::copy_options::overwrite_existing, error);
   CHECK(!error);
   fs::create_directories(author_package_root / "ui", error);
   CHECK(!error);
@@ -573,35 +581,31 @@ int main() {
                 author_package_root / "ui" / "template.ui.json",
                 fs::copy_options::overwrite_existing, error);
   CHECK(!error);
-  CHECK(Write(
-      author_package_root / "manifest.json",
-      "{"
-      "\"format_version\":1,"
-      "\"id\":\"org.opencpn.portable-template\","
-      "\"name\":\"Portable Plugin Template\","
-      "\"version\":\"0.1.0\","
-      "\"component\":\"component/portable-plugin-template.wasm\","
-      "\"runtime\":\">=0.1.0 <0.2.0\","
-      "\"portable_api\":\">=0.3.0 <0.4.0\","
-      "\"portable_world\":\"plugin\","
-      "\"surfaces\":{\"template.main\":\"ui/template.ui.json\"},"
-      "\"permissions\":[\"ui.commands\",\"settings.read-write\","
-      "\"storage.private\",\"overlay.submit\",\"timers.schedule\","
-      "\"plugin.rpc.provide\"],"
-      "\"development\":true"
-      "}"));
+  CHECK(Write(author_package_root / "manifest.json",
+              "{"
+              "\"format_version\":1,"
+              "\"id\":\"org.opencpn.portable-template\","
+              "\"name\":\"Portable Plugin Template\","
+              "\"version\":\"0.1.0\","
+              "\"component\":\"component/portable-plugin-template.wasm\","
+              "\"runtime\":\">=0.1.0 <0.2.0\","
+              "\"portable_api\":\">=0.3.0 <0.4.0\","
+              "\"portable_world\":\"plugin\","
+              "\"surfaces\":{\"template.main\":\"ui/template.ui.json\"},"
+              "\"permissions\":[\"ui.commands\",\"settings.read-write\","
+              "\"storage.private\",\"overlay.submit\",\"timers.schedule\","
+              "\"plugin.rpc.provide\"],"
+              "\"development\":true"
+              "}"));
   actions.clear();
   std::atomic_int author_surfaces{0};
   std::atomic_int author_responses{0};
   {
-    ppm::RuntimeEngine author(author_root.string(), register_action,
-                              remove_actions, []() {},
-                              [&](std::function<void()> task) {
-                                ui_loop.Post(std::move(task));
-                              });
+    ppm::RuntimeEngine author(
+        author_root.string(), register_action, remove_actions, []() {},
+        [&](std::function<void()> task) { ui_loop.Post(std::move(task)); });
     author.SetSurfaceOpenedCallback(
-        [&](const std::string& id,
-            const ppm::DeclarativeSurface& surface) {
+        [&](const std::string& id, const ppm::DeclarativeSurface& surface) {
           if (id == author_package_id && surface.id == "template.main")
             ++author_surfaces;
         });
@@ -618,9 +622,8 @@ int main() {
     author.SetAuthorUiRequestCallback(
         [&](const std::string& id, const std::string& operation,
             const std::string&, std::string* response) {
-          if (id != author_package_id ||
-              (operation != "actions.set-state" &&
-               operation != "actions.unregister"))
+          if (id != author_package_id || (operation != "actions.set-state" &&
+                                          operation != "actions.unregister"))
             return -1;
           *response = "{}";
           return 0;
@@ -642,8 +645,8 @@ int main() {
     CHECK(author.WaitForIdle(author_package_id, std::chrono::seconds(2)));
     CHECK(ui_loop.WaitIdle(std::chrono::seconds(2)));
     CHECK(author_surfaces == 1);
-    CHECK(author.HandleSurfaceEvent(author_package_id, "template.main",
-                                    "hello", "{}"));
+    CHECK(author.HandleSurfaceEvent(author_package_id, "template.main", "hello",
+                                    "{}"));
     CHECK(author.WaitForIdle(author_package_id, std::chrono::seconds(2)));
     CHECK(ui_loop.WaitIdle(std::chrono::seconds(2)));
     CHECK(author_responses == 1);

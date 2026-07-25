@@ -21,9 +21,33 @@ struct RoutingRequest {
   std::vector<RoutingPolar> polars;
 };
 
+struct RoutingGate {
+  std::string id;
+  std::string name;
+  double latitude = 0.0;
+  double longitude = 0.0;
+};
+
+struct RoutingPassageRequest {
+  RoutingRequest route;
+  std::vector<RoutingGate> gates;
+  std::int64_t departure_offset_seconds = 0;
+};
+
 struct RoutingInspectionLine {
   std::int64_t unix_time = 0;
   std::vector<ocpn_portable_route_point> points;
+};
+
+struct RoutingPassageLeg {
+  std::uint32_t start_gate_index = 0;
+  std::uint32_t end_gate_index = 0;
+  std::size_t point_offset = 0;
+  std::size_t point_count = 0;
+  std::int64_t departure_unix_time = 0;
+  std::int64_t arrival_unix_time = 0;
+  double distance_nautical_miles = 0.0;
+  std::uint32_t states_examined = 0;
 };
 
 struct RoutingOutcome {
@@ -49,6 +73,9 @@ struct RoutingOutcome {
   std::uint32_t propulsion_transitions = 0;
   std::uint8_t comfort_level = 0;
   std::uint8_t metrics_available = 0;
+  std::int64_t departure_unix_time = 0;
+  std::vector<RoutingPassageLeg> passage_legs;
+  std::uint64_t validation_samples = 0;
 };
 
 }  // namespace ppm

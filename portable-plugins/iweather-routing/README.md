@@ -51,6 +51,12 @@ The host-rendered route form can resolve start and destination values from the
 live vessel position, OpenCPN waypoints (copied as stable GUID/name/coordinate
 records), the latest chart cursor position, or manually entered coordinates.
 No native navigation object or pointer crosses the component boundary.
+An existing OpenCPN route can also be loaded directly from the workbench's
+**Routings** menu. On stock OpenCPN 5.14, right-clicking a route on the chart
+offers **Weather Route Analysis…** while iWeatherRouting is enabled. Both
+entry points copy the selected route as value records and preserve every
+waypoint, in order, as a mandatory routing gate; two-point routes use the same
+workflow without an unnecessary multi-leg distinction.
 
 Chart safety is a host-owned value service rather than a renderer or modified
 OpenCPN-core dependency. On stock OpenCPN 5.14 the Portable Plugin Manager
@@ -67,13 +73,29 @@ checked. If the user requires authoritative chart safety, absent or incomplete
 semantic/depth coverage fails closed. GSHHS is retained only as an explicitly
 advisory fallback when authoritative validation is disabled.
 
-Completed searches can return bounded retained isochrones and exact predecessor
-traces. API 0.2 tells the component whether either overlay was requested:
-isochrones are generated incrementally at the declared interval and predecessor
-traces are omitted unless route-to-cursor inspection is enabled. The host can
-draw the selected route's isochrones, show the trace nearest the chart cursor
-and interpolate a boat marker at iGRIB's displayed forecast time. These are
-inspection aids, not evidence that unselected space or a chart segment is safe.
+Completed searches return bounded retained isochrones and exact predecessor
+traces independently of their current visibility. The Runtime Host captures a
+fine outer-front representation for every completed solver layer, so both
+overlays can be toggled after calculation without repeating the route. For a
+multi-waypoint passage, traces on later legs are prefixed with the completed
+earlier legs and therefore run from the overall passage origin to the selected
+front. The host can draw the selected route's isochrones, show the trace nearest
+the chart cursor and interpolate a boat marker at iGRIB's displayed forecast
+time. These are inspection aids, not evidence that unselected space or a chart
+segment is safe.
+
+Isochrone presentation is independent of solver resolution. **Navigation**
+automatically thins minor fronts according to passage duration and chart scale,
+**Analysis** exposes every retained layer, and **Minimal** keeps major,
+selected-GRIB-time and final fronts. A custom display can set its interval,
+major-contour interval, width, opacity, uniform or elapsed-time colour sequence,
+time labels, cursor-focus fading and diagnostic front points. Repeated
+equal-time components remain disconnected, major contours are emphasized, and
+the closest retained contour to iGRIB's displayed time is highlighted. These
+settings persist per package and never alter, discard or recompute routing
+states. Day, dusk and night palettes use the same display plan in software,
+legacy OpenGL and the wxDC chart frame presented by OpenCPN 5.15's Vulkan
+renderer.
 
 The maximum-state setting bounds feasible labels retained after spatial,
 tack, incoming-heading and propulsion reduction; transient heading candidates
@@ -151,14 +173,31 @@ but it is not a safety-certified navigator and does not import native SuperCPN
 or legacy Weather Routing objects into Wasm.
 
 When departure comparison is enabled, the Results tab opens automatically and
-lists every attempted departure, including failures. The configured range is
-applied on both sides of the selected time and progress reports completed,
-active and queued searches together with each solver stage. It reports the best
-(shortest elapsed) passage, offset, UTC departure/ETA, elapsed time, distance,
-average boat speed and SOG, maximum SOG, wind/current statistics, tack count,
-motor time/fuel/mode changes when propulsion is enabled, the existing Weather
-Routing-style subjective comfort category, retained
-isochrone count and state. Selecting any successful row immediately makes it
-the emphasized chart route and changes its isochrones, cursor traces, forecast
-time boat marker and GPX export; the other successful routes remain thin
-comparison overlays.
+lists every attempted departure, including failures. A host-owned coordinator
+retains rows in chronological order while scheduling the nominal departure
+first, applies the CPU/memory-safe worker limit, isolates a trapped candidate,
+gives every cancelled candidate a terminal state and deterministically selects
+only a complete independently validated passage. The configured range is
+applied on both sides of the selected time and each live row reports queued,
+preflight, forward-isocrone, reverse-recovery, graph-fallback, validation,
+complete, failed or cancelled progress as appropriate.
+
+The initial table is deliberately compact: best marker, offset, departure, ETA,
+elapsed time, distance and state. Selecting a successful row exposes average
+boat speed and SOG, maximum SOG, wind/current statistics, tack count, motor
+time/fuel/mode changes, comfort category, retained isochrones, examined states
+and validation counts in an expandable details panel. It also immediately
+makes that passage the emphasized chart route and changes its isochrones,
+cursor traces, forecast-time boat marker and GPX export; other successful
+routes remain thin comparison overlays.
+
+The optional stability corridor is calculated on demand and cached for the
+current result set. It requires at least three complete independently validated
+candidates, excludes routes outside the configured elapsed-time penalty,
+resamples and clusters geometrically similar routes into distinct families,
+then analyses only the family containing the selected row. The outer and inner
+bands show configurable 40% and 70% route-family agreement by default. Every
+agreement cell is batch-checked through the manager-owned chart-safety service;
+unsafe or unresolved cells fail closed and are omitted. A medoid
+representative route is drawn with the bands. The same renderer-neutral cell
+plan is consumed by software, OpenGL and Vulkan-presented overlays.

@@ -8,8 +8,11 @@ by the bridge smoke test.
 iWeatherRouting and capability-lab packages. Host services, lifecycle,
 filtered events, plugin messages and callback sinks are separate interfaces.
 Most packages select `plugin-world`; route engines select the strictly larger
-`weather-routing-plugin-world`. The runtime's bounded capability event broker
-feeds both the `0.1` compatibility adapter and the typed `0.2` sinks.
+`weather-routing-plugin-world`. Engines which preserve tactical state through
+an ordered collection of pass-through gates select the additive
+`passage-weather-routing-plugin-world`; the original single-leg export remains
+present for compatibility. The runtime's bounded capability event broker feeds
+both the `0.1` compatibility adapter and the typed `0.2` sinks.
 
 `0.3` is the general plugin-author profile. It adds stateful toolbar and chart
 context actions, host-owned declarative surfaces, scoped files, bounded

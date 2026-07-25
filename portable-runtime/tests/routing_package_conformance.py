@@ -40,6 +40,8 @@ def main():
         manifest = json.loads((destination / "manifest.json").read_text())
         if manifest.get("id") != "org.opencpn.iweather-routing":
             raise RuntimeError("package identity is incorrect")
+        if manifest.get("portable_world") != "passage-weather-routing-plugin":
+            raise RuntimeError("package does not select the continuous passage world")
         required = {
             "weather-routing.compute",
             "environment.consume",
@@ -77,7 +79,8 @@ def main():
             if isinstance(item, dict) and item.get("id")
         }
         required_menu_ids = {
-            "new-routing", "edit-routing", "compute-routing", "stop-routing",
+            "new-routing", "load-opencpn-route", "edit-routing",
+            "compute-routing", "stop-routing",
             "export-gpx", "refresh-positions", "show-configuration",
             "send-to-opencpn",
             "show-results", "show-isochrones", "route-to-cursor",
@@ -92,9 +95,12 @@ def main():
             for action in manager.get("actions", [])
             if isinstance(action, dict)
         }
-        if not {"compute-routing", "edit-routing", "export-gpx"}.issubset(
-                manager_actions):
-            raise RuntimeError("routing UI omits manager actions")
+        if not {
+                "new-routing", "compute-routing", "edit-routing",
+                "export-gpx", "send-to-opencpn",
+        }.issubset(manager_actions):
+            raise RuntimeError(
+                "routing UI omits new/save routing workflow actions")
         if not manager.get("positions", {}).get("columns") or not \
                 manager.get("routings", {}).get("columns"):
             raise RuntimeError("routing UI omits manager table columns")
@@ -113,6 +119,7 @@ def main():
             "refresh-positions",
             "use-opencpn-route",
             "opencpn-route",
+            "reverse-opencpn-route",
             "departure-utc",
             "vessel-performance-file",
             "vessel-performance-status",
@@ -149,15 +156,20 @@ def main():
             "destination-tolerance",
             "compare-departures",
             "departure-window",
+            "departure-spacing",
             "departure-workers",
             "route-metrics",
+            "candidate-details",
             "route-schedule",
             "validation-diagnostics",
             "adaptive-headings",
             "refined-heading-step",
             "spatial-cell",
             "labels-per-cell",
+            "isochrone-display-preset",
+            "isochrone-display-settings",
             "show-stability-corridor",
+            "stability-corridor-settings",
             "show-route-wind",
             "export-gpx",
             "send-to-opencpn",
@@ -172,7 +184,7 @@ def main():
             for control in surface.get("controls", [])
             if isinstance(control, dict) and control.get("id")
         }
-        if len(controls_by_id["departure-results"].get("columns", [])) != 21 or \
+        if len(controls_by_id["departure-results"].get("columns", [])) != 7 or \
                 len(controls_by_id["route-schedule"].get("columns", [])) != 9:
             raise RuntimeError("routing UI omits its package-owned table layout")
         services = manifest.get("requires", [])

@@ -33,14 +33,15 @@ struct PortableNavigationRoute {
 
 class PortableWeatherRoutingHost {
 public:
-  using CalculateRoute =
-      std::function<bool(ppm::RoutingRequest, ppm::RoutingOutcome*,
-                         std::string*)>;
+  using CalculateRoute = std::function<bool(
+      ppm::RoutingRequest, ppm::RoutingOutcome*, std::string*)>;
+  using CalculatePassage = std::function<bool(
+      ppm::RoutingPassageRequest, ppm::RoutingOutcome*, std::string*)>;
   using BeginRouteAttempt = std::function<bool(wxString*)>;
 
   PortableWeatherRoutingHost(
       wxWindow* parent, wxFileConfig* config, CalculateRoute calculate_route,
-      BeginRouteAttempt begin_route_attempt,
+      CalculatePassage calculate_passage, BeginRouteAttempt begin_route_attempt,
       std::function<void()> cancel_routes, const wxString& package_root,
       const wxString& plugin_id, const wxString& surface_resource,
       std::function<wxString()> dataset_summary,
@@ -59,8 +60,11 @@ public:
       double start_latitude, double start_longitude);
   ~PortableWeatherRoutingHost();
   bool Show(wxString* error);
+  bool ShowRouteAnalysis(const wxString& route_id, wxString* error);
   bool Render(wxDC& dc, PlugIn_ViewPort* viewport);
   bool RenderGL(PlugIn_ViewPort* viewport);
+  void SetColorScheme(int scheme);
+  void CursorChanged();
   void ReportProgress(unsigned percent, const wxString& message);
   bool Cancelled() const;
   void Shutdown();

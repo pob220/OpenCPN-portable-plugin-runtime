@@ -121,16 +121,14 @@ public:
       const std::string&, const std::string&, const std::string&,
       const std::string&, const std::string&)>;
   using RoutingProgress =
-      std::function<void(const std::string&, std::uint8_t,
-                         const std::string&)>;
-  using RoutingCompleted =
-      std::function<void(const std::string&, bool, RoutingOutcome,
-                         const std::string&)>;
+      std::function<void(const std::string&, std::uint8_t, const std::string&)>;
+  using RoutingCompleted = std::function<void(
+      const std::string&, bool, RoutingOutcome, const std::string&)>;
   using PluginMessageSender =
       std::function<void(const std::string&, const std::string&)>;
-  using AuthorUiRequest = std::function<int(
-      const std::string&, const std::string&, const std::string&,
-      std::string*)>;
+  using AuthorUiRequest =
+      std::function<int(const std::string&, const std::string&,
+                        const std::string&, std::string*)>;
 
   RuntimeEngine(std::string storage_root, RegisterAction register_action,
                 RemoveActions remove_actions, StateChanged state_changed,
@@ -177,6 +175,10 @@ public:
   bool CalculateRouteBlocking(const std::string& package_id,
                               RoutingRequest request, RoutingOutcome* outcome,
                               std::string* diagnostic);
+  bool CalculatePassageBlocking(const std::string& package_id,
+                                RoutingPassageRequest request,
+                                RoutingOutcome* outcome,
+                                std::string* diagnostic);
   bool BeginRouteAttempt(const std::string& package_id,
                          std::string* diagnostic);
   bool PreflightEnvironment(const std::string& package_id, double latitude,
@@ -205,8 +207,7 @@ public:
                            std::uint32_t canvas_index, std::int32_t x_pixels,
                            std::int32_t y_pixels, double latitude,
                            double longitude, bool has_position,
-                           std::int32_t wheel_rotation,
-                           std::uint32_t modifiers,
+                           std::int32_t wheel_rotation, std::uint32_t modifiers,
                            const std::string& hit_package_id,
                            const std::string& hit_scene_id,
                            const std::string& hit_primitive_id);

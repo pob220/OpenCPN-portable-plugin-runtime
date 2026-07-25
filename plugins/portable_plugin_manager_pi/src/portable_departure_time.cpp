@@ -6,6 +6,7 @@
 #include <ctime>
 #include <filesystem>
 #include <system_error>
+#include <thread>
 
 #include <wx/utils.h>
 
@@ -234,13 +235,36 @@ wxString FormatPortableDepartureTime(int64_t unix_time,
                           PortableDepartureZoneLabel(zone, unix_time));
 }
 
-std::vector<int64_t> PortableDepartureOffsetsSeconds(int range_hours,
-                                                     int spacing_hours) {
-  if (range_hours <= 0 || spacing_hours <= 0) return {0};
-  const int64_t range_seconds = static_cast<int64_t>(range_hours) * 3600;
-  const int64_t spacing_seconds = static_cast<int64_t>(spacing_hours) * 3600;
+PortableRoutingTimeStep PortableRoutingTimeStepFromSeconds(int seconds) {
+  const int bounded =
+      std::clamp(seconds, kPortableMinimumRoutingTimeStepSeconds,
+                 kPortableMaximumRoutingTimeStepSeconds);
+  const int rounded_minutes = std::clamp(
+      (bounded + 30) / 60, kPortableMinimumRoutingTimeStepSeconds / 60,
+      kPortableMaximumRoutingTimeStepSeconds / 60);
+  return {rounded_minutes / 60, rounded_minutes % 60};
+}
+
+int PortableRoutingTimeStepSeconds(int hours, int minutes) {
+  if (hours < 0 || hours > 6 || minutes < 0 || minutes > 59) return 0;
+  const int seconds = hours * 60 * 60 + minutes * 60;
+  if (seconds < kPortableMinimumRoutingTimeStepSeconds ||
+      seconds > kPortableMaximumRoutingTimeStepSeconds)
+    return 0;
+  return seconds;
+}
+
+std::vector<int64_t> PortableDepartureOffsetsSeconds(
+    int range_minutes, int spacing_minutes, size_t maximum_candidates) {
+  if (range_minutes <= 0 || spacing_minutes <= 0) return {0};
+  const int64_t range_seconds = static_cast<int64_t>(range_minutes) * 60;
+  const int64_t spacing_seconds = static_cast<int64_t>(spacing_minutes) * 60;
   std::vector<int64_t> offsets;
   const int64_t alternatives = range_seconds / spacing_seconds;
+  const uint64_t candidate_count =
+      static_cast<uint64_t>(alternatives) * 2U + 1U;
+  if (maximum_candidates == 0 || candidate_count > maximum_candidates)
+    return {};
   offsets.reserve(static_cast<size_t>(alternatives * 2 + 1));
   for (int64_t step = -alternatives; step <= alternatives; ++step)
     offsets.push_back(step * spacing_seconds);
@@ -259,4 +283,42 @@ std::vector<size_t> PortableDepartureExecutionOrder(
         return offsets_seconds[lhs] < offsets_seconds[rhs];
       });
   return order;
+}
+
+unsigned PortableDepartureWorkerCount(unsigned requested_maximum,
+                                      unsigned candidate_count,
+                                      unsigned hardware_concurrency,
+                                      uint64_t physical_memory_bytes) {
+  if (candidate_count == 0) return 0;
+  if (hardware_concurrency == 0)
+    hardware_concurrency = std::thread::hardware_concurrency();
+  hardware_concurrency = std::max(1U, hardware_concurrency);
+#if defined(_SC_PAGESIZE)
+  if (physical_memory_bytes == 0) {
+    long pages = 0;
+#if defined(_SC_AVPHYS_PAGES)
+    pages = sysconf(_SC_AVPHYS_PAGES);
+#elif defined(_SC_PHYS_PAGES)
+    pages = sysconf(_SC_PHYS_PAGES);
+#endif
+    const long page_size = sysconf(_SC_PAGESIZE);
+    if (pages > 0 && page_size > 0)
+      physical_memory_bytes =
+          static_cast<uint64_t>(pages) * static_cast<uint64_t>(page_size);
+  }
+#endif
+  unsigned memory_limit = 4;
+  constexpr uint64_t gibibyte = 1024ULL * 1024ULL * 1024ULL;
+  if (physical_memory_bytes != 0 &&
+      physical_memory_bytes <= 1536ULL * 1024ULL * 1024ULL)
+    memory_limit = 1;
+  else if (physical_memory_bytes != 0 &&
+           physical_memory_bytes <= 4ULL * gibibyte)
+    memory_limit = 2;
+  const unsigned safe_limit =
+      std::max(1U, std::min(hardware_concurrency, memory_limit));
+  const unsigned user_limit =
+      requested_maximum == 0 ? safe_limit : requested_maximum;
+  return std::max(1U, std::min({user_limit, safe_limit,
+                                static_cast<unsigned>(candidate_count)}));
 }

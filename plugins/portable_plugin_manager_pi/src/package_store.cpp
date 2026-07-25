@@ -162,8 +162,7 @@ bool IsWindowsDeviceName(const std::string& component) {
                    });
     return result;
   }();
-  if (upper == "CON" || upper == "PRN" || upper == "AUX" ||
-      upper == "NUL") {
+  if (upper == "CON" || upper == "PRN" || upper == "AUX" || upper == "NUL") {
     return true;
   }
   if (upper.size() == 4 &&
@@ -196,9 +195,8 @@ bool CheckedArchivePath(const char* raw, std::string* result,
   while (start <= value.size()) {
     const std::size_t separator = value.find('/', start);
     const std::string component =
-        value.substr(start, separator == std::string::npos
-                                ? std::string::npos
-                                : separator - start);
+        value.substr(start, separator == std::string::npos ? std::string::npos
+                                                           : separator - start);
     if (component.empty() || component == "." || component == ".." ||
         component.back() == ' ' || component.back() == '.' ||
         IsWindowsDeviceName(component)) {
@@ -222,7 +220,7 @@ bool CheckedArchivePath(const char* raw, std::string* result,
 }
 
 class JsonShapeValidator {
- public:
+public:
   explicit JsonShapeValidator(const std::string& input) : input_(input) {}
 
   bool Validate(std::string* diagnostic) {
@@ -236,7 +234,7 @@ class JsonShapeValidator {
     return true;
   }
 
- private:
+private:
   bool Number() {
     const std::size_t start = cursor_;
     if (cursor_ < input_.size() && input_[cursor_] == '-') ++cursor_;
@@ -289,8 +287,7 @@ class JsonShapeValidator {
     }
   }
 
-  bool String(std::string* output, bool object_key,
-              std::string* diagnostic) {
+  bool String(std::string* output, bool object_key, std::string* diagnostic) {
     if (cursor_ >= input_.size() || input_[cursor_++] != '"') return false;
     output->clear();
     while (cursor_ < input_.size()) {
@@ -310,8 +307,7 @@ class JsonShapeValidator {
         if (escaped == 'u') {
           if (cursor_ + 4 > input_.size()) return false;
           for (int count = 0; count < 4; ++count) {
-            if (!std::isxdigit(
-                    static_cast<unsigned char>(input_[cursor_++]))) {
+            if (!std::isxdigit(static_cast<unsigned char>(input_[cursor_++]))) {
               return false;
             }
           }
@@ -496,9 +492,9 @@ bool ParseJson(const std::string& bytes, wxJSONValue* document,
 }
 
 bool VerifySignature(const std::string& signature_bytes,
-                     const std::string& checksums,
-                     const fs::path& trust_root, bool development,
-                     bool developer_mode, std::string* diagnostic) {
+                     const std::string& checksums, const fs::path& trust_root,
+                     bool development, bool developer_mode,
+                     std::string* diagnostic) {
   if (signature_bytes.empty()) {
     if (development && developer_mode) return true;
     *diagnostic = "package is unsigned";
@@ -510,8 +506,7 @@ bool VerifySignature(const std::string& signature_bytes,
       signature["algorithm"].AsString() != "Ed25519" ||
       !signature["signed"].IsString() ||
       signature["signed"].AsString() != "checksums.sha256" ||
-      !signature["key_id"].IsString() ||
-      !signature["signature"].IsString()) {
+      !signature["key_id"].IsString() || !signature["signature"].IsString()) {
     *diagnostic = "unsupported signature document";
     return false;
   }
@@ -520,8 +515,7 @@ bool VerifySignature(const std::string& signature_bytes,
     *diagnostic = "invalid signing key identifier";
     return false;
   }
-  if (key_id.rfind("org.opencpn.development.", 0) == 0 &&
-      !developer_mode) {
+  if (key_id.rfind("org.opencpn.development.", 0) == 0 && !developer_mode) {
     *diagnostic = "development signing keys are disabled";
     return false;
   }
@@ -539,9 +533,8 @@ bool VerifySignature(const std::string& signature_bytes,
     *diagnostic = "trusted key is not Ed25519";
     return false;
   }
-  const wxMemoryBuffer decoded =
-      wxBase64Decode(signature["signature"].AsString(),
-                     wxBase64DecodeMode_Strict);
+  const wxMemoryBuffer decoded = wxBase64Decode(
+      signature["signature"].AsString(), wxBase64DecodeMode_Strict);
   if (decoded.GetDataLen() != 64) {
     *diagnostic = "invalid Ed25519 signature encoding";
     return false;
@@ -551,12 +544,11 @@ bool VerifySignature(const std::string& signature_bytes,
   if (!context ||
       EVP_DigestVerifyInit(context.get(), nullptr, nullptr, nullptr,
                            public_key.get()) != 1 ||
-      EVP_DigestVerify(
-          context.get(),
-          static_cast<const unsigned char*>(decoded.GetData()),
-          decoded.GetDataLen(),
-          reinterpret_cast<const unsigned char*>(checksums.data()),
-          checksums.size()) != 1) {
+      EVP_DigestVerify(context.get(),
+                       static_cast<const unsigned char*>(decoded.GetData()),
+                       decoded.GetDataLen(),
+                       reinterpret_cast<const unsigned char*>(checksums.data()),
+                       checksums.size()) != 1) {
     *diagnostic = "Ed25519 signature verification failed";
     return false;
   }
@@ -567,14 +559,11 @@ bool ValidateManifestFields(ValidatedArchive* validated,
                             std::string* diagnostic) {
   wxJSONValue& manifest = validated->manifest;
   if (!manifest["format_version"].IsInt() ||
-      manifest["format_version"].AsInt() != 1 ||
-      !manifest["id"].IsString() || !manifest["name"].IsString() ||
-      !manifest["version"].IsString() ||
-      !manifest["component"].IsString() ||
-      !manifest["runtime"].IsString() ||
+      manifest["format_version"].AsInt() != 1 || !manifest["id"].IsString() ||
+      !manifest["name"].IsString() || !manifest["version"].IsString() ||
+      !manifest["component"].IsString() || !manifest["runtime"].IsString() ||
       !manifest["portable_api"].IsString() ||
-      !manifest["permissions"].IsArray() ||
-      !manifest["development"].IsBool()) {
+      !manifest["permissions"].IsArray() || !manifest["development"].IsBool()) {
     *diagnostic = "manifest has missing or mistyped required fields";
     return false;
   }
@@ -586,21 +575,19 @@ bool ValidateManifestFields(ValidatedArchive* validated,
   const bool portable_api_v01 = portable_api == ">=0.1.0 <0.2.0";
   const bool portable_api_v02 = portable_api == ">=0.2.0 <0.3.0";
   const bool portable_api_v03 = portable_api == ">=0.3.0 <0.4.0";
-  const wxString portable_world =
-      manifest["portable_world"].IsString()
-          ? manifest["portable_world"].AsString()
-          : "plugin";
-  const bool valid_world =
-      portable_world == "plugin" ||
-      portable_world == "weather-routing-plugin";
+  const wxString portable_world = manifest["portable_world"].IsString()
+                                      ? manifest["portable_world"].AsString()
+                                      : "plugin";
+  const bool valid_world = portable_world == "plugin" ||
+                           portable_world == "weather-routing-plugin" ||
+                           portable_world == "passage-weather-routing-plugin";
   std::string component;
   if (!IsSafeIdentifier(validated->id, true) ||
       !IsSemanticVersion(validated->version) || validated->name.empty() ||
       validated->name.size() > 256 ||
       manifest["runtime"].AsString() != ">=0.1.0 <0.2.0" ||
       (!portable_api_v01 && !portable_api_v02 && !portable_api_v03) ||
-      !valid_world ||
-      (portable_api_v01 && portable_world != "plugin") ||
+      !valid_world || (portable_api_v01 && portable_world != "plugin") ||
       ((portable_api_v02 || portable_api_v03) &&
        !manifest["portable_world"].IsString()) ||
       (portable_api_v03 && portable_world != "plugin") ||
@@ -618,8 +605,7 @@ bool ValidateManifestFields(ValidatedArchive* validated,
       *diagnostic = "manifest permission is not a string";
       return false;
     }
-    const std::string permission =
-        permissions[index].AsString().ToStdString();
+    const std::string permission = permissions[index].AsString().ToStdString();
     if (permission.empty() || !unique_permissions.insert(permission).second) {
       *diagnostic = "manifest permission is empty or duplicated";
       return false;
@@ -661,8 +647,7 @@ bool ValidateArchive(const fs::path& path, const fs::path& trust_root,
   std::uintmax_t expanded = 0;
   archive_entry* raw_entry = nullptr;
   int header_result = ARCHIVE_OK;
-  while ((header_result =
-              archive_read_next_header(input.get(), &raw_entry)) ==
+  while ((header_result = archive_read_next_header(input.get(), &raw_entry)) ==
          ARCHIVE_OK) {
     if (validated->entries.size() >= kMaxEntries) {
       *diagnostic = "too many archive entries";
@@ -703,8 +688,7 @@ bool ValidateArchive(const fs::path& path, const fs::path& trust_root,
       *diagnostic = "executable entry outside helpers";
       return false;
     }
-    validated->entries.emplace(name,
-                               EntryInfo{size, directory, executable});
+    validated->entries.emplace(name, EntryInfo{size, directory, executable});
     if (name == "manifest.json") {
       if (!ReadArchiveEntry(input.get(), kMaxManifestBytes,
                             &validated->manifest_bytes, diagnostic)) {
@@ -732,13 +716,11 @@ bool ValidateArchive(const fs::path& path, const fs::path& trust_root,
     *diagnostic = "archive expansion ratio exceeds policy";
     return false;
   }
-  if (validated->manifest_bytes.empty() ||
-      validated->checksum_bytes.empty()) {
+  if (validated->manifest_bytes.empty() || validated->checksum_bytes.empty()) {
     *diagnostic = "required package metadata is missing";
     return false;
   }
-  if (!ParseJson(validated->manifest_bytes, &validated->manifest,
-                 diagnostic) ||
+  if (!ParseJson(validated->manifest_bytes, &validated->manifest, diagnostic) ||
       !ParseChecksums(validated->checksum_bytes, &validated->checksums,
                       diagnostic)) {
     return false;
@@ -749,8 +731,7 @@ bool ValidateArchive(const fs::path& path, const fs::path& trust_root,
     return false;
   }
   if (!ValidateFileSet(*validated, diagnostic)) return false;
-  return VerifySignature(validated->signature_bytes,
-                         validated->checksum_bytes,
+  return VerifySignature(validated->signature_bytes, validated->checksum_bytes,
                          trust_root, validated->development, developer_mode,
                          diagnostic);
 }
@@ -768,9 +749,8 @@ fs::path UniquePath(const fs::path& parent, const std::string& prefix) {
   for (unsigned attempt = 0; attempt < 32; ++attempt) {
     const auto ticks =
         std::chrono::high_resolution_clock::now().time_since_epoch().count();
-    const fs::path candidate =
-        parent / (prefix + std::to_string(ticks) + "-" +
-                  std::to_string(random()));
+    const fs::path candidate = parent / (prefix + std::to_string(ticks) + "-" +
+                                         std::to_string(random()));
     if (!fs::exists(candidate)) return candidate;
   }
   return {};
@@ -784,8 +764,7 @@ bool ExtractValidated(const fs::path& archive_path,
   archive_entry* raw_entry = nullptr;
   std::array<unsigned char, 1024 * 1024> buffer{};
   int header_result = ARCHIVE_OK;
-  while ((header_result =
-              archive_read_next_header(input.get(), &raw_entry)) ==
+  while ((header_result = archive_read_next_header(input.get(), &raw_entry)) ==
          ARCHIVE_OK) {
     std::string name;
     if (!CheckedArchivePath(archive_entry_pathname(raw_entry), &name,
@@ -834,9 +813,8 @@ bool ExtractValidated(const fs::path& archive_path,
         return false;
       }
       output.write(reinterpret_cast<const char*>(buffer.data()), count);
-      if (!output ||
-          EVP_DigestUpdate(hash.get(), buffer.data(),
-                           static_cast<std::size_t>(count)) != 1) {
+      if (!output || EVP_DigestUpdate(hash.get(), buffer.data(),
+                                      static_cast<std::size_t>(count)) != 1) {
         *diagnostic = "failed while writing staged package";
         return false;
       }
@@ -850,15 +828,14 @@ bool ExtractValidated(const fs::path& archive_path,
       *diagnostic = "digest mismatch: " + name;
       return false;
     }
-    fs::permissions(
-        output_path,
-        metadata->second.executable
-            ? fs::perms::owner_read | fs::perms::owner_exec |
-                  fs::perms::group_read | fs::perms::group_exec |
-                  fs::perms::others_read | fs::perms::others_exec
-            : fs::perms::owner_read | fs::perms::group_read |
-                  fs::perms::others_read,
-        fs::perm_options::replace, error);
+    fs::permissions(output_path,
+                    metadata->second.executable
+                        ? fs::perms::owner_read | fs::perms::owner_exec |
+                              fs::perms::group_read | fs::perms::group_exec |
+                              fs::perms::others_read | fs::perms::others_exec
+                        : fs::perms::owner_read | fs::perms::group_read |
+                              fs::perms::others_read,
+                    fs::perm_options::replace, error);
     if (error) {
       *diagnostic = error.message();
       return false;
@@ -876,14 +853,13 @@ bool ExtractValidated(const fs::path& archive_path,
     if (!output) return false;
     output.close();
     std::error_code error;
-    fs::permissions(path,
-                    fs::perms::owner_read | fs::perms::group_read |
-                        fs::perms::others_read,
-                    fs::perm_options::replace, error);
+    fs::permissions(
+        path,
+        fs::perms::owner_read | fs::perms::group_read | fs::perms::others_read,
+        fs::perm_options::replace, error);
     return !error;
   };
-  if (!write_metadata(staging / "checksums.sha256",
-                      validated.checksum_bytes) ||
+  if (!write_metadata(staging / "checksums.sha256", validated.checksum_bytes) ||
       (!validated.signature_bytes.empty() &&
        !write_metadata(staging / "signature.json",
                        validated.signature_bytes))) {
@@ -909,11 +885,9 @@ bool ReadManifestIdentity(const fs::path& root, StoredPackage* package) {
   std::string diagnostic;
   wxJSONValue manifest;
   if (bytes.size() > kMaxManifestBytes ||
-      !ParseJson(bytes, &manifest, &diagnostic) ||
-      !manifest["id"].IsString() || !manifest["name"].IsString() ||
-      !manifest["version"].IsString() ||
-      !manifest["development"].IsBool() ||
-      !manifest["permissions"].IsArray()) {
+      !ParseJson(bytes, &manifest, &diagnostic) || !manifest["id"].IsString() ||
+      !manifest["name"].IsString() || !manifest["version"].IsString() ||
+      !manifest["development"].IsBool() || !manifest["permissions"].IsArray()) {
     return false;
   }
   package->id = manifest["id"].AsString().ToStdString();
@@ -924,8 +898,7 @@ bool ReadManifestIdentity(const fs::path& root, StoredPackage* package) {
   std::set<std::string> unique_permissions;
   for (int index = 0; index < permissions.Size(); ++index) {
     if (!permissions[index].IsString()) return false;
-    const std::string permission =
-        permissions[index].AsString().ToStdString();
+    const std::string permission = permissions[index].AsString().ToStdString();
     if (permission.empty() || !unique_permissions.insert(permission).second)
       return false;
     package->permissions.push_back(permission);
@@ -935,8 +908,7 @@ bool ReadManifestIdentity(const fs::path& root, StoredPackage* package) {
       EVP_MD_CTX_new(), &EVP_MD_CTX_free);
   std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
   unsigned digest_length = 0;
-  if (!hash ||
-      EVP_DigestInit_ex(hash.get(), EVP_sha256(), nullptr) != 1 ||
+  if (!hash || EVP_DigestInit_ex(hash.get(), EVP_sha256(), nullptr) != 1 ||
       EVP_DigestUpdate(hash.get(), bytes.data(), bytes.size()) != 1 ||
       EVP_DigestFinal_ex(hash.get(), digest.data(), &digest_length) != 1) {
     return false;
@@ -1038,8 +1010,7 @@ StoreResult PackageStore::Inspect(const fs::path& archive_path) const {
           {}};
 }
 
-StoreResult PackageStore::AuditInstalled(
-    const std::string& package_id) const {
+StoreResult PackageStore::AuditInstalled(const std::string& package_id) const {
   if (!IsSafeIdentifier(package_id, true))
     return Failure("invalid-id", "invalid package identifier");
   const fs::path package_root = PackagesRoot() / package_id;
@@ -1054,7 +1025,8 @@ StoreResult PackageStore::AuditInstalled(
   for (fs::recursive_directory_iterator item(package_root, error), end;
        !error && item != end; item.increment(error)) {
     if (++entry_count > kMaxEntries)
-      return Failure("integrity-failed", "installed package has too many entries");
+      return Failure("integrity-failed",
+                     "installed package has too many entries");
     const fs::file_status status = item->symlink_status(error);
     if (error) break;
     if (!fs::is_directory(status) && !fs::is_regular_file(status))
@@ -1107,14 +1079,12 @@ StoreResult PackageStore::AuditInstalled(
       !ParseChecksums(validated.checksum_bytes, &validated.checksums,
                       &diagnostic) ||
       !ValidateManifestFields(&validated, &diagnostic) ||
-      validated.id != package_id ||
-      !ValidateFileSet(validated, &diagnostic)) {
+      validated.id != package_id || !ValidateFileSet(validated, &diagnostic)) {
     if (diagnostic.empty()) diagnostic = "installed package identity mismatch";
     return Failure("integrity-failed", diagnostic);
   }
   if (validated.development && !developer_mode_)
-    return Failure("integrity-failed",
-                   "development packages are disabled");
+    return Failure("integrity-failed", "development packages are disabled");
   if (!VerifySignature(validated.signature_bytes, validated.checksum_bytes,
                        TrustRoot(), validated.development, developer_mode_,
                        &diagnostic)) {
@@ -1131,8 +1101,7 @@ StoreResult PackageStore::AuditInstalled(
     }
   }
   const fs::path component =
-      package_root /
-      validated.manifest["component"].AsString().ToStdString();
+      package_root / validated.manifest["component"].AsString().ToStdString();
   std::ifstream component_input(component, std::ios::binary);
   std::array<unsigned char, 4> wasm_magic{};
   component_input.read(reinterpret_cast<char*>(wasm_magic.data()),
@@ -1142,9 +1111,12 @@ StoreResult PackageStore::AuditInstalled(
     return Failure("integrity-failed",
                    "installed component is not WebAssembly");
   }
-  return {true, "integrity-verified",
-          "Installed package signature and file digests verified", package_id,
-          package_root, {}};
+  return {true,
+          "integrity-verified",
+          "Installed package signature and file digests verified",
+          package_id,
+          package_root,
+          {}};
 }
 
 StoreResult PackageStore::Install(const fs::path& archive_path, bool replace) {
@@ -1177,8 +1149,7 @@ StoreResult PackageStore::Install(const fs::path& archive_path, bool replace) {
     return Failure("digest-mismatch", diagnostic);
   }
   const fs::path component =
-      staging /
-      validated.manifest["component"].AsString().ToStdString();
+      staging / validated.manifest["component"].AsString().ToStdString();
   std::ifstream component_input(component, std::ios::binary);
   std::array<unsigned char, 4> wasm_magic{};
   component_input.read(reinterpret_cast<char*>(wasm_magic.data()),
@@ -1199,11 +1170,10 @@ StoreResult PackageStore::Install(const fs::path& archive_path, bool replace) {
   }
   if (fs::exists(destination)) {
     StoredPackage previous;
-    const std::string old_version =
-        ReadManifestIdentity(destination, &previous) ? previous.version
-                                                    : "unknown";
-    rollback = root_ / ".rollback" / validated.id /
-               RecoveryStamp(old_version);
+    const std::string old_version = ReadManifestIdentity(destination, &previous)
+                                        ? previous.version
+                                        : "unknown";
+    rollback = root_ / ".rollback" / validated.id / RecoveryStamp(old_version);
     fs::rename(destination, rollback, error);
     if (error) {
       if (previous_enabled) SetEnabled(validated.id, true);
@@ -1250,8 +1220,8 @@ StoreResult PackageStore::Remove(const std::string& package_id) {
     if (previous_enabled) SetEnabled(package_id, true);
     return Failure("remove-failed", error.message());
   }
-  return {true, "removed", "Package moved to recoverable storage", package_id,
-          {}, recovery};
+  return {true,       "removed", "Package moved to recoverable storage",
+          package_id, {},        recovery};
 }
 
 StoreResult PackageStore::Rollback(const std::string& package_id) {
@@ -1276,9 +1246,9 @@ StoreResult PackageStore::Rollback(const std::string& package_id) {
   if (!disabled.okay) return Failure("state-failed", disabled.message);
   if (fs::exists(destination)) {
     StoredPackage current;
-    const std::string version =
-        ReadManifestIdentity(destination, &current) ? current.version
-                                                   : "unknown";
+    const std::string version = ReadManifestIdentity(destination, &current)
+                                    ? current.version
+                                    : "unknown";
     displaced = rollback_root / RecoveryStamp(version);
     fs::rename(destination, displaced, error);
     if (error) {
@@ -1295,8 +1265,8 @@ StoreResult PackageStore::Rollback(const std::string& package_id) {
     if (previous_enabled) SetEnabled(package_id, true);
     return Failure("rollback-failed", error.message());
   }
-  return {true, "rolled-back", "Previous package version restored",
-          package_id, destination, displaced};
+  return {true,       "rolled-back", "Previous package version restored",
+          package_id, destination,   displaced};
 }
 
 StoreResult PackageStore::SetEnabled(const std::string& package_id,
@@ -1312,7 +1282,8 @@ StoreResult PackageStore::SetEnabled(const std::string& package_id,
   {
     std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
     output << (enabled ? "1\n" : "0\n");
-    if (!output) return Failure("state-failed", "could not write package state");
+    if (!output)
+      return Failure("state-failed", "could not write package state");
   }
   fs::rename(temporary, target, error);
   if (error) {
@@ -1321,8 +1292,11 @@ StoreResult PackageStore::SetEnabled(const std::string& package_id,
     fs::rename(temporary, target, error);
   }
   if (error) return Failure("state-failed", error.message());
-  return {true, enabled ? "enabled" : "disabled",
-          enabled ? "Package enabled" : "Package disabled", package_id, {},
+  return {true,
+          enabled ? "enabled" : "disabled",
+          enabled ? "Package enabled" : "Package disabled",
+          package_id,
+          {},
           {}};
 }
 
@@ -1343,10 +1317,9 @@ std::vector<StoredPackage> PackageStore::Installed(
     package.enabled = ReadEnabled(root_, package.id);
     result.push_back(std::move(package));
   }
-  std::sort(result.begin(), result.end(),
-            [](const auto& left, const auto& right) {
-              return left.id < right.id;
-            });
+  std::sort(
+      result.begin(), result.end(),
+      [](const auto& left, const auto& right) { return left.id < right.id; });
   if (error && diagnostic) *diagnostic = error.message();
   return result;
 }

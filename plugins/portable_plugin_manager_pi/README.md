@@ -65,6 +65,13 @@ The OpenGL compatibility surface rejects dimensions above 8192 pixels or
 OpenCPN. Vulkan never uses this conversion and therefore avoids its transient
 bitmap/upload cost.
 
+iWeatherRouting builds one renderer-independent isochrone display plan before
+drawing. Navigation, analysis, minimal and custom views therefore select the
+same retained contour times, major layers, forecast-time highlight, labels and
+cursor trace on software, OpenGL and Vulkan-presented chart frames. Display
+thinning is deliberately separate from solver retention and cannot change the
+selected route.
+
 Real-dataset tests have exercised both paths: Mesa OpenGL 4.6 on stock OpenCPN
 5.14 and the Intel Iris Xe Vulkan presenter in the separate OpenCPN 5.15
 working build. The Manager does not link to either renderer's private API.

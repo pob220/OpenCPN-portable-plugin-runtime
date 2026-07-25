@@ -17,9 +17,14 @@ jobs, batched chart coverage, retained overlays and a host-rendered
 environmental UI. iWeatherRouting runs a bounded forward-isocrone,
 reverse-isocrone-recovery and time-dependent graph cascade in Wasm and consumes
 time-indexed iGRIB batches plus host chart checks through typed interfaces.
-Stage-labelled progress keeps long recovery calculations observable and
-cancellable. Parallel departure comparisons use up to four isolated Wasmtime
-Stores sharing one compiled component and capability set. Signed target
+Stage-labelled progress identifies the active departure offset, waypoint leg
+and recovery phase while keeping long calculations cancellable. Each departure
+is one continuous passage invocation, retaining tack/gybe, propulsion mode,
+minimum-run and resource state through every pass-through gate before a final
+dense chronological and chart-safety replay. Minute-spaced departure
+comparisons are capped at 73 candidates and use a CPU- and memory-safe number
+of isolated Wasmtime Stores sharing one compiled component and capability set.
+Signed target
 helpers perform bounded ecCodes decode and
 environmental generation outside OpenCPN. Neither plugin depends on a native
 xGRIB or Weather Routing plugin. Current evidence and remaining gates are in
@@ -42,9 +47,11 @@ sends bounded value-only polar grids to the Wasm component for TWS/TWA
 interpolation. A conservative Nicholson 35 Mk1 polar is bundled as the initial
 test model; selecting another model is remembered in the isolated profile.
 The selected routing result owns its retained isochrones, cursor-inspection
-traces, forecast-time boat marker and GPX export. Variable-departure runs open
-a comparison table with passage and environmental metrics; selecting a row
-changes all of those views together.
+traces, forecast-time boat marker and GPX export. OpenCPN routes can be routed
+forwards or in reverse through every named waypoint; exports preserve those
+gate names. Variable-departure runs open a chronologically ordered comparison
+table with passage and environmental metrics; selecting a row changes all of
+those views together.
 
 ## Build and test
 

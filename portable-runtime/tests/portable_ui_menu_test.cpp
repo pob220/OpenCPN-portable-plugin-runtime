@@ -37,9 +37,10 @@ int main(int argc, char** argv) {
       if (item.checkable) ++checkable;
     }
   }
-  if (menus.size() != 5 || actions.size() != 18 || separators != 3 ||
+  if (menus.size() != 5 || actions.size() != 19 || separators != 3 ||
       checkable != 5 || !actions.count("close") ||
       !actions.count("refresh-positions") || !actions.count("new-routing") ||
+      !actions.count("load-opencpn-route") ||
       !actions.count("delete-routing") ||
       !actions.count("reset-routing") ||
       !actions.count("show-configuration") || !actions.count("about") ||
@@ -57,7 +58,7 @@ int main(int argc, char** argv) {
   }
 
   invalid = surface;
-  invalid["menus"][2]["items"][2]["id"] = "separator-command";
+  invalid["menus"][2]["items"][4]["id"] = "separator-command";
   if (ParsePortableUiMenus(invalid, &menus, &error)) {
     std::cerr << "menu separator command properties were accepted\n";
     return 1;

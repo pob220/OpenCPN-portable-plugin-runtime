@@ -1,8 +1,11 @@
 wit_bindgen::generate!({
     path: "../../../portable-runtime/contracts/0.2",
-    world: "weather-routing-plugin-world",
+    world: "passage-weather-routing-plugin-world",
 });
 
+use exports::opencpn::portable::passage_routing_engine::{
+    PassageLeg, PassageRequest, PassageResult,
+};
 use exports::opencpn::portable::weather_routing_engine::{
     PolarGrid, RouteEnvironmentPoint, RouteInspectionLine, RoutePoint, RouteRequest, RouteResult,
 };
@@ -73,6 +76,8 @@ const EARTH_NM: f64 = 3440.065;
 // Keep portable chart queries comfortably below the runtime's per-call
 // resource ceiling. The ordering of both probes and results is significant.
 const CHART_SEGMENT_BATCH_LIMIT: usize = 4096;
+const INSPECTION_LINE_LIMIT: usize = 8_000;
+const INSPECTION_POINT_LIMIT: usize = 160_000;
 
 #[derive(Clone)]
 struct Node {
@@ -92,6 +97,22 @@ struct Node {
     propulsion_transitions: u32,
     consecutive_wait_seconds: u32,
     reached_destination: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct VesselState {
+    incoming_heading: f64,
+    tack: i8,
+    propulsion_mode: u8,
+    motor_seconds: u64,
+    propulsion_run_seconds: u64,
+    propulsion_transitions: u32,
+}
+
+struct CalculatedRoute {
+    result: RouteResult,
+    final_state: VesselState,
+    validation_samples: u64,
 }
 
 type SearchCell = (i32, i32, i8, u8, i16);
@@ -208,13 +229,13 @@ const VALIDATION_SEGMENT_NM: f64 = 1.5;
 const MAX_PROVIDER_CURRENT_SPEED_KNOTS: f64 = 12.0 * 1.94384449;
 
 #[derive(Clone, Copy)]
-struct ProgressRange {
+struct ProgressRange<'a> {
     start: u8,
     end: u8,
-    prefix: &'static str,
+    prefix: &'a str,
 }
 
-impl ProgressRange {
+impl ProgressRange<'_> {
     fn report(self, percent: u8, message: &str) {
         let span = u16::from(self.end.saturating_sub(self.start));
         let scaled = u16::from(self.start) + span * u16::from(percent.min(100)) / 100;
@@ -224,6 +245,18 @@ impl ProgressRange {
             format!("{} — {message}", self.prefix)
         };
         host::routing_progress(scaled.min(100) as u8, &message);
+    }
+
+    fn subrange(self, start: u8, end: u8) -> Self {
+        let span = u16::from(self.end.saturating_sub(self.start));
+        let map = |percent: u8| {
+            (u16::from(self.start) + span * u16::from(percent.min(100)) / 100).min(100) as u8
+        };
+        Self {
+            start: map(start),
+            end: map(end),
+            prefix: self.prefix,
+        }
     }
 }
 
@@ -494,8 +527,13 @@ fn inspection_geometry(
     request: &RouteRequest,
     nodes: &[Node],
     frontier: &[usize],
+    include_traces: bool,
 ) -> (Vec<RouteInspectionLine>, Vec<RouteInspectionLine>) {
-    let sector_degrees = f64::from(request.heading_step_degrees).clamp(10.0, 20.0);
+    // Use a denser outer-front projection than the search heading fan.  This
+    // mirrors mature isochrone displays: the solver still retains several
+    // tactical labels per spatial cell, while visualization selects exactly
+    // one outer representative per fine angular sector.
+    let sector_degrees = (f64::from(request.heading_step_degrees) * 0.5).clamp(2.0, 10.0);
     let mut sectors: HashMap<i32, (f64, usize)> = HashMap::new();
     for &index in frontier {
         let node = &nodes[index];
@@ -534,8 +572,6 @@ fn inspection_geometry(
             nodes[*right].lon,
         ))
     });
-    representatives.truncate(36);
-
     let mut contours = Vec::new();
     let mut segment: Vec<RoutePoint> = Vec::new();
     let mut previous: Option<usize> = None;
@@ -557,8 +593,45 @@ fn inspection_geometry(
                 ),
             )
             .abs();
-            angular_gap > sector_degrees * 2.5
-                || distance_nm(nodes[old].lat, nodes[old].lon, node.lat, node.lon) > 80.0
+            let previous_radius = distance_nm(
+                request.start_latitude,
+                request.start_longitude,
+                nodes[old].lat,
+                nodes[old].lon,
+            );
+            let radius = distance_nm(
+                request.start_latitude,
+                request.start_longitude,
+                node.lat,
+                node.lon,
+            );
+            let cell = request.spatial_cell_nautical_miles;
+            let expected_arc = ((previous_radius + radius) * 0.5) * angular_gap.to_radians();
+            let chord = distance_nm(nodes[old].lat, nodes[old].lon, node.lat, node.lon);
+            // Angular ordering alone is not connectivity. In particular, two
+            // tactical branches can occupy neighbouring bearings while their
+            // predecessor lineages are on opposite sides of an obstruction.
+            // Keep the display conservative: a missing line is preferable to
+            // a long chord which visually asserts an untested passage.
+            let maximum_chord = (cell * 3.5).max(expected_arc * 1.75 + cell * 1.5);
+            let maximum_radial_jump = (cell * 3.0).max(expected_arc * 1.5 + cell);
+            let parents_disconnected =
+                nodes[old]
+                    .parent
+                    .zip(node.parent)
+                    .is_some_and(|(old_parent, parent)| {
+                        let parent_chord = distance_nm(
+                            nodes[old_parent].lat,
+                            nodes[old_parent].lon,
+                            nodes[parent].lat,
+                            nodes[parent].lon,
+                        );
+                        parent_chord > (cell * 4.0).max(chord * 2.0 + cell)
+                    });
+            angular_gap > (sector_degrees * 2.5).clamp(8.0, 18.0)
+                || chord > maximum_chord
+                || (previous_radius - radius).abs() > maximum_radial_jump
+                || parents_disconnected
         });
         if split && segment.len() >= 2 {
             contours.push(RouteInspectionLine {
@@ -581,14 +654,49 @@ fn inspection_geometry(
             points: segment,
         });
     }
-    let traces = representatives
-        .into_iter()
-        .map(|index| RouteInspectionLine {
-            unix_time: nodes[index].time,
-            points: route_chain(nodes, index),
-        })
-        .collect();
+    let traces = if include_traces {
+        representatives
+            .into_iter()
+            .map(|index| RouteInspectionLine {
+                unix_time: nodes[index].time,
+                points: route_chain(nodes, index),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     (contours, traces)
+}
+
+fn prefix_passage_traces(
+    passage_prefix: &[RoutePoint],
+    traces: &[RouteInspectionLine],
+) -> Vec<RouteInspectionLine> {
+    if passage_prefix.is_empty() {
+        return traces.to_vec();
+    }
+    traces
+        .iter()
+        .map(|trace| {
+            let mut points = passage_prefix.to_vec();
+            let skip = usize::from(points.last().zip(trace.points.first()).is_some_and(
+                |(left, right)| {
+                    left.unix_time == right.unix_time
+                        && distance_nm(
+                            left.latitude,
+                            left.longitude,
+                            right.latitude,
+                            right.longitude,
+                        ) <= 0.002
+                },
+            ));
+            points.extend(trace.points.iter().skip(skip).cloned());
+            RouteInspectionLine {
+                unix_time: trace.unix_time,
+                points,
+            }
+        })
+        .collect()
 }
 
 /// Keep inspection output bounded independently of the search-state limit.
@@ -727,6 +835,7 @@ fn route_environment(points: &[RoutePoint]) -> Result<Vec<RouteEnvironmentPoint>
 fn route_statistics(
     request: &RouteRequest,
     points: &[RoutePoint],
+    initial_state: VesselState,
 ) -> Result<RouteStatistics, String> {
     if points.len() < 2 {
         return Err("completed route has too few points for metrics".into());
@@ -757,10 +866,10 @@ fn route_statistics(
     let mut current_max: f64 = 0.0;
     let mut current_count = 0usize;
     let mut tacks = 0u32;
-    let mut previous_tack = 0i8;
-    let mut previous_mode = PROPULSION_SAIL;
+    let mut previous_tack = initial_state.tack;
+    let mut previous_mode = initial_state.propulsion_mode;
     let mut motor_seconds = 0u64;
-    let mut propulsion_run_seconds = 0u64;
+    let mut propulsion_run_seconds = initial_state.propulsion_run_seconds;
     let mut propulsion_transitions = 0u32;
     let mut comfort_level = 1u8;
     let mut motion_leg_count = 0usize;
@@ -1770,7 +1879,8 @@ fn validate_route_geometry(
     request: &RouteRequest,
     points: &[RoutePoint],
     require_destination: bool,
-) -> Result<u64, String> {
+    initial_state: VesselState,
+) -> Result<ValidationOutcome, String> {
     if !require_destination && points.len() == 1 {
         return if distance_nm(
             points[0].latitude,
@@ -1779,7 +1889,10 @@ fn validate_route_geometry(
             request.start_longitude,
         ) <= 0.002
         {
-            Ok(0)
+            Ok(ValidationOutcome {
+                samples: 0,
+                final_state: initial_state,
+            })
         } else {
             Err("independent validation found the wrong route start".into())
         };
@@ -1927,10 +2040,12 @@ fn validate_route_geometry(
         }
     }
 
-    let mut previous_tack = 0i8;
-    let mut previous_mode = PROPULSION_SAIL;
-    let mut motor_seconds = 0u64;
-    let mut propulsion_run_seconds = 0u64;
+    let mut previous_tack = initial_state.tack;
+    let mut previous_mode = initial_state.propulsion_mode;
+    let mut motor_seconds = initial_state.motor_seconds;
+    let mut propulsion_run_seconds = initial_state.propulsion_run_seconds;
+    let mut propulsion_transitions = initial_state.propulsion_transitions;
+    let mut incoming_heading = initial_state.incoming_heading;
     for (index, pair) in points.windows(2).enumerate() {
         let probe_range = &leg_ranges[index];
         let environment = &environments[probe_range.start + probe_range.len() / 2];
@@ -2039,12 +2154,16 @@ fn validate_route_geometry(
             )
         })?;
         previous_tack = motion.tack;
+        incoming_heading = kinematics.heading_through_water;
         propulsion_run_seconds = next_propulsion_run_seconds(
             previous_mode,
             motion.propulsion_mode,
             propulsion_run_seconds,
             leg_seconds,
         );
+        if motion.propulsion_mode != previous_mode {
+            propulsion_transitions = propulsion_transitions.saturating_add(1);
+        }
         previous_mode = motion.propulsion_mode;
         if motion.propulsion_mode != PROPULSION_SAIL {
             motor_seconds = motor_seconds.saturating_add(u64::from(leg_seconds));
@@ -2072,23 +2191,46 @@ fn validate_route_geometry(
             ));
         }
     }
-    Ok((environments.len()
-        + if request.avoid_unsafe_charts {
-            segments.len()
-        } else {
-            0
-        }) as u64)
+    Ok(ValidationOutcome {
+        samples: (environments.len()
+            + if request.avoid_unsafe_charts {
+                segments.len()
+            } else {
+                0
+            }) as u64,
+        final_state: VesselState {
+            incoming_heading,
+            tack: previous_tack,
+            propulsion_mode: previous_mode,
+            motor_seconds,
+            propulsion_run_seconds,
+            propulsion_transitions,
+        },
+    })
+}
+
+struct ValidationOutcome {
+    samples: u64,
+    final_state: VesselState,
 }
 
 /// The final acceptance boundary always performs a fresh dense replay of the
 /// exact delivered route, independent of any prefix certification used to
 /// avoid repeating known-invalid recovery work.
-fn validate_delivered_route(request: &RouteRequest, points: &[RoutePoint]) -> Result<u64, String> {
-    validate_route_geometry(request, points, true)
+fn validate_delivered_route(
+    request: &RouteRequest,
+    points: &[RoutePoint],
+    initial_state: VesselState,
+) -> Result<ValidationOutcome, String> {
+    validate_route_geometry(request, points, true, initial_state)
 }
 
-fn validate_route_prefix(request: &RouteRequest, points: &[RoutePoint]) -> Result<u64, String> {
-    validate_route_geometry(request, points, false)
+fn validate_route_prefix(
+    request: &RouteRequest,
+    points: &[RoutePoint],
+    initial_state: VesselState,
+) -> Result<ValidationOutcome, String> {
+    validate_route_geometry(request, points, false, initial_state)
 }
 
 fn usable_environment(
@@ -2401,12 +2543,13 @@ struct ReverseRecoveryOutcome {
 
 fn reverse_isochrone_recovery(
     request: &RouteRequest,
+    initial_state: VesselState,
     nodes: &mut Vec<Node>,
     examined: &mut u32,
     state_limit: u32,
     corridor: Option<&RouteCorridor>,
     invalid_prefixes: &mut BTreeSet<usize>,
-    progress: ProgressRange,
+    progress: ProgressRange<'_>,
     progress_base: u8,
     progress_span: u8,
 ) -> Result<ReverseRecoveryOutcome, String> {
@@ -2454,7 +2597,7 @@ fn reverse_isochrone_recovery(
         }
         let seed_indices = route_chain_indices(nodes, seed);
         let seed_chain = route_chain(nodes, seed);
-        if let Err(error) = validate_route_prefix(request, &seed_chain) {
+        if let Err(error) = validate_route_prefix(request, &seed_chain, initial_state) {
             remember_invalid_prefix(&error, &seed_indices, nodes.len(), invalid_prefixes);
             outcome.rejected_candidates = outcome.rejected_candidates.saturating_add(1);
             outcome.last_rejection = Some(error);
@@ -2484,7 +2627,7 @@ fn reverse_isochrone_recovery(
             corridor,
         )? {
             let chain = route_chain(nodes, index);
-            match validate_delivered_route(request, &chain) {
+            match validate_delivered_route(request, &chain, initial_state) {
                 Ok(_) => {
                     outcome.winner = Some(index);
                     return Ok(outcome);
@@ -2555,7 +2698,7 @@ fn reverse_isochrone_recovery(
                 corridor,
             )? {
                 let chain = route_chain(nodes, index);
-                match validate_delivered_route(request, &chain) {
+                match validate_delivered_route(request, &chain, initial_state) {
                     Ok(_) => {
                         outcome.winner = Some(index);
                         return Ok(outcome);
@@ -2811,12 +2954,13 @@ fn cross_track_nm(request: &RouteRequest, node: &Node) -> f64 {
 /// 120 NM passage corridor, matching the reference solver's default domain.
 fn time_dependent_graph_fallback(
     request: &RouteRequest,
+    initial_state: VesselState,
     nodes: &mut Vec<Node>,
     examined: &mut u32,
     state_limit: u32,
     corridor: Option<&RouteCorridor>,
     invalid_prefixes: &mut BTreeSet<usize>,
-    progress: ProgressRange,
+    progress: ProgressRange<'_>,
     progress_base: u8,
     progress_span: u8,
 ) -> Result<Option<usize>, String> {
@@ -2838,7 +2982,7 @@ fn time_dependent_graph_fallback(
         }
         let seed_indices = route_chain_indices(nodes, seed);
         let seed_chain = route_chain(nodes, seed);
-        if let Err(error) = validate_route_prefix(request, &seed_chain) {
+        if let Err(error) = validate_route_prefix(request, &seed_chain, initial_state) {
             remember_invalid_prefix(&error, &seed_indices, nodes.len(), invalid_prefixes);
             continue;
         }
@@ -2897,7 +3041,7 @@ fn time_dependent_graph_fallback(
         );
         if remaining <= request.destination_tolerance_nm {
             let chain = route_chain(nodes, entry.node);
-            match validate_delivered_route(request, &chain) {
+            match validate_delivered_route(request, &chain, initial_state) {
                 Ok(_) => return Ok(Some(entry.node)),
                 Err(error) => {
                     let chain_indices = route_chain_indices(nodes, entry.node);
@@ -2920,7 +3064,7 @@ fn time_dependent_graph_fallback(
                 corridor,
             )? {
                 let chain = route_chain(nodes, index);
-                match validate_delivered_route(request, &chain) {
+                match validate_delivered_route(request, &chain, initial_state) {
                     Ok(_) => return Ok(Some(index)),
                     Err(error) => {
                         let chain_indices = route_chain_indices(nodes, index);
@@ -3033,10 +3177,11 @@ fn time_dependent_graph_fallback(
 
 fn calculate_pass(
     request: RouteRequest,
+    initial_state: VesselState,
     corridor: Option<&RouteCorridor>,
     warm_start: Option<&[RoutePoint]>,
-    progress: ProgressRange,
-) -> Result<RouteResult, String> {
+    progress: ProgressRange<'_>,
+) -> Result<CalculatedRoute, String> {
     validate(&request)?;
     let direct = distance_nm(
         request.start_latitude,
@@ -3053,13 +3198,13 @@ fn calculate_pass(
         time: request.departure_unix_time,
         parent: None,
         sailed_nm: 0.0,
-        tack: 0,
-        propulsion_mode: PROPULSION_SAIL,
-        motor_seconds: 0,
-        propulsion_run_seconds: 0,
-        propulsion_transitions: 0,
+        tack: initial_state.tack,
+        propulsion_mode: initial_state.propulsion_mode,
+        motor_seconds: initial_state.motor_seconds,
+        propulsion_run_seconds: initial_state.propulsion_run_seconds,
+        propulsion_transitions: initial_state.propulsion_transitions,
         consecutive_wait_seconds: 0,
-        incoming_heading: 0.0,
+        incoming_heading: initial_state.incoming_heading,
         reached_destination: false,
     }];
     let mut invalid_prefixes = BTreeSet::new();
@@ -3515,7 +3660,7 @@ fn calculate_pass(
                     candidate,
                     &mut examined,
                     forward_state_limit,
-                    |chain| validate_delivered_route(&request, chain).map(|_| ()),
+                    |chain| validate_delivered_route(&request, chain, initial_state).map(|_| ()),
                 ) {
                     ArrivalCandidateDecision::Accepted(index) => {
                         winner = Some(index);
@@ -3587,10 +3732,21 @@ fn calculate_pass(
         if request.inspection_interval_seconds.is_some_and(|interval| {
             interval > 0 && frontier_time - last_inspection_time >= i64::from(interval)
         }) {
-            let (layer_contours, layer_traces) = inspection_geometry(&request, &nodes, &frontier);
-            append_bounded_inspection(&mut isochrones, layer_contours, 8_000, 160_000);
+            let (layer_contours, layer_traces) =
+                inspection_geometry(&request, &nodes, &frontier, request.include_traces);
+            append_bounded_inspection(
+                &mut isochrones,
+                layer_contours,
+                INSPECTION_LINE_LIMIT,
+                INSPECTION_POINT_LIMIT,
+            );
             if request.include_traces {
-                append_bounded_inspection(&mut traces, layer_traces, 8_000, 160_000);
+                append_bounded_inspection(
+                    &mut traces,
+                    layer_traces,
+                    INSPECTION_LINE_LIMIT,
+                    INSPECTION_POINT_LIMIT,
+                );
             }
             last_inspection_time = frontier_time;
         }
@@ -3635,6 +3791,7 @@ fn calculate_pass(
                 .min(forward_state_limit);
             let reverse = reverse_isochrone_recovery(
                 &request,
+                initial_state,
                 &mut nodes,
                 &mut examined,
                 reverse_limit,
@@ -3661,6 +3818,7 @@ fn calculate_pass(
                     .min(forward_state_limit);
                 if let Some(index) = time_dependent_graph_fallback(
                     &request,
+                    initial_state,
                     &mut nodes,
                     &mut examined,
                     graph_limit,
@@ -3735,7 +3893,7 @@ fn calculate_pass(
     // the final answer (the failure mode reported for this Irish Sea route).
     if let Some(index) = winner {
         let chain = route_chain(&nodes, index);
-        if let Err(error) = validate_delivered_route(&request, &chain) {
+        if let Err(error) = validate_delivered_route(&request, &chain, initial_state) {
             forward_failure = format!("forward candidate rejected: {error}");
             nodes.truncate(index);
             winner = None;
@@ -3756,6 +3914,7 @@ fn calculate_pass(
         let reverse_limit = request.max_states.saturating_sub(graph_reserve);
         let reverse = reverse_isochrone_recovery(
             &request,
+            initial_state,
             &mut nodes,
             &mut examined,
             reverse_limit,
@@ -3802,6 +3961,7 @@ fn calculate_pass(
         );
         if let Some(index) = time_dependent_graph_fallback(
             &request,
+            initial_state,
             &mut nodes,
             &mut examined,
             request.max_states,
@@ -3831,34 +3991,39 @@ fn calculate_pass(
     if winner_node.reached_destination {
         let chain = route_chain(&nodes, winner);
         progress.report(99, "Authoritative final chart/depth corridor validation");
-        let validation_samples = validate_delivered_route(&request, &chain)?;
-        let statistics = route_statistics(&request, &chain)?;
+        let validation = validate_delivered_route(&request, &chain, initial_state)?;
+        let validation_samples = validation.samples;
+        let statistics = route_statistics(&request, &chain, initial_state)?;
         let route_environment = route_environment(&chain)?;
         progress.report(100, "Route complete and independently validated");
-        return Ok(RouteResult {
-            distance_nautical_miles: winner_node.sailed_nm,
-            duration_seconds: (winner_node.time - request.departure_unix_time).max(0) as u64,
-            states_examined: examined,
-            diagnostic: format!(
-                "The {solver_path} stage completed using typed iGRIB samples, polar-optimal tack/gybe headings, and batched host chart checks. The exact delivered geometry passed an independent chronological replay using {validation_samples} fresh environmental/chart samples. Solver cascade used {interleaved_recovery_attempts} bounded recovery checkpoint(s) before final forward/reverse/graph completion."
-            ),
-            points: chain,
-            isochrones,
-            traces,
-            route_environment,
-            average_speed_knots: statistics.average_speed_knots,
-            maximum_speed_knots: statistics.maximum_speed_knots,
-            average_sog_knots: statistics.average_sog_knots,
-            maximum_sog_knots: statistics.maximum_sog_knots,
-            average_wind_knots: statistics.average_wind_knots,
-            maximum_wind_knots: statistics.maximum_wind_knots,
-            average_current_knots: statistics.average_current_knots,
-            maximum_current_knots: statistics.maximum_current_knots,
-            tacks: statistics.tacks,
-            motor_seconds: statistics.motor_seconds,
-            estimated_fuel_litres: statistics.estimated_fuel_litres,
-            propulsion_transitions: statistics.propulsion_transitions,
-            comfort_level: statistics.comfort_level,
+        return Ok(CalculatedRoute {
+            final_state: validation.final_state,
+            validation_samples,
+            result: RouteResult {
+                distance_nautical_miles: winner_node.sailed_nm,
+                duration_seconds: (winner_node.time - request.departure_unix_time).max(0) as u64,
+                states_examined: examined,
+                diagnostic: format!(
+                    "The {solver_path} stage completed using typed iGRIB samples, polar-optimal tack/gybe headings, and batched host chart checks. The exact delivered geometry passed an independent chronological replay using {validation_samples} fresh environmental/chart samples. Solver cascade used {interleaved_recovery_attempts} bounded recovery checkpoint(s) before final forward/reverse/graph completion."
+                ),
+                points: chain,
+                isochrones,
+                traces,
+                route_environment,
+                average_speed_knots: statistics.average_speed_knots,
+                maximum_speed_knots: statistics.maximum_speed_knots,
+                average_sog_knots: statistics.average_sog_knots,
+                maximum_sog_knots: statistics.maximum_sog_knots,
+                average_wind_knots: statistics.average_wind_knots,
+                maximum_wind_knots: statistics.maximum_wind_knots,
+                average_current_knots: statistics.average_current_knots,
+                maximum_current_knots: statistics.maximum_current_knots,
+                tacks: statistics.tacks,
+                motor_seconds: statistics.motor_seconds,
+                estimated_fuel_litres: statistics.estimated_fuel_litres,
+                propulsion_transitions: statistics.propulsion_transitions,
+                comfort_level: statistics.comfort_level,
+            },
         });
     }
     Err("internal routing error: selected arrival is outside destination tolerance".into())
@@ -3883,39 +4048,31 @@ fn refined_request(mut request: RouteRequest) -> RouteRequest {
     request
 }
 
-fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
+fn calculate_with_state(
+    request: RouteRequest,
+    initial_state: VesselState,
+    progress: ProgressRange<'_>,
+) -> Result<CalculatedRoute, String> {
     validate(&request)?;
     if !needs_corridor_refinement(&request) {
-        return calculate_pass(
-            request,
-            None,
-            None,
-            ProgressRange {
-                start: 0,
-                end: 100,
-                prefix: "",
-            },
-        );
+        return calculate_pass(request, initial_state, None, None, progress);
     }
 
     let coarse_request = request.clone();
     let mut coarse = calculate_pass(
         coarse_request,
+        initial_state,
         None,
         None,
-        ProgressRange {
-            start: 0,
-            end: 70,
-            prefix: "Initial route",
-        },
+        progress.subrange(0, 70),
     )?;
     if host::routing_cancelled() {
         return Err("route calculation cancelled".into());
     }
     let half_width_nm = (request.spatial_cell_nautical_miles * 4.0).max(12.0);
-    let corridor = RouteCorridor::from_route(&coarse.points, half_width_nm);
+    let corridor = RouteCorridor::from_route(&coarse.result.points, half_width_nm);
     let fine_request = refined_request(request);
-    host::routing_progress(
+    progress.report(
         70,
         &format!(
             "Corridor refinement: rerunning within {:.0} NM at {}-minute / {:.1} NM / {}° resolution",
@@ -3927,29 +4084,27 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
     );
     match calculate_pass(
         fine_request,
+        initial_state,
         Some(&corridor),
-        Some(&coarse.points),
-        ProgressRange {
-            start: 70,
-            end: 100,
-            prefix: "Corridor refinement",
-        },
+        Some(&coarse.result.points),
+        progress.subrange(70, 100),
     ) {
         Ok(mut refined) => {
-            let coarse_states = coarse.states_examined;
-            let refined_states = refined.states_examined;
-            let coarse_diagnostic = coarse.diagnostic.clone();
-            let eta_delta = refined.duration_seconds as i128 - coarse.duration_seconds as i128;
+            let coarse_states = coarse.result.states_examined;
+            let refined_states = refined.result.states_examined;
+            let coarse_diagnostic = coarse.result.diagnostic.clone();
+            let eta_delta =
+                refined.result.duration_seconds as i128 - coarse.result.duration_seconds as i128;
             let absolute_delta = eta_delta.unsigned_abs();
             let stability = if absolute_delta <= 5 * 60 {
                 "stable within five minutes"
             } else {
                 "materially resolution-sensitive"
             };
-            refined.diagnostic.push_str(&format!(
+            refined.result.diagnostic.push_str(&format!(
                 " Automatic corridor refinement completed; fine-resolution ETA changed by {eta_delta:+} seconds versus the initial route ({stability}). The initial pass examined {coarse_states} retained states and the reported fine pass examined {refined_states}; each remained within the configured per-pass bound. Initial-pass diagnostic: {coarse_diagnostic}"
             ));
-            host::routing_progress(
+            progress.report(
                 100,
                 &format!("Refined route complete — ETA change {eta_delta:+} seconds; {stability}"),
             );
@@ -3957,16 +4112,307 @@ fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
         }
         Err(error) if error == "route calculation cancelled" => Err(error),
         Err(error) => {
-            coarse.diagnostic.push_str(&format!(
+            coarse.result.diagnostic.push_str(&format!(
                 " Automatic corridor refinement did not produce a replacement route ({error}); the independently validated initial route was retained."
             ));
-            host::routing_progress(
+            progress.report(
                 100,
                 "Fine corridor search was incomplete; retained the independently validated initial route",
             );
             Ok(coarse)
         }
     }
+}
+
+fn calculate(request: RouteRequest) -> Result<RouteResult, String> {
+    calculate_with_state(
+        request,
+        VesselState::default(),
+        ProgressRange {
+            start: 0,
+            end: 100,
+            prefix: "",
+        },
+    )
+    .map(|route| route.result)
+}
+
+fn departure_offset_label(seconds: i64) -> String {
+    let minutes = seconds.unsigned_abs() / 60;
+    format!(
+        "{}{}:{:02}",
+        if seconds < 0 { "-" } else { "+" },
+        minutes / 60,
+        minutes % 60
+    )
+}
+
+fn calculate_passage(request: PassageRequest) -> Result<PassageResult, String> {
+    const MAX_PASSAGE_GATES: usize = 64;
+    if request.gates.len() < 2 || request.gates.len() > MAX_PASSAGE_GATES {
+        return Err(format!(
+            "passage routing requires 2-{MAX_PASSAGE_GATES} ordered gates"
+        ));
+    }
+    for (index, gate) in request.gates.iter().enumerate() {
+        if gate.id.is_empty()
+            || gate.name.is_empty()
+            || !gate.latitude.is_finite()
+            || !gate.longitude.is_finite()
+            || !(-90.0..=90.0).contains(&gate.latitude)
+            || !(-180.0..=180.0).contains(&gate.longitude)
+        {
+            return Err(format!("passage gate {} is invalid", index + 1));
+        }
+        if index > 0
+            && distance_nm(
+                request.gates[index - 1].latitude,
+                request.gates[index - 1].longitude,
+                gate.latitude,
+                gate.longitude,
+            ) <= 0.002
+        {
+            return Err(format!(
+                "passage gates {} and {} are duplicates",
+                index,
+                index + 1
+            ));
+        }
+    }
+
+    let mut base = request.route;
+    base.start_latitude = request.gates[0].latitude;
+    base.start_longitude = request.gates[0].longitude;
+    base.destination_latitude = request.gates.last().unwrap().latitude;
+    base.destination_longitude = request.gates.last().unwrap().longitude;
+    validate(&base)?;
+    let passage_departure = base.departure_unix_time;
+    let passage_deadline =
+        passage_departure.saturating_add(i64::from(base.max_hours).saturating_mul(3600));
+    let mut next_start = (base.start_latitude, base.start_longitude);
+    let mut next_departure = passage_departure;
+    let mut state = VesselState::default();
+    let mut states_examined = 0u32;
+    let mut validation_samples = 0u64;
+    let mut points: Vec<RoutePoint> = Vec::new();
+    let mut isochrones = Vec::new();
+    let mut traces = Vec::new();
+    let mut legs = Vec::with_capacity(request.gates.len() - 1);
+    let mut diagnostics = Vec::with_capacity(request.gates.len());
+    let mut distance_nautical_miles = 0.0;
+
+    for leg_index in 0..request.gates.len() - 1 {
+        if host::routing_cancelled() {
+            return Err("route calculation cancelled".into());
+        }
+        let destination = &request.gates[leg_index + 1];
+        let remaining_seconds = passage_deadline.saturating_sub(next_departure);
+        if remaining_seconds <= 0 {
+            return Err(format!(
+                "leg {} of {} ({} to {}) reached the overall passage duration limit",
+                leg_index + 1,
+                request.gates.len() - 1,
+                request.gates[leg_index].name,
+                destination.name
+            ));
+        }
+        let remaining_states = base.max_states.saturating_sub(states_examined);
+        if remaining_states < 100 {
+            return Err(format!(
+                "leg {} of {} ({} to {}) has fewer than 100 states remaining from the overall passage budget",
+                leg_index + 1,
+                request.gates.len() - 1,
+                request.gates[leg_index].name,
+                destination.name
+            ));
+        }
+        let mut leg_request = base.clone();
+        leg_request.start_latitude = next_start.0;
+        leg_request.start_longitude = next_start.1;
+        leg_request.destination_latitude = destination.latitude;
+        leg_request.destination_longitude = destination.longitude;
+        leg_request.departure_unix_time = next_departure;
+        leg_request.max_hours =
+            ((remaining_seconds.saturating_add(3599)) / 3600).clamp(1, 720) as u32;
+        leg_request.max_states = remaining_states;
+        let leg_label = format!(
+            "Departure {} — passage leg {} of {}: {} to {}",
+            departure_offset_label(request.departure_offset_seconds),
+            leg_index + 1,
+            request.gates.len() - 1,
+            request.gates[leg_index].name,
+            destination.name
+        );
+        let leg_count = request.gates.len() - 1;
+        let leg_progress = ProgressRange {
+            start: ((leg_index * 90) / leg_count) as u8,
+            end: (((leg_index + 1) * 90) / leg_count) as u8,
+            prefix: &leg_label,
+        };
+        leg_progress.report(0, "Preparing continuous vessel state");
+        let calculated =
+            calculate_with_state(leg_request, state, leg_progress).map_err(|error| {
+                format!(
+                    "leg {} of {} ({} to {}): {error}",
+                    leg_index + 1,
+                    request.gates.len() - 1,
+                    request.gates[leg_index].name,
+                    destination.name
+                )
+            })?;
+        if calculated.result.points.len() < 2 {
+            return Err(format!(
+                "leg {} of {} returned no usable route geometry",
+                leg_index + 1,
+                request.gates.len() - 1
+            ));
+        }
+        let end = calculated.result.points.last().unwrap();
+        if distance_nm(
+            end.latitude,
+            end.longitude,
+            destination.latitude,
+            destination.longitude,
+        ) > base.destination_tolerance_nm + 1e-9
+        {
+            return Err(format!(
+                "leg {} of {} ended outside the tolerance for {}",
+                leg_index + 1,
+                request.gates.len() - 1,
+                destination.name
+            ));
+        }
+        if !points.is_empty() {
+            let previous = points.last().unwrap();
+            let first = &calculated.result.points[0];
+            if previous.unix_time != first.unix_time
+                || distance_nm(
+                    previous.latitude,
+                    previous.longitude,
+                    first.latitude,
+                    first.longitude,
+                ) > 0.002
+            {
+                return Err(format!(
+                    "leg {} of {} is discontinuous at {}",
+                    leg_index + 1,
+                    request.gates.len() - 1,
+                    request.gates[leg_index].name
+                ));
+            }
+        }
+
+        let passage_prefix = points.clone();
+        let point_offset = points.len().saturating_sub(usize::from(!points.is_empty()));
+        let point_count = calculated.result.points.len();
+        let skip = usize::from(!points.is_empty());
+        points.extend(calculated.result.points.iter().skip(skip).cloned());
+        append_bounded_inspection(
+            &mut isochrones,
+            calculated.result.isochrones.clone(),
+            INSPECTION_LINE_LIMIT,
+            INSPECTION_POINT_LIMIT,
+        );
+        let continuous_traces = prefix_passage_traces(&passage_prefix, &calculated.result.traces);
+        append_bounded_inspection(
+            &mut traces,
+            continuous_traces,
+            INSPECTION_LINE_LIMIT,
+            INSPECTION_POINT_LIMIT,
+        );
+        legs.push(PassageLeg {
+            start_gate_index: leg_index as u32,
+            end_gate_index: (leg_index + 1) as u32,
+            point_offset: point_offset as u32,
+            point_count: point_count as u32,
+            departure_unix_time: calculated.result.points[0].unix_time,
+            arrival_unix_time: end.unix_time,
+            distance_nautical_miles: calculated.result.distance_nautical_miles,
+            states_examined: calculated.result.states_examined,
+            diagnostic: calculated.result.diagnostic.clone(),
+        });
+        diagnostics.push(format!(
+            "Leg {} of {} ({} to {}): {}",
+            leg_index + 1,
+            request.gates.len() - 1,
+            request.gates[leg_index].name,
+            destination.name,
+            calculated.result.diagnostic
+        ));
+        distance_nautical_miles += calculated.result.distance_nautical_miles;
+        states_examined = states_examined.saturating_add(calculated.result.states_examined);
+        validation_samples = validation_samples.saturating_add(calculated.validation_samples);
+        state = calculated.final_state;
+        next_start = (end.latitude, end.longitude);
+        next_departure = end.unix_time;
+    }
+
+    let mut validation_request = base;
+    validation_request.start_latitude = points[0].latitude;
+    validation_request.start_longitude = points[0].longitude;
+    validation_request.destination_latitude = request.gates.last().unwrap().latitude;
+    validation_request.destination_longitude = request.gates.last().unwrap().longitude;
+    validation_request.departure_unix_time = passage_departure;
+    host::routing_progress(
+        91,
+        &format!(
+            "Departure {} — whole passage: dense chronological replay",
+            departure_offset_label(request.departure_offset_seconds)
+        ),
+    );
+    let whole_validation =
+        validate_delivered_route(&validation_request, &points, VesselState::default())
+            .map_err(|error| format!("whole-passage independent validation failed: {error}"))?;
+    validation_samples = validation_samples.saturating_add(whole_validation.samples);
+    host::routing_progress(
+        96,
+        &format!(
+            "Departure {} — whole passage: final metrics and environmental profile",
+            departure_offset_label(request.departure_offset_seconds)
+        ),
+    );
+    let statistics = route_statistics(&validation_request, &points, VesselState::default())?;
+    let route_environment = route_environment(&points)?;
+    diagnostics.push(format!(
+        "The complete {}-leg passage passed a dense chronological replay using {} fresh environmental/chart samples; tack, propulsion mode, minimum motor-run time and transition state remained continuous at every gate.",
+        legs.len(),
+        whole_validation.samples
+    ));
+    host::routing_progress(
+        100,
+        &format!(
+            "Departure {} — complete multi-waypoint passage independently validated",
+            departure_offset_label(request.departure_offset_seconds)
+        ),
+    );
+
+    Ok(PassageResult {
+        route: RouteResult {
+            points,
+            isochrones,
+            traces,
+            route_environment,
+            distance_nautical_miles,
+            duration_seconds: next_departure.saturating_sub(passage_departure) as u64,
+            states_examined,
+            average_speed_knots: statistics.average_speed_knots,
+            maximum_speed_knots: statistics.maximum_speed_knots,
+            average_sog_knots: statistics.average_sog_knots,
+            maximum_sog_knots: statistics.maximum_sog_knots,
+            average_wind_knots: statistics.average_wind_knots,
+            maximum_wind_knots: statistics.maximum_wind_knots,
+            average_current_knots: statistics.average_current_knots,
+            maximum_current_knots: statistics.maximum_current_knots,
+            tacks: statistics.tacks,
+            motor_seconds: statistics.motor_seconds,
+            estimated_fuel_litres: statistics.estimated_fuel_litres,
+            propulsion_transitions: statistics.propulsion_transitions,
+            comfort_level: statistics.comfort_level,
+            diagnostic: diagnostics.join("\n"),
+        },
+        legs,
+        validation_samples,
+    })
 }
 
 impl IWeatherRouting {
@@ -4063,6 +4509,12 @@ impl exports::opencpn::portable::weather_routing_engine::Guest for IWeatherRouti
     }
 }
 
+impl exports::opencpn::portable::passage_routing_engine::Guest for IWeatherRouting {
+    fn calculate_passage(request: PassageRequest) -> Result<PassageResult, ServiceError> {
+        calculate_passage(request).map_err(service_error)
+    }
+}
+
 export!(IWeatherRouting);
 
 #[cfg(test)]
@@ -4142,6 +4594,163 @@ mod tests {
             propulsion_transitions: 0,
             consecutive_wait_seconds: 0,
             reached_destination: false,
+        }
+    }
+
+    #[test]
+    fn departure_offsets_are_reported_at_minute_resolution() {
+        assert_eq!(departure_offset_label(0), "+0:00");
+        assert_eq!(departure_offset_label(5_400), "+1:30");
+        assert_eq!(departure_offset_label(-900), "-0:15");
+    }
+
+    #[test]
+    fn inspection_front_uses_finer_sectors_and_exact_lineages() {
+        let request = test_request(false);
+        let mut nodes = vec![test_node()];
+        for (bearing_degrees, time) in [(2.0, 3600), (9.0, 3600)] {
+            let (lat, lon) = destination_point(
+                request.start_latitude,
+                request.start_longitude,
+                bearing_degrees,
+                10.0,
+            );
+            let mut node = test_node();
+            node.lat = lat;
+            node.lon = lon;
+            node.time = time;
+            node.parent = Some(0);
+            nodes.push(node);
+        }
+
+        let (contours, traces) = inspection_geometry(&request, &nodes, &[1, 2], true);
+        assert_eq!(
+            contours.iter().map(|line| line.points.len()).sum::<usize>(),
+            2
+        );
+        assert_eq!(traces.len(), 2);
+        for trace in traces {
+            assert_eq!(trace.points.len(), 2);
+            assert_eq!(trace.points[0].unix_time, nodes[0].time);
+            assert_eq!(trace.points[1].unix_time, 3600);
+        }
+    }
+
+    #[test]
+    fn passage_trace_prefix_is_continuous_and_deduplicates_the_gate() {
+        let prefix = vec![
+            RoutePoint {
+                latitude: 53.0,
+                longitude: -5.0,
+                unix_time: 0,
+            },
+            RoutePoint {
+                latitude: 53.1,
+                longitude: -4.9,
+                unix_time: 3600,
+            },
+        ];
+        let leg_trace = RouteInspectionLine {
+            unix_time: 7200,
+            points: vec![
+                prefix[1].clone(),
+                RoutePoint {
+                    latitude: 53.2,
+                    longitude: -4.8,
+                    unix_time: 7200,
+                },
+            ],
+        };
+
+        let prefixed = prefix_passage_traces(&prefix, &[leg_trace]);
+        assert_eq!(prefixed.len(), 1);
+        assert_eq!(prefixed[0].points.len(), 3);
+        assert_eq!(prefixed[0].points[0].unix_time, 0);
+        assert_eq!(prefixed[0].points[1].unix_time, 3600);
+        assert_eq!(prefixed[0].points[2].unix_time, 7200);
+    }
+
+    #[test]
+    fn inspection_geometry_can_omit_lineages_without_losing_contours() {
+        let request = test_request(false);
+        let mut nodes = vec![test_node()];
+        for bearing_degrees in [0.0, 10.0] {
+            let (lat, lon) = destination_point(
+                request.start_latitude,
+                request.start_longitude,
+                bearing_degrees,
+                10.0,
+            );
+            let mut node = test_node();
+            node.lat = lat;
+            node.lon = lon;
+            node.time = 3600;
+            node.parent = Some(0);
+            nodes.push(node);
+        }
+        let (contours, traces) = inspection_geometry(&request, &nodes, &[1, 2], false);
+        assert!(!contours.is_empty());
+        assert!(traces.is_empty());
+    }
+
+    #[test]
+    fn inspection_geometry_never_chords_across_disconnected_lineages() {
+        let mut request = test_request(false);
+        request.spatial_cell_nautical_miles = 1.0;
+        let mut nodes = vec![test_node()];
+
+        let mut parent_indices = Vec::new();
+        for bearing_degrees in [0.0, 8.0, 180.0, 188.0] {
+            let (lat, lon) = destination_point(
+                request.start_latitude,
+                request.start_longitude,
+                bearing_degrees,
+                5.0,
+            );
+            let mut parent = test_node();
+            parent.lat = lat;
+            parent.lon = lon;
+            parent.time = 1800;
+            parent.parent = Some(0);
+            nodes.push(parent);
+            parent_indices.push(nodes.len() - 1);
+        }
+
+        let mut frontier = Vec::new();
+        for (bearing_degrees, parent) in [
+            (0.0, parent_indices[0]),
+            (8.0, parent_indices[1]),
+            (16.0, parent_indices[2]),
+            (24.0, parent_indices[3]),
+        ] {
+            let (lat, lon) = destination_point(
+                request.start_latitude,
+                request.start_longitude,
+                bearing_degrees,
+                10.0,
+            );
+            let mut child = test_node();
+            child.lat = lat;
+            child.lon = lon;
+            child.time = 3600;
+            child.parent = Some(parent);
+            nodes.push(child);
+            frontier.push(nodes.len() - 1);
+        }
+
+        let (contours, _) = inspection_geometry(&request, &nodes, &frontier, false);
+        assert_eq!(contours.len(), 2);
+        assert_eq!(contours[0].points.len(), 2);
+        assert_eq!(contours[1].points.len(), 2);
+        for contour in contours {
+            assert!(
+                distance_nm(
+                    contour.points[0].latitude,
+                    contour.points[0].longitude,
+                    contour.points[1].latitude,
+                    contour.points[1].longitude,
+                ) < 2.0
+            );
         }
     }
 
@@ -4332,6 +4941,67 @@ mod tests {
         ) / (12.0 + MAX_PROVIDER_CURRENT_SPEED_KNOTS)
             * 3600.0;
         assert!((remaining_time_lower_bound_seconds(&request, &node) - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn propulsion_minimum_run_state_survives_a_waypoint_seam() {
+        let mut request = test_request(false);
+        request.allow_motor = true;
+        request.motor_speed_knots = 5.5;
+        request.minimum_motor_run_seconds = 1800;
+        let motion = motion_for_heading(
+            &request,
+            0.0,
+            -10.0,
+            0.0,
+            0.0,
+            90.0,
+            0,
+            PROPULSION_MOTOR,
+            600,
+            600,
+        )
+        .expect("an active minimum motor run should remain routable");
+        assert_eq!(motion.propulsion_mode, PROPULSION_MOTOR);
+        assert_eq!(
+            next_propulsion_run_seconds(PROPULSION_MOTOR, motion.propulsion_mode, 600, 600),
+            1200
+        );
+    }
+
+    #[test]
+    fn tack_state_at_a_waypoint_applies_the_seam_penalty() {
+        let request = test_request(false);
+        let unpenalised = motion_for_heading(
+            &request,
+            0.0,
+            -10.0,
+            0.0,
+            0.0,
+            90.0,
+            0,
+            PROPULSION_SAIL,
+            0,
+            300,
+        )
+        .expect("the test heading should be sail-able without a prior tack");
+        assert_ne!(unpenalised.tack, 0);
+        assert!(
+            motion_for_heading(
+                &request,
+                0.0,
+                -10.0,
+                0.0,
+                0.0,
+                90.0,
+                -unpenalised.tack,
+                PROPULSION_SAIL,
+                0,
+                300,
+            )
+            .is_none(),
+            "a tack exactly at the gate must not escape the configured penalty"
+        );
     }
 
     #[test]
