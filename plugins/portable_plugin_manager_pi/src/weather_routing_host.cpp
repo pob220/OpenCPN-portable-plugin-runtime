@@ -219,6 +219,7 @@ bool LoadSurface(const wxString& package_root, const wxString& surface_resource,
       "departure-window",
       "departure-spacing",
       "departure-workers",
+      "reset-advanced",
       "route-metrics",
       "departure-results",
       "candidate-details",
@@ -883,6 +884,7 @@ private:
   void ClearRoutingResults(const wxString& diagnostic);
   void DeleteRouting();
   void ResetRouting();
+  void ResetAdvancedSettings();
   void StartNewRouting();
   void UpdateRoutingActionState();
   void DispatchSurfaceAction(const wxString& action);
@@ -970,12 +972,15 @@ private:
   wxFrame* frame = nullptr;
   wxDialog* editor = nullptr;
   wxNotebook* notebook = nullptr;
+  wxSplitterWindow* manager_splitter = nullptr;
+  wxMenu* routing_context_menu = nullptr;
   wxListCtrl *manager_positions = nullptr, *manager_routings = nullptr;
   wxButton *manager_new = nullptr, *manager_compute = nullptr,
            *manager_edit = nullptr, *manager_delete = nullptr,
            *manager_export = nullptr, *manager_send = nullptr,
            *manager_stop = nullptr;
   std::map<wxString, wxMenuItem*> surface_menu_items;
+  std::map<wxString, wxMenuItem*> context_menu_items;
   wxScrolledWindow* route_panel = nullptr;
   wxTextCtrl *start_lat = nullptr, *start_lon = nullptr, *dest_lat = nullptr,
              *dest_lon = nullptr;
@@ -1072,8 +1077,6 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateRoutePanel(wxNotebook* book) {
   route_panel->SetScrollRate(0, route_panel->FromDIP(12));
   auto* panel = route_panel;
   auto* root = new wxBoxSizer(wxVERTICAL);
-  auto* grid = new wxFlexGridSizer(2, 8, 8);
-  grid->AddGrowableCol(1);
   start_lat = new wxTextCtrl(panel, wxID_ANY,
                              wxString::Format("%.6f", initial_latitude));
   start_lon = new wxTextCtrl(panel, wxID_ANY,
@@ -1168,23 +1171,59 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateRoutePanel(wxNotebook* book) {
   route_choice = new wxChoice(panel, wxID_ANY);
   route_choice->Enable(false);
   refresh_positions = new wxButton(panel, wxID_ANY, Label("refresh-positions"));
-  AddRow(grid, panel, Label("start-source"), start_source);
-  AddRow(grid, panel, Label("start-waypoint"), start_waypoint);
-  AddRow(grid, panel, Label("start-latitude"), start_lat);
-  AddRow(grid, panel, Label("start-longitude"), start_lon);
-  AddRow(grid, panel, Label("destination-source"), dest_source);
-  AddRow(grid, panel, Label("destination-waypoint"), dest_waypoint);
-  AddRow(grid, panel, Label("destination-latitude"), dest_lat);
-  AddRow(grid, panel, Label("destination-longitude"), dest_lon);
-  AddRow(grid, panel, Label("departure-utc"), departure_editor);
-  AddRow(grid, panel, Label("vessel-performance-file"),
-         vessel_performance_file);
+
+  compare_departures =
+      new wxCheckBox(panel, wxID_ANY, Label("compare-departures"));
+  departure_window = new wxSpinCtrl(panel, wxID_ANY);
+  departure_window->SetRange(5, 4320);
+  departure_window->SetValue(360);
+  departure_spacing = new wxSpinCtrl(panel, wxID_ANY);
+  departure_spacing->SetRange(5, 720);
+  departure_spacing->SetValue(60);
+
+  auto* time_step_panel = new wxPanel(panel);
+  auto* time_step_sizer = new wxBoxSizer(wxHORIZONTAL);
+  time_step_hours = new wxSpinCtrl(time_step_panel, wxID_ANY);
+  time_step_hours->SetRange(0, 6);
+  time_step_hours->SetValue(1);
+  time_step_hours->SetToolTip("Routing calculation step: 5 minutes to 6 hours");
+  time_step_minutes = new wxSpinCtrl(time_step_panel, wxID_ANY);
+  time_step_minutes->SetRange(0, 59);
+  time_step_minutes->SetValue(0);
+  time_step_minutes->SetToolTip(
+      "Routing calculation step: 5 minutes to 6 hours");
+  time_step_sizer->Add(time_step_hours, 0, wxRIGHT, 5);
+  time_step_sizer->Add(new wxStaticText(time_step_panel, wxID_ANY, "h"), 0,
+                       wxALIGN_CENTER_VERTICAL | wxRIGHT, 12);
+  time_step_sizer->Add(time_step_minutes, 0, wxRIGHT, 5);
+  time_step_sizer->Add(new wxStaticText(time_step_panel, wxID_ANY, "m"), 0,
+                       wxALIGN_CENTER_VERTICAL);
+  time_step_panel->SetSizer(time_step_sizer);
+
+  limit_true_wind = new wxCheckBox(panel, wxID_ANY, Label("maximum-true-wind"));
+  limit_true_wind->SetValue(true);
+  max_true_wind = new wxTextCtrl(panel, wxID_ANY, "50");
+  limit_apparent_wind =
+      new wxCheckBox(panel, wxID_ANY, Label("maximum-apparent-wind"));
+  limit_apparent_wind->SetValue(true);
+  max_apparent_wind = new wxTextCtrl(panel, wxID_ANY, "50");
+  limit_waves = new wxCheckBox(panel, wxID_ANY, Label("maximum-wave"));
+  limit_waves->SetValue(true);
+  max_wave = new wxTextCtrl(panel, wxID_ANY, "8.0");
+  avoid_land = new wxCheckBox(panel, wxID_ANY, Label("avoid-unsafe"));
+  avoid_land->SetValue(true);
+  use_currents = new wxCheckBox(panel, wxID_ANY, Label("use-currents"));
+  use_currents->SetValue(true);
+  use_waves = new wxCheckBox(panel, wxID_ANY, Label("use-waves"));
+  use_waves->SetValue(true);
+
   vessel_performance_status =
       new wxStaticText(panel, wxID_ANY, Label("vessel-performance-status"));
   current_dataset_summary = dataset_summary();
   provider = new wxStaticText(panel, wxID_ANY,
                               "Environment: " + current_dataset_summary);
-  auto* route_mode = new wxStaticBoxSizer(wxVERTICAL, panel, "Routing mode");
+  auto* route_mode =
+      new wxStaticBoxSizer(wxVERTICAL, panel, "OpenCPN passage route");
   route_mode->Add(use_opencpn_route, 0, wxEXPAND | wxALL, 8);
   auto* route_selector = new wxFlexGridSizer(2, 8, 8);
   route_selector->AddGrowableCol(1);
@@ -1199,19 +1238,84 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateRoutePanel(wxNotebook* book) {
   route_mode_help->Wrap(panel->FromDIP(650));
   route_mode->Add(route_mode_help, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM,
                   8);
-  root->Add(route_mode, 0, wxEXPAND | wxALL, 12);
-  root->Add(grid, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 12);
-  root->Add(refresh_positions, 0, wxLEFT | wxRIGHT | wxBOTTOM, 12);
-  root->Add(vessel_performance_status, 0,
-            wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 12);
-  root->Add(new wxStaticLine(panel), 0, wxEXPAND | wxLEFT | wxRIGHT, 12);
-  root->Add(provider, 0, wxEXPAND | wxALL, 12);
+
+  auto* columns = new wxFlexGridSizer(1, 2, 12, 12);
+  columns->AddGrowableCol(0, 1);
+  columns->AddGrowableCol(1, 1);
+
+  auto* left = new wxBoxSizer(wxVERTICAL);
+  auto* start_box = new wxStaticBoxSizer(wxVERTICAL, panel, "Start");
+  auto* start_grid = new wxFlexGridSizer(2, 6, 6);
+  start_grid->AddGrowableCol(1);
+  AddRow(start_grid, panel, Label("start-source"), start_source);
+  AddRow(start_grid, panel, Label("start-waypoint"), start_waypoint);
+  AddRow(start_grid, panel, Label("start-latitude"), start_lat);
+  AddRow(start_grid, panel, Label("start-longitude"), start_lon);
+  AddRow(start_grid, panel, Label("departure-utc"), departure_editor);
+  start_box->Add(start_grid, 0, wxEXPAND | wxALL, 8);
+  start_box->Add(compare_departures, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
+  auto* departure_grid = new wxFlexGridSizer(2, 6, 6);
+  departure_grid->AddGrowableCol(1);
+  AddRow(departure_grid, panel, Label("departure-window"), departure_window);
+  AddRow(departure_grid, panel, Label("departure-spacing"), departure_spacing);
+  start_box->Add(departure_grid, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
+  left->Add(start_box, 0, wxEXPAND | wxBOTTOM, 8);
+
+  auto* boat_box = new wxStaticBoxSizer(wxVERTICAL, panel, "Boat");
+  boat_box->Add(vessel_performance_file, 0, wxEXPAND | wxALL, 8);
+  boat_box->Add(vessel_performance_status, 0,
+                wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
+  left->Add(boat_box, 0, wxEXPAND | wxBOTTOM, 8);
+
+  auto* constraints_box =
+      new wxStaticBoxSizer(wxVERTICAL, panel, "Constraints");
+  auto* constraints_grid = new wxFlexGridSizer(2, 6, 6);
+  constraints_grid->AddGrowableCol(1);
+  constraints_grid->Add(limit_true_wind, 0, wxALIGN_CENTER_VERTICAL);
+  constraints_grid->Add(max_true_wind, 1, wxEXPAND);
+  constraints_grid->Add(limit_apparent_wind, 0, wxALIGN_CENTER_VERTICAL);
+  constraints_grid->Add(max_apparent_wind, 1, wxEXPAND);
+  constraints_grid->Add(limit_waves, 0, wxALIGN_CENTER_VERTICAL);
+  constraints_grid->Add(max_wave, 1, wxEXPAND);
+  constraints_box->Add(constraints_grid, 0, wxEXPAND | wxALL, 8);
+  left->Add(constraints_box, 0, wxEXPAND);
+
+  auto* right = new wxBoxSizer(wxVERTICAL);
+  auto* end_box = new wxStaticBoxSizer(wxVERTICAL, panel, "End");
+  auto* end_grid = new wxFlexGridSizer(2, 6, 6);
+  end_grid->AddGrowableCol(1);
+  AddRow(end_grid, panel, Label("destination-source"), dest_source);
+  AddRow(end_grid, panel, Label("destination-waypoint"), dest_waypoint);
+  AddRow(end_grid, panel, Label("destination-latitude"), dest_lat);
+  AddRow(end_grid, panel, Label("destination-longitude"), dest_lon);
+  end_box->Add(end_grid, 0, wxEXPAND | wxALL, 8);
+  right->Add(end_box, 0, wxEXPAND | wxBOTTOM, 8);
+
+  auto* time_box = new wxStaticBoxSizer(wxVERTICAL, panel, "Time Step");
+  time_box->Add(time_step_panel, 0, wxALL, 8);
+  right->Add(time_box, 0, wxEXPAND | wxBOTTOM, 8);
+
+  auto* options_box = new wxStaticBoxSizer(wxVERTICAL, panel, "Options");
+  options_box->Add(avoid_land, 0, wxALL, 8);
+  options_box->Add(use_currents, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
+  options_box->Add(use_waves, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
+  right->Add(options_box, 0, wxEXPAND | wxBOTTOM, 8);
+
+  auto* source_box = new wxStaticBoxSizer(wxVERTICAL, panel, "Data Source");
+  source_box->Add(provider, 0, wxEXPAND | wxALL, 8);
   auto* broker_note = new wxStaticText(
       panel, wxID_ANY,
       "The Wasm route engine consumes environmental values through iGRIB's "
       "typed host-brokered provider service.");
-  broker_note->Wrap(panel->FromDIP(680));
-  root->Add(broker_note, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 12);
+  broker_note->Wrap(panel->FromDIP(360));
+  source_box->Add(broker_note, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
+  right->Add(source_box, 0, wxEXPAND);
+
+  columns->Add(left, 1, wxEXPAND);
+  columns->Add(right, 1, wxEXPAND);
+  root->Add(route_mode, 0, wxEXPAND | wxALL, 8);
+  root->Add(columns, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
+  root->Add(refresh_positions, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
   panel->SetSizer(root);
   panel->FitInside();
   start_source->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
@@ -1264,6 +1368,48 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateRoutePanel(wxNotebook* book) {
     } else if (status) {
       status->SetLabel("No displayed iGRIB forecast time is available");
     }
+  });
+  time_step_hours->Bind(wxEVT_SPINCTRL,
+                        [this](wxSpinEvent&) { UpdateTimeStepControls(); });
+  time_step_hours->Bind(wxEVT_TEXT,
+                        [this](wxCommandEvent&) { UpdateTimeStepControls(); });
+  auto update_departure_search = [this] {
+    const bool enabled = compare_departures->GetValue();
+    departure_window->Enable(enabled);
+    departure_spacing->Enable(enabled);
+  };
+  compare_departures->Bind(wxEVT_CHECKBOX,
+                           [update_departure_search](wxCommandEvent&) {
+                             update_departure_search();
+                           });
+  update_departure_search();
+  use_currents->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
+    if (require_current_data)
+      require_current_data->Enable(use_currents->GetValue());
+    if (limit_opposing_wind_current)
+      limit_opposing_wind_current->Enable(use_currents->GetValue());
+    if (max_opposing_wind_current)
+      max_opposing_wind_current->Enable(
+          use_currents->GetValue() && limit_opposing_wind_current &&
+          limit_opposing_wind_current->GetValue());
+  });
+  use_waves->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
+    if (require_wave_data) require_wave_data->Enable(use_waves->GetValue());
+    limit_waves->Enable(use_waves->GetValue());
+    max_wave->Enable(use_waves->GetValue() && limit_waves->GetValue());
+  });
+  limit_waves->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
+    max_wave->Enable(use_waves->GetValue() && limit_waves->GetValue());
+  });
+  limit_true_wind->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
+    max_true_wind->Enable(limit_true_wind->GetValue());
+  });
+  limit_apparent_wind->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
+    max_apparent_wind->Enable(limit_apparent_wind->GetValue());
+  });
+  panel->Bind(wxEVT_SIZE, [this](wxSizeEvent& event) {
+    RelayoutRoutePanel();
+    event.Skip();
   });
   return panel;
 }
@@ -1341,14 +1487,19 @@ wxString PortableWeatherRoutingHost::Impl::FormatRoutingTime(
 }
 
 void PortableWeatherRoutingHost::Impl::UpdateTimeColumnLabels() {
-  if (!route_schedule) return;
   const wxString zone = PortableDepartureZoneLabel(
       SelectedDepartureZone(),
       static_cast<int64_t>(wxDateTime::Now().GetTicks()));
-  wxListItem column;
-  column.SetMask(wxLIST_MASK_TEXT);
-  column.SetText("Time (" + zone + ")");
-  route_schedule->SetColumn(0, column);
+  auto set_column = [](wxListCtrl* list, int index, const wxString& label) {
+    if (!list || index < 0 || index >= list->GetColumnCount()) return;
+    wxListItem column;
+    column.SetMask(wxLIST_MASK_TEXT);
+    column.SetText(label);
+    list->SetColumn(index, column);
+  };
+  set_column(route_schedule, 0, "Time (" + zone + ")");
+  set_column(manager_routings, 3, "Start Time (" + zone + ")");
+  set_column(manager_routings, 5, "End Time (" + zone + ")");
 }
 
 void PortableWeatherRoutingHost::Impl::UpdateTimeStepControls() {
@@ -1693,49 +1844,20 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateSafetyPanel(wxNotebook* book) {
   auto* panel = new wxScrolledWindow(book);
   panel->SetScrollRate(0, 12);
   auto* root = new wxBoxSizer(wxVERTICAL);
-  avoid_land = new wxCheckBox(panel, wxID_ANY, Label("avoid-unsafe"));
-  avoid_land->SetValue(true);
-  require_authoritative_chart_safety = new wxCheckBox(
-      panel, wxID_ANY, Label("require-authoritative-chart-safety"));
-  require_authoritative_chart_safety->SetValue(true);
-  chart_safety_status =
-      new wxStaticText(panel, wxID_ANY, ppm::ChartSafetyService().Summary());
   min_wind_angle = new wxSpinCtrl(panel, wxID_ANY);
   min_wind_angle->SetRange(0, 180);
   min_wind_angle->SetValue(40);
   max_wind_angle = new wxSpinCtrl(panel, wxID_ANY);
   max_wind_angle->SetRange(0, 180);
   max_wind_angle->SetValue(180);
-  limit_true_wind = new wxCheckBox(panel, wxID_ANY, Label("maximum-true-wind"));
-  limit_true_wind->SetValue(true);
-  max_true_wind = new wxTextCtrl(panel, wxID_ANY, "50");
-  limit_apparent_wind =
-      new wxCheckBox(panel, wxID_ANY, Label("maximum-apparent-wind"));
-  limit_apparent_wind->SetValue(true);
-  max_apparent_wind = new wxTextCtrl(panel, wxID_ANY, "50");
-  limit_waves = new wxCheckBox(panel, wxID_ANY, Label("maximum-wave"));
-  limit_waves->SetValue(true);
-  max_wave = new wxTextCtrl(panel, wxID_ANY, "8.0");
-  limit_opposing_wind_current =
-      new wxCheckBox(panel, wxID_ANY, Label("maximum-opposing-wind-current"));
-  limit_opposing_wind_current->SetValue(false);
-  max_opposing_wind_current = new wxTextCtrl(panel, wxID_ANY, "0.0");
-  max_opposing_wind_current->Enable(false);
   land_safety_margin = new wxTextCtrl(panel, wxID_ANY, "0.4");
-  minimum_chart_depth = new wxTextCtrl(panel, wxID_ANY, "2.0");
-  use_currents = new wxCheckBox(panel, wxID_ANY, Label("use-currents"));
-  use_currents->SetValue(true);
-  require_current_data =
-      new wxCheckBox(panel, wxID_ANY, Label("require-current-data"));
-  require_current_data->SetValue(false);
-  use_waves = new wxCheckBox(panel, wxID_ANY, Label("use-waves"));
-  use_waves->SetValue(true);
-  require_wave_data =
-      new wxCheckBox(panel, wxID_ANY, Label("require-wave-data"));
-  require_wave_data->SetValue(true);
   maximum_latitude = new wxSpinCtrl(panel, wxID_ANY);
   maximum_latitude->SetRange(1, 90);
   maximum_latitude->SetValue(89);
+  maximum_search_angle = new wxSpinCtrl(panel, wxID_ANY);
+  maximum_search_angle->SetRange(30, 180);
+  maximum_search_angle->SetValue(120);
+  destination_tolerance = new wxTextCtrl(panel, wxID_ANY, "1.0");
   upwind_efficiency = new wxSpinCtrl(panel, wxID_ANY);
   upwind_efficiency->SetRange(10, 150);
   upwind_efficiency->SetValue(100);
@@ -1767,37 +1889,46 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateSafetyPanel(wxNotebook* book) {
   fuel_consumption = new wxTextCtrl(panel, wxID_ANY, "2.5");
   limit_fuel = new wxCheckBox(panel, wxID_ANY, Label("maximum-fuel"));
   maximum_fuel = new wxTextCtrl(panel, wxID_ANY, "100.0");
-  auto* grid = new wxFlexGridSizer(2, 8, 8);
-  grid->AddGrowableCol(1);
-  AddRow(grid, panel, Label("minimum-wind-angle"), min_wind_angle);
-  AddRow(grid, panel, Label("maximum-wind-angle"), max_wind_angle);
-  grid->Add(limit_true_wind, 0, wxALIGN_CENTER_VERTICAL);
-  grid->Add(max_true_wind, 1, wxEXPAND);
-  grid->Add(limit_apparent_wind, 0, wxALIGN_CENTER_VERTICAL);
-  grid->Add(max_apparent_wind, 1, wxEXPAND);
-  grid->Add(limit_waves, 0, wxALIGN_CENTER_VERTICAL);
-  grid->Add(max_wave, 1, wxEXPAND);
-  grid->Add(limit_opposing_wind_current, 0, wxALIGN_CENTER_VERTICAL);
-  grid->Add(max_opposing_wind_current, 1, wxEXPAND);
-  AddRow(grid, panel, Label("land-safety-margin"), land_safety_margin);
-  AddRow(grid, panel, Label("minimum-chart-depth"), minimum_chart_depth);
-  AddRow(grid, panel, Label("maximum-latitude"), maximum_latitude);
-  AddRow(grid, panel, Label("upwind-efficiency"), upwind_efficiency);
-  AddRow(grid, panel, Label("downwind-efficiency"), downwind_efficiency);
-  AddRow(grid, panel, Label("tack-penalty"), tack_penalty);
-  AddRow(grid, panel, Label("gybe-penalty"), gybe_penalty);
-  root->Add(avoid_land, 0, wxALL, 12);
-  root->Add(require_authoritative_chart_safety, 0, wxLEFT | wxRIGHT | wxBOTTOM,
-            12);
-  root->Add(chart_safety_status, 0, wxLEFT | wxRIGHT | wxBOTTOM, 12);
-  root->Add(use_currents, 0, wxLEFT | wxRIGHT | wxBOTTOM, 12);
-  root->Add(require_current_data, 0, wxLEFT | wxRIGHT | wxBOTTOM, 28);
-  root->Add(use_waves, 0, wxLEFT | wxRIGHT | wxBOTTOM, 12);
-  root->Add(require_wave_data, 0, wxLEFT | wxRIGHT | wxBOTTOM, 28);
-  root->Add(grid, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 12);
-  root->Add(new wxStaticLine(panel), 0, wxEXPAND | wxLEFT | wxRIGHT, 12);
-  root->Add(allow_motor_sailing, 0, wxALL, 12);
-  root->Add(allow_motor, 0, wxLEFT | wxRIGHT | wxBOTTOM, 12);
+  auto* columns = new wxFlexGridSizer(1, 2, 12, 12);
+  columns->AddGrowableCol(0, 1);
+  columns->AddGrowableCol(1, 1);
+  auto* left = new wxBoxSizer(wxVERTICAL);
+  auto* right = new wxBoxSizer(wxVERTICAL);
+
+  auto* constraints_box =
+      new wxStaticBoxSizer(wxVERTICAL, panel, "Constraints");
+  auto* constraints_grid = new wxFlexGridSizer(2, 8, 8);
+  constraints_grid->AddGrowableCol(1);
+  AddRow(constraints_grid, panel, Label("maximum-latitude"), maximum_latitude);
+  AddRow(constraints_grid, panel, Label("maximum-search-angle"),
+         maximum_search_angle);
+  AddRow(constraints_grid, panel, Label("destination-tolerance"),
+         destination_tolerance);
+  AddRow(constraints_grid, panel, Label("land-safety-margin"),
+         land_safety_margin);
+  constraints_box->Add(constraints_grid, 0, wxEXPAND | wxALL, 8);
+  left->Add(constraints_box, 0, wxEXPAND | wxBOTTOM, 8);
+
+  auto* courses_box = new wxStaticBoxSizer(wxVERTICAL, panel,
+                                           "Courses (relative to true wind)");
+  auto* courses_grid = new wxFlexGridSizer(2, 8, 8);
+  courses_grid->AddGrowableCol(1);
+  AddRow(courses_grid, panel, Label("minimum-wind-angle"), min_wind_angle);
+  AddRow(courses_grid, panel, Label("maximum-wind-angle"), max_wind_angle);
+  courses_box->Add(courses_grid, 0, wxEXPAND | wxALL, 8);
+  left->Add(courses_box, 0, wxEXPAND | wxBOTTOM, 8);
+
+  auto* manoeuvres_box = new wxStaticBoxSizer(wxVERTICAL, panel, "Options");
+  auto* manoeuvres_grid = new wxFlexGridSizer(2, 8, 8);
+  manoeuvres_grid->AddGrowableCol(1);
+  AddRow(manoeuvres_grid, panel, Label("tack-penalty"), tack_penalty);
+  AddRow(manoeuvres_grid, panel, Label("gybe-penalty"), gybe_penalty);
+  manoeuvres_box->Add(manoeuvres_grid, 0, wxEXPAND | wxALL, 8);
+  left->Add(manoeuvres_box, 0, wxEXPAND);
+
+  auto* propulsion_box = new wxStaticBoxSizer(wxVERTICAL, panel, "Motoring");
+  propulsion_box->Add(allow_motor_sailing, 0, wxALL, 8);
+  propulsion_box->Add(allow_motor, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
   auto* propulsion_grid = new wxFlexGridSizer(2, 8, 8);
   propulsion_grid->AddGrowableCol(1);
   AddRow(propulsion_grid, panel, Label("motor-threshold"), motor_threshold);
@@ -1813,37 +1944,28 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateSafetyPanel(wxNotebook* book) {
   AddRow(propulsion_grid, panel, Label("fuel-consumption"), fuel_consumption);
   propulsion_grid->Add(limit_fuel, 0, wxALIGN_CENTER_VERTICAL);
   propulsion_grid->Add(maximum_fuel, 1, wxEXPAND);
-  root->Add(propulsion_grid, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 12);
-  root->Add(new wxStaticText(panel, wxID_ANY,
-                             "Safety responses distinguish covered, unsafe, "
-                             "missing coverage and unknown. They remain "
-                             "advisory and must be checked by the navigator."),
-            0, wxEXPAND | wxALL, 12);
+  propulsion_box->Add(propulsion_grid, 0,
+                      wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
+  right->Add(propulsion_box, 0, wxEXPAND | wxBOTTOM, 8);
+
+  auto* efficiency_box =
+      new wxStaticBoxSizer(wxVERTICAL, panel, "Polar Efficiency");
+  auto* efficiency_grid = new wxFlexGridSizer(2, 8, 8);
+  efficiency_grid->AddGrowableCol(1);
+  AddRow(efficiency_grid, panel, Label("upwind-efficiency"), upwind_efficiency);
+  AddRow(efficiency_grid, panel, Label("downwind-efficiency"),
+         downwind_efficiency);
+  efficiency_box->Add(efficiency_grid, 0, wxEXPAND | wxALL, 8);
+  right->Add(efficiency_box, 0, wxEXPAND);
+
+  columns->Add(left, 1, wxEXPAND);
+  columns->Add(right, 1, wxEXPAND);
+  root->Add(columns, 0, wxEXPAND | wxALL, 8);
+  auto* reset = new wxButton(panel, wxID_ANY, Label("reset-advanced"));
+  reset->Bind(wxEVT_BUTTON,
+              [this](wxCommandEvent&) { ResetAdvancedSettings(); });
+  root->Add(reset, 0, wxALIGN_CENTER_HORIZONTAL | wxBOTTOM, 8);
   panel->SetSizer(root);
-  use_currents->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
-    require_current_data->Enable(use_currents->GetValue());
-    limit_opposing_wind_current->Enable(use_currents->GetValue());
-    max_opposing_wind_current->Enable(use_currents->GetValue() &&
-                                      limit_opposing_wind_current->GetValue());
-  });
-  use_waves->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
-    require_wave_data->Enable(use_waves->GetValue());
-    limit_waves->Enable(use_waves->GetValue());
-    max_wave->Enable(use_waves->GetValue() && limit_waves->GetValue());
-  });
-  limit_waves->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
-    max_wave->Enable(use_waves->GetValue() && limit_waves->GetValue());
-  });
-  limit_true_wind->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
-    max_true_wind->Enable(limit_true_wind->GetValue());
-  });
-  limit_opposing_wind_current->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
-    max_opposing_wind_current->Enable(limit_opposing_wind_current->GetValue() &&
-                                      use_currents->GetValue());
-  });
-  limit_apparent_wind->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
-    max_apparent_wind->Enable(limit_apparent_wind->GetValue());
-  });
   auto update_propulsion = [this] {
     const bool enabled =
         allow_motor_sailing->GetValue() || allow_motor->GetValue();
@@ -1872,36 +1994,33 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateSafetyPanel(wxNotebook* book) {
     update_propulsion();
   });
   update_propulsion();
+  panel->FitInside();
   return panel;
 }
 
 wxPanel* PortableWeatherRoutingHost::Impl::CreateAdvancedPanel(
     wxNotebook* book) {
-  auto* panel = new wxPanel(book);
-  auto* grid = new wxFlexGridSizer(2, 8, 8);
-  grid->AddGrowableCol(1);
-  auto* time_step_panel = new wxPanel(panel);
-  auto* time_step_sizer = new wxBoxSizer(wxHORIZONTAL);
-  time_step_hours = new wxSpinCtrl(time_step_panel, wxID_ANY);
-  time_step_hours->SetRange(0, 6);
-  time_step_hours->SetValue(1);
-  time_step_hours->SetToolTip("Routing calculation step: 5 minutes to 6 hours");
-  time_step_minutes = new wxSpinCtrl(time_step_panel, wxID_ANY);
-  time_step_minutes->SetRange(0, 59);
-  time_step_minutes->SetValue(0);
-  time_step_minutes->SetToolTip(
-      "Routing calculation step: 5 minutes to 6 hours");
-  time_step_sizer->Add(time_step_hours, 0, wxRIGHT, 5);
-  time_step_sizer->Add(new wxStaticText(time_step_panel, wxID_ANY, "hours"), 0,
-                       wxALIGN_CENTER_VERTICAL | wxRIGHT, 12);
-  time_step_sizer->Add(time_step_minutes, 0, wxRIGHT, 5);
-  time_step_sizer->Add(new wxStaticText(time_step_panel, wxID_ANY, "minutes"),
-                       0, wxALIGN_CENTER_VERTICAL);
-  time_step_panel->SetSizer(time_step_sizer);
-  time_step_hours->Bind(wxEVT_SPINCTRL,
-                        [this](wxSpinEvent&) { UpdateTimeStepControls(); });
-  time_step_hours->Bind(wxEVT_TEXT,
-                        [this](wxCommandEvent&) { UpdateTimeStepControls(); });
+  auto* panel = new wxScrolledWindow(book);
+  panel->SetScrollRate(0, panel->FromDIP(12));
+
+  require_authoritative_chart_safety = new wxCheckBox(
+      panel, wxID_ANY, Label("require-authoritative-chart-safety"));
+  require_authoritative_chart_safety->SetValue(true);
+  chart_safety_status =
+      new wxStaticText(panel, wxID_ANY, ppm::ChartSafetyService().Summary());
+  minimum_chart_depth = new wxTextCtrl(panel, wxID_ANY, "2.0");
+  require_current_data =
+      new wxCheckBox(panel, wxID_ANY, Label("require-current-data"));
+  require_current_data->SetValue(false);
+  require_wave_data =
+      new wxCheckBox(panel, wxID_ANY, Label("require-wave-data"));
+  require_wave_data->SetValue(true);
+  limit_opposing_wind_current =
+      new wxCheckBox(panel, wxID_ANY, Label("maximum-opposing-wind-current"));
+  limit_opposing_wind_current->SetValue(false);
+  max_opposing_wind_current = new wxTextCtrl(panel, wxID_ANY, "0.0");
+  max_opposing_wind_current->Enable(false);
+
   heading_step = new wxSpinCtrl(panel, wxID_ANY);
   heading_step->SetRange(5, 45);
   heading_step->SetValue(15);
@@ -1915,64 +2034,89 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateAdvancedPanel(
   labels_per_cell = new wxSpinCtrl(panel, wxID_ANY);
   labels_per_cell->SetRange(1, 8);
   labels_per_cell->SetValue(2);
-  maximum_search_angle = new wxSpinCtrl(panel, wxID_ANY);
-  maximum_search_angle->SetRange(30, 180);
-  maximum_search_angle->SetValue(120);
-  destination_tolerance = new wxTextCtrl(panel, wxID_ANY, "1.0");
   max_hours = new wxSpinCtrl(panel, wxID_ANY);
   max_hours->SetRange(6, 720);
   max_hours->SetValue(120);
   max_states = new wxSpinCtrl(panel, wxID_ANY);
   max_states->SetRange(1000, 500000);
   max_states->SetValue(80000);
-  compare_departures =
-      new wxCheckBox(panel, wxID_ANY, Label("compare-departures"));
-  departure_window = new wxSpinCtrl(panel, wxID_ANY);
-  departure_window->SetRange(5, 4320);
-  departure_window->SetValue(360);
-  departure_spacing = new wxSpinCtrl(panel, wxID_ANY);
-  departure_spacing->SetRange(5, 720);
-  departure_spacing->SetValue(60);
   departure_workers = new wxSpinCtrl(panel, wxID_ANY);
   departure_workers->SetRange(0, 8);
   departure_workers->SetValue(0);
-  AddRow(grid, panel, Label("time-step"), time_step_panel);
-  AddRow(grid, panel, Label("heading-step"), heading_step);
-  AddRow(grid, panel, Label("refined-heading-step"), refined_heading_step);
-  AddRow(grid, panel, Label("spatial-cell"), spatial_cell);
-  AddRow(grid, panel, Label("labels-per-cell"), labels_per_cell);
-  AddRow(grid, panel, Label("maximum-search-angle"), maximum_search_angle);
-  AddRow(grid, panel, Label("destination-tolerance"), destination_tolerance);
-  AddRow(grid, panel, Label("maximum-hours"), max_hours);
-  AddRow(grid, panel, Label("maximum-states"), max_states);
-  AddRow(grid, panel, Label("departure-window"), departure_window);
-  AddRow(grid, panel, Label("departure-spacing"), departure_spacing);
-  AddRow(grid, panel, Label("departure-workers"), departure_workers);
+
   auto* root = new wxBoxSizer(wxVERTICAL);
-  root->Add(adaptive_headings, 0, wxLEFT | wxRIGHT | wxTOP, 12);
-  root->Add(compare_departures, 0, wxLEFT | wxRIGHT | wxTOP, 12);
-  root->Add(grid, 0, wxEXPAND | wxALL, 12);
-  root->Add(
-      new wxStaticText(
-          panel, wxID_ANY,
-          "The selected range is searched before and after the nominal "
-          "departure, starting with the nearest times. At most 73 "
-          "candidates are allowed. Independent Wasm passage searches run "
-          "in parallel up to the selected CPU and memory-safe limit; zero "
-          "selects this limit automatically. The shortest fully validated "
-          "passage is selected; other successful routes remain as thin "
-          "comparison overlays."),
-      0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 12);
+  auto* columns = new wxFlexGridSizer(1, 2, 12, 12);
+  columns->AddGrowableCol(0, 1);
+  columns->AddGrowableCol(1, 1);
+  auto* left = new wxBoxSizer(wxVERTICAL);
+  auto* right = new wxBoxSizer(wxVERTICAL);
+
+  auto* chart_box = new wxStaticBoxSizer(wxVERTICAL, panel, "Chart safety");
+  chart_box->Add(require_authoritative_chart_safety, 0, wxALL, 8);
+  auto* chart_grid = new wxFlexGridSizer(2, 8, 8);
+  chart_grid->AddGrowableCol(1);
+  AddRow(chart_grid, panel, Label("minimum-chart-depth"), minimum_chart_depth);
+  chart_box->Add(chart_grid, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
+  chart_box->Add(chart_safety_status, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM,
+                 8);
+  left->Add(chart_box, 0, wxEXPAND | wxBOTTOM, 8);
+
+  auto* environment_box =
+      new wxStaticBoxSizer(wxVERTICAL, panel, "Environmental coverage");
+  environment_box->Add(require_current_data, 0, wxALL, 8);
+  environment_box->Add(require_wave_data, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
+  auto* environment_grid = new wxFlexGridSizer(2, 8, 8);
+  environment_grid->AddGrowableCol(1);
+  environment_grid->Add(limit_opposing_wind_current, 0,
+                        wxALIGN_CENTER_VERTICAL);
+  environment_grid->Add(max_opposing_wind_current, 1, wxEXPAND);
+  environment_box->Add(environment_grid, 0,
+                       wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
+  left->Add(environment_box, 0, wxEXPAND);
+
+  auto* solver_box =
+      new wxStaticBoxSizer(wxVERTICAL, panel, "Portable route engine");
+  solver_box->Add(adaptive_headings, 0, wxALL, 8);
+  auto* solver_grid = new wxFlexGridSizer(2, 8, 8);
+  solver_grid->AddGrowableCol(1);
+  AddRow(solver_grid, panel, Label("heading-step"), heading_step);
+  AddRow(solver_grid, panel, Label("refined-heading-step"),
+         refined_heading_step);
+  AddRow(solver_grid, panel, Label("spatial-cell"), spatial_cell);
+  AddRow(solver_grid, panel, Label("labels-per-cell"), labels_per_cell);
+  AddRow(solver_grid, panel, Label("maximum-hours"), max_hours);
+  AddRow(solver_grid, panel, Label("maximum-states"), max_states);
+  AddRow(solver_grid, panel, Label("departure-workers"), departure_workers);
+  solver_box->Add(solver_grid, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
+  right->Add(solver_box, 0, wxEXPAND);
+
+  columns->Add(left, 1, wxEXPAND);
+  columns->Add(right, 1, wxEXPAND);
+  root->Add(columns, 0, wxEXPAND | wxALL, 8);
+  auto* note = new wxStaticText(
+      panel, wxID_ANY,
+      "Authoritative validation fails closed when chart or depth evidence is "
+      "missing. Solver resource limits and departure workers bound CPU and "
+      "memory use without weakening final route replay.");
+  note->Wrap(panel->FromDIP(720));
+  root->Add(note, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
   panel->SetSizer(root);
+
   adaptive_headings->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
     refined_heading_step->Enable(adaptive_headings->GetValue());
   });
+  limit_opposing_wind_current->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
+    max_opposing_wind_current->Enable(limit_opposing_wind_current->GetValue() &&
+                                      use_currents->GetValue());
+  });
+  panel->FitInside();
   return panel;
 }
 
 wxPanel* PortableWeatherRoutingHost::Impl::CreateResultsPanel(
     wxNotebook* book) {
-  auto* panel = new wxPanel(book);
+  auto* panel = new wxScrolledWindow(book);
+  panel->SetScrollRate(0, panel->FromDIP(12));
   auto* root = new wxBoxSizer(wxVERTICAL);
   metrics = new wxStaticText(panel, wxID_ANY, "No route calculated");
   root->Add(metrics, 0, wxEXPAND | wxALL, 12);
@@ -2124,6 +2268,7 @@ wxPanel* PortableWeatherRoutingHost::Impl::CreateResultsPanel(
   output_actions->Add(send_to_opencpn, 0);
   root->Add(output_actions, 0, wxALL, 12);
   panel->SetSizer(root);
+  panel->FitInside();
   return panel;
 }
 
@@ -2528,6 +2673,29 @@ void PortableWeatherRoutingHost::Impl::LoadSettings() {
     isochrone_display.show_front_points =
         config->ReadBool("isochroneShowFrontPoints", false);
   }
+  if (frame) {
+    const wxSize size = frame->GetSize();
+    const long width = config->ReadLong("frameWidth", size.x);
+    const long height = config->ReadLong("frameHeight", size.y);
+    if (width >= frame->GetMinSize().x && height >= frame->GetMinSize().y)
+      frame->SetSize(wxSize(width, height));
+  }
+  if (editor) {
+    const wxSize size = editor->GetSize();
+    const long width = config->ReadLong("editorWidth", size.x);
+    const long height = config->ReadLong("editorHeight", size.y);
+    if (width >= editor->GetMinSize().x && height >= editor->GetMinSize().y)
+      editor->SetSize(wxSize(width, height));
+  }
+  if (manager_splitter)
+    manager_splitter->SetSashPosition(
+        config->ReadLong("managerSashPosition", frame->FromDIP(285)));
+  if (notebook) {
+    const long selected_tab = config->ReadLong("selectedTab", 0);
+    if (selected_tab >= 0 &&
+        selected_tab < static_cast<long>(notebook->GetPageCount()))
+      notebook->SetSelection(static_cast<int>(selected_tab));
+  }
   config->SetPath(old_path);
 
   require_current_data->Enable(use_currents->GetValue());
@@ -2539,6 +2707,8 @@ void PortableWeatherRoutingHost::Impl::LoadSettings() {
   limit_opposing_wind_current->Enable(use_currents->GetValue());
   max_opposing_wind_current->Enable(use_currents->GetValue() &&
                                     limit_opposing_wind_current->GetValue());
+  departure_window->Enable(compare_departures->GetValue());
+  departure_spacing->Enable(compare_departures->GetValue());
   refined_heading_step->Enable(adaptive_headings->GetValue());
   route_choice->Enable(use_opencpn_route->GetValue() &&
                        !navigation_routes.empty());
@@ -2567,7 +2737,7 @@ void PortableWeatherRoutingHost::Impl::SaveSettings() {
   if (!config) return;
   const wxString old_path = config->GetPath();
   config->SetPath("/PortablePlugins/" + plugin_id + "/Routing");
-  config->Write("settingsSchema", 8L);
+  config->Write("settingsSchema", 9L);
   config->Write("routingExists", routing_exists);
   if (vessel_performance_file)
     config->Write("vesselPerformancePath", vessel_performance_file->GetPath());
@@ -2682,16 +2852,29 @@ void PortableWeatherRoutingHost::Impl::SaveSettings() {
                 isochrone_display.fade_during_cursor_inspection);
   config->Write("isochroneShowFrontPoints",
                 isochrone_display.show_front_points);
+  if (frame) {
+    config->Write("frameWidth", static_cast<long>(frame->GetSize().x));
+    config->Write("frameHeight", static_cast<long>(frame->GetSize().y));
+  }
+  if (editor) {
+    config->Write("editorWidth", static_cast<long>(editor->GetSize().x));
+    config->Write("editorHeight", static_cast<long>(editor->GetSize().y));
+  }
+  if (manager_splitter)
+    config->Write("managerSashPosition",
+                  static_cast<long>(manager_splitter->GetSashPosition()));
+  if (notebook)
+    config->Write("selectedTab", static_cast<long>(notebook->GetSelection()));
   config->SetPath(old_path);
   config->Flush();
 }
 
 void PortableWeatherRoutingHost::Impl::CreateEditor() {
-  editor =
-      new wxDialog(frame, wxID_ANY, "Routing Configuration — " + surface_title,
-                   wxDefaultPosition, wxSize(820, 760),
-                   wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
-  editor->SetMinSize(editor->FromDIP(wxSize(680, 560)));
+  editor = new wxDialog(frame, wxID_ANY,
+                        "Weather Routing Configuration — iWeatherRouting",
+                        wxDefaultPosition, wxSize(1080, 820),
+                        wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+  editor->SetMinSize(editor->FromDIP(wxSize(820, 600)));
   auto* root = new wxBoxSizer(wxVERTICAL);
   notebook = new wxNotebook(editor, wxID_ANY);
   notebook->AddPage(CreateRoutePanel(notebook), surface_tabs[0]);
@@ -2704,7 +2887,7 @@ void PortableWeatherRoutingHost::Impl::CreateEditor() {
   calculate = new wxButton(editor, wxID_ANY, Label("calculate"));
   cancel = new wxButton(editor, wxID_ANY, Label("cancel"));
   cancel->Enable(false);
-  auto* close = new wxButton(editor, wxID_CLOSE, "Close");
+  auto* close = new wxButton(editor, wxID_CLOSE, "OK");
   buttons->Add(new_routing, 0, wxRIGHT, 8);
   buttons->AddStretchSpacer();
   buttons->Add(calculate, 0, wxRIGHT, 8);
@@ -2813,9 +2996,25 @@ void PortableWeatherRoutingHost::Impl::PopulateManagerRouting(
           .Trim();
     return source->GetStringSelection();
   };
-  const long row = manager_routings->InsertItem(0, state);
-  manager_routings->SetItem(row, 1, position_name(true));
-  manager_routings->SetItem(row, 2, position_name(false));
+  auto start_type = [this] {
+    if (use_opencpn_route && use_opencpn_route->GetValue())
+      return wxString("OpenCPN Route");
+    switch (start_source->GetSelection()) {
+      case kVesselPosition:
+        return wxString("From Boat");
+      case kOpenCpnWaypoint:
+        return wxString("From Waypoint");
+      case kChartCursor:
+        return wxString("From Cursor");
+      case kManualCoordinates:
+        return wxString("Manual");
+      default:
+        return wxString("Unknown");
+    }
+  };
+  const long row = manager_routings->InsertItem(0, "\u2713");
+  manager_routings->SetItem(row, 1, start_type());
+  manager_routings->SetItem(row, 2, position_name(true));
   int64_t configured_departure = 0;
   wxString departure_error;
   manager_routings->SetItem(
@@ -2823,22 +3022,24 @@ void PortableWeatherRoutingHost::Impl::PopulateManagerRouting(
       GetDepartureUnixTime(&configured_departure, &departure_error)
           ? FormatRoutingTime(configured_departure)
           : "Invalid departure");
+  manager_routings->SetItem(row, 4, position_name(false));
   if (selected_departure_result != std::numeric_limits<size_t>::max() &&
       selected_departure_result < departure_result_rows.size() &&
       departure_result_rows[selected_departure_result].success) {
     const auto& outcome =
         departure_result_rows[selected_departure_result].outcome;
     manager_routings->SetItem(
-        row, 4,
+        row, 5,
         FormatRoutingTime(outcome.departure_unix_time +
                           static_cast<int64_t>(outcome.duration_seconds)));
-    manager_routings->SetItem(row, 5, FormatElapsed(outcome.duration_seconds));
+    manager_routings->SetItem(row, 6, FormatElapsed(outcome.duration_seconds));
     manager_routings->SetItem(
-        row, 6, wxString::Format("%.1f NM", outcome.distance_nautical_miles));
+        row, 7, wxString::Format("%.1f NM", outcome.distance_nautical_miles));
   } else {
-    for (int column = 4; column <= 6; ++column)
+    for (int column = 5; column <= 7; ++column)
       manager_routings->SetItem(row, column, "N/A");
   }
+  manager_routings->SetItem(row, 8, state);
   manager_routings->SetItemState(row, wxLIST_STATE_SELECTED,
                                  wxLIST_STATE_SELECTED);
   for (int column = 0; column < manager_routings->GetColumnCount(); ++column)
@@ -2872,6 +3073,8 @@ void PortableWeatherRoutingHost::Impl::UpdateRoutingActionState() {
   auto enable_menu = [this](const wxString& action, bool enabled) {
     const auto item = surface_menu_items.find(action);
     if (item != surface_menu_items.end()) item->second->Enable(enabled);
+    const auto context = context_menu_items.find(action);
+    if (context != context_menu_items.end()) context->second->Enable(enabled);
   };
   enable_menu("new-routing", !calculation_running);
   enable_menu("load-opencpn-route", !calculation_running);
@@ -2923,6 +3126,44 @@ void PortableWeatherRoutingHost::Impl::ResetRouting() {
   PopulateManagerRouting("Not computed");
   if (status) status->SetLabel("Routing reset; configuration retained");
   UpdateRoutingActionState();
+}
+
+void PortableWeatherRoutingHost::Impl::ResetAdvancedSettings() {
+  if (calculation_running) return;
+  maximum_latitude->SetValue(89);
+  maximum_search_angle->SetValue(120);
+  destination_tolerance->SetValue("1.0");
+  land_safety_margin->SetValue("0.4");
+  min_wind_angle->SetValue(40);
+  max_wind_angle->SetValue(180);
+  tack_penalty->SetValue(300);
+  gybe_penalty->SetValue(300);
+  upwind_efficiency->SetValue(100);
+  downwind_efficiency->SetValue(100);
+  allow_motor_sailing->SetValue(false);
+  allow_motor->SetValue(false);
+  motor_threshold->SetValue("3.0");
+  motor_speed->SetValue("5.5");
+  motor_sailing_boost->SetValue("1.5");
+  motor_hysteresis->SetValue("0.2");
+  minimum_motor_run->SetValue(1800);
+  mode_change_penalty->SetValue(120);
+  limit_motor_hours->SetValue(false);
+  maximum_motor_hours->SetValue("24.0");
+  fuel_consumption->SetValue("2.5");
+  limit_fuel->SetValue(false);
+  maximum_fuel->SetValue("100.0");
+  for (auto* control :
+       {motor_threshold, motor_speed, motor_sailing_boost, motor_hysteresis,
+        maximum_motor_hours, fuel_consumption, maximum_fuel})
+    control->Enable(false);
+  minimum_motor_run->Enable(false);
+  mode_change_penalty->Enable(false);
+  limit_motor_hours->Enable(false);
+  limit_fuel->Enable(false);
+  if (status)
+    status->SetLabel("Advanced parameters reset to portable defaults");
+  SaveSettings();
 }
 
 void PortableWeatherRoutingHost::Impl::StartNewRouting() {
@@ -3021,9 +3262,9 @@ void PortableWeatherRoutingHost::Impl::DispatchSurfaceAction(
 
 void PortableWeatherRoutingHost::Impl::CreateFrame() {
   frame = new wxFrame(parent, wxID_ANY, surface_title, wxDefaultPosition,
-                      wxSize(940, 620),
+                      wxSize(1120, 620),
                       wxDEFAULT_FRAME_STYLE | wxFRAME_FLOAT_ON_PARENT);
-  frame->SetMinSize(frame->FromDIP(wxSize(720, 460)));
+  frame->SetMinSize(frame->FromDIP(wxSize(780, 460)));
 
   auto* menu_bar = new wxMenuBar;
   for (const auto& menu_definition : surface_menus) {
@@ -3051,11 +3292,11 @@ void PortableWeatherRoutingHost::Impl::CreateFrame() {
   frame->SetMenuBar(menu_bar);
 
   auto* root = new wxBoxSizer(wxVERTICAL);
-  auto* splitter = new wxSplitterWindow(frame, wxID_ANY, wxDefaultPosition,
-                                        wxDefaultSize, wxSP_3D);
-  splitter->SetSashGravity(0.32);
-  splitter->SetMinimumPaneSize(frame->FromDIP(180));
-  auto* positions_panel = new wxPanel(splitter);
+  manager_splitter = new wxSplitterWindow(frame, wxID_ANY, wxDefaultPosition,
+                                          wxDefaultSize, wxSP_3D);
+  manager_splitter->SetSashGravity(0.28);
+  manager_splitter->SetMinimumPaneSize(frame->FromDIP(180));
+  auto* positions_panel = new wxPanel(manager_splitter);
   auto* positions_root = new wxStaticBoxSizer(
       wxVERTICAL, positions_panel,
       surface_definition["manager"]["positions"]["label"].AsString());
@@ -3071,7 +3312,7 @@ void PortableWeatherRoutingHost::Impl::CreateFrame() {
   positions_root->Add(manager_positions, 1, wxEXPAND | wxALL, 5);
   positions_panel->SetSizer(positions_root);
 
-  auto* routings_panel = new wxPanel(splitter);
+  auto* routings_panel = new wxPanel(manager_splitter);
   auto* routings_root = new wxStaticBoxSizer(
       wxVERTICAL, routings_panel,
       surface_definition["manager"]["routings"]["label"].AsString());
@@ -3084,10 +3325,43 @@ void PortableWeatherRoutingHost::Impl::CreateFrame() {
     manager_routings->InsertColumn(
         index,
         surface_definition["manager"]["routings"]["columns"][index].AsString());
+  routing_context_menu = new wxMenu;
+  auto append_context_action = [this](const wxString& action) {
+    wxString label = action;
+    for (const auto& menu : surface_menus) {
+      for (const auto& item : menu.items) {
+        if (!item.separator && item.id == action) {
+          label = item.label;
+          break;
+        }
+      }
+    }
+    auto* item = routing_context_menu->Append(wxID_ANY, label);
+    context_menu_items[action] = item;
+    frame->Bind(
+        wxEVT_MENU,
+        [this, action](wxCommandEvent&) { DispatchSurfaceAction(action); },
+        item->GetId());
+  };
+  append_context_action("new-routing");
+  append_context_action("load-opencpn-route");
+  append_context_action("edit-routing");
+  routing_context_menu->AppendSeparator();
+  append_context_action("compute-routing");
+  append_context_action("stop-routing");
+  append_context_action("reset-routing");
+  routing_context_menu->AppendSeparator();
+  append_context_action("delete-routing");
+  routing_context_menu->AppendSeparator();
+  append_context_action("export-gpx");
+  append_context_action("send-to-opencpn");
   manager_routings->Bind(wxEVT_LIST_ITEM_ACTIVATED,
                          [this](wxListEvent&) { ShowEditor(0); });
+  manager_routings->Bind(wxEVT_CONTEXT_MENU, [this](wxContextMenuEvent&) {
+    manager_routings->PopupMenu(routing_context_menu);
+  });
   routings_root->Add(manager_routings, 1, wxEXPAND | wxALL, 5);
-  auto* actions = new wxGridSizer(3, 6, 6);
+  auto* actions = new wxBoxSizer(wxHORIZONTAL);
   for (int index = 0; index < surface_definition["manager"]["actions"].Size();
        ++index) {
     wxJSONValue action_definition =
@@ -3098,7 +3372,7 @@ void PortableWeatherRoutingHost::Impl::CreateFrame() {
     button->Bind(wxEVT_BUTTON, [this, action](wxCommandEvent&) {
       DispatchSurfaceAction(action);
     });
-    actions->Add(button, 1, wxEXPAND);
+    actions->Add(button, 0, wxRIGHT, 6);
     if (action == "compute-routing") manager_compute = button;
     if (action == "new-routing") manager_new = button;
     if (action == "edit-routing") manager_edit = button;
@@ -3111,16 +3385,16 @@ void PortableWeatherRoutingHost::Impl::CreateFrame() {
   manager_stop->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
     DispatchSurfaceAction("stop-routing");
   });
-  actions->Add(manager_stop, 1, wxEXPAND);
+  actions->Add(manager_stop, 0);
   routings_root->Add(actions, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
+  status = new wxStaticText(routings_panel, wxID_ANY, "Ready");
+  gauge = new wxGauge(routings_panel, wxID_ANY, 100);
+  routings_root->Add(status, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
+  routings_root->Add(gauge, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
   routings_panel->SetSizer(routings_root);
-  splitter->SplitVertically(positions_panel, routings_panel,
-                            frame->FromDIP(285));
-  root->Add(splitter, 1, wxEXPAND | wxALL, 5);
-  status = new wxStaticText(frame, wxID_ANY, "Ready");
-  gauge = new wxGauge(frame, wxID_ANY, 100);
-  root->Add(status, 0, wxEXPAND | wxLEFT | wxRIGHT, 12);
-  root->Add(gauge, 0, wxEXPAND | wxALL, 12);
+  manager_splitter->SplitVertically(positions_panel, routings_panel,
+                                    frame->FromDIP(285));
+  root->Add(manager_splitter, 1, wxEXPAND | wxALL, 5);
   frame->SetSizer(root);
 
   CreateEditor();
@@ -4581,6 +4855,9 @@ void PortableWeatherRoutingHost::Impl::Shutdown() {
   if (stability_worker.joinable()) stability_worker.join();
   if (frame) {
     SaveSettings();
+    delete routing_context_menu;
+    routing_context_menu = nullptr;
+    context_menu_items.clear();
     frame->Destroy();
     frame = nullptr;
   }
