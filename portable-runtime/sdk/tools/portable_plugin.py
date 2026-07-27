@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Standalone API 0.3 portable-plugin scaffold, linter and packager."""
+"""Standalone OPP API 0.4 portable-plugin scaffold, linter and packager."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import pathlib
 import re
@@ -23,10 +24,11 @@ SAFE_VERSION = re.compile(
     r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
 )
-API_03 = ">=0.3.0 <0.4.0"
+API_04 = ">=0.4.0 <0.5.0"
 RUNTIME_01 = ">=0.1.0 <0.2.0"
 PERMISSIONS = {
     "ui.commands",
+    "ui.surfaces",
     "navigation.position.read",
     "navigation.nmea.read",
     "navigation.nmea2000.read",
@@ -36,6 +38,8 @@ PERMISSIONS = {
     "navigation.objects.read",
     "navigation.objects.write",
     "navigation.nmea.write",
+    "communications.outputs.read",
+    "navigation.nmea2000.write",
     "chart.cursor.read",
     "chart.viewport.read",
     "chart.input.pointer",
@@ -56,6 +60,7 @@ PERMISSIONS = {
     "charts.coverage",
     "charts.segment-safety",
     "network.http",
+    "network.https",
     "storage.private",
     "credentials.provider",
     "weather-routing.compute",
@@ -67,11 +72,12 @@ EVENT_PERMISSIONS = {
     "navigation.nmea2000": "navigation.nmea2000.read",
     "navigation.signalk": "navigation.signalk.read",
     "navigation.position": "navigation.position.read",
-    "navigation.ais-target": "navigation.ais.read",
+    "navigation.ais": "navigation.ais.read",
     "navigation.active-leg": "navigation.active-leg.read",
     "chart.cursor": "chart.cursor.read",
     "chart.viewport": "chart.viewport.read",
     "opencpn.plugin-message": "plugin.messages.receive",
+    "host.environment": None,
 }
 
 
@@ -120,10 +126,10 @@ def lint_manifest(path: pathlib.Path, require_files: bool = True) -> dict:
         raise LintError("version must be semantic versioning")
     if value.get("runtime") != RUNTIME_01:
         raise LintError(f"runtime must be {RUNTIME_01!r}")
-    if value.get("portable_api") != API_03:
-        raise LintError(f"portable_api must be {API_03!r} for this SDK")
+    if value.get("portable_api") != API_04:
+        raise LintError(f"portable_api must be {API_04!r} for this SDK")
     if value.get("portable_world") != "plugin":
-        raise LintError("API 0.3 supports only the plugin world")
+        raise LintError("OPP API 0.4 supports only the plugin world")
     component = safe_relative(value.get("component"), "component")
     permissions = value.get("permissions")
     if not isinstance(permissions, list) or any(
@@ -153,10 +159,10 @@ def lint_manifest(path: pathlib.Path, require_files: bool = True) -> dict:
         if not isinstance(subscription, dict):
             raise LintError(f"subscription {index} must be an object")
         event = subscription.get("event")
-        permission = EVENT_PERMISSIONS.get(event)
-        if permission is None:
+        if event not in EVENT_PERMISSIONS:
             raise LintError(f"subscription {index} has an unknown event")
-        if permission not in permissions:
+        permission = EVENT_PERMISSIONS[event]
+        if permission is not None and permission not in permissions:
             raise LintError(
                 f"subscription {index} requires permission {permission}"
             )
@@ -166,6 +172,32 @@ def lint_manifest(path: pathlib.Path, require_files: bool = True) -> dict:
             raise LintError(f"subscription {index} topic prefix is too long")
         if not isinstance(limit, int) or not 1 <= limit <= 1024:
             raise LintError(f"subscription {index} queue_limit must be 1..1024")
+    domains = value.get("https_domains", [])
+    if not isinstance(domains, list) or len(domains) > 32:
+        raise LintError("https_domains must contain at most 32 entries")
+    domain_pattern = re.compile(
+        r"^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
+        r"(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$"
+    )
+    def valid_https_domain(domain: object) -> bool:
+        if (
+            not isinstance(domain, str)
+            or not domain_pattern.fullmatch(domain)
+            or not any(character.isalpha() for character in domain)
+        ):
+            return False
+        try:
+            ipaddress.ip_address(domain)
+            return False
+        except ValueError:
+            return True
+
+    if any(not valid_https_domain(domain) for domain in domains):
+        raise LintError("https_domains contains an invalid exact domain")
+    if len(set(domains)) != len(domains):
+        raise LintError("https_domains contains duplicates")
+    if domains and "network.https" not in permissions:
+        raise LintError("https_domains requires network.https")
     if require_files:
         root = path.parent
         for relative in declared_paths:
@@ -261,12 +293,12 @@ def command_new(args: argparse.Namespace) -> None:
     manifest["id"] = args.id
     manifest["name"] = args.name
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", "utf-8")
-    contracts = pathlib.Path(__file__).resolve().parents[2] / "contracts" / "0.3"
-    shutil.copytree(contracts, destination / "contracts" / "0.3")
+    contracts = pathlib.Path(__file__).resolve().parents[2] / "contracts" / "0.4"
+    shutil.copytree(contracts, destination / "contracts" / "0.4")
     source_path = destination / "src" / "lib.rs"
     source_path.write_text(
         source_path.read_text("utf-8").replace(
-            'path: "../../contracts/0.3"', 'path: "contracts/0.3"'
+            'path: "../../contracts/0.4"', 'path: "contracts/0.4"'
         ),
         "utf-8",
     )

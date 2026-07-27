@@ -1,33 +1,33 @@
 # Pre-alpha portable capability readiness
 
-Status date: 2026-07-24.
+Status date: 2026-07-27.
 
 ## Implemented foundation
 
 - The Portable Plugin Manager is a conventional OpenCPN plugin. It supplies
   the portable runtime to an otherwise stock OpenCPN build; no portable loader
   changes are required in OpenCPN core.
-- Installed API `0.1` and `0.2` components remain loadable. API `0.3` adds the
-  general third-party author profile without changing the bundled
-  applications' signed API selection.
-- API `0.3` has typed, permission-gated interfaces for:
-  - toolbar and chart-context actions, including runtime state and removal;
-  - host-owned declarative surfaces and scoped user-file grants;
+- Installed API `0.1`, `0.2` and `0.3` components remain loadable and frozen.
+  OPP API `0.4` is the named general third-party author profile.
+- OPP API `0.4` has typed, permission-gated interfaces for:
+  - toolbar plus chart/AIS/route/waypoint/track contextual actions;
+  - role-aware host-owned declarative surfaces and scoped user-file grants;
   - private atomic storage and simple persistent settings;
-  - vessel position and bounded waypoint/route/track reads;
+  - enriched vessel position and paged, revisioned navigation reads;
   - user-confirmed waypoint/route/track mutation;
-  - retained renderer-independent scene layers containing polylines,
-    polygons, circles, package icons and text;
+  - retained, multi-canvas renderer-independent scene layers with explicit
+    render phase, placement and style;
   - pointer/key input, with package-scoped interactive scene hits;
-  - NMEA 0183 output;
+  - NMEA 0183 output and allowlisted informational NMEA 2000 output;
+  - bounded HTTPS to exact manifest-declared domains;
   - one-shot/repeating timers;
   - native OpenCPN plugin-message compatibility;
   - asynchronous typed package-to-package RPC.
-- The bounded event broker supplies NMEA 0183, common NMEA 2000 PGNs,
+- The bounded event broker supplies typed NMEA 0183, common NMEA 2000 PGNs,
   Signal K, vessel position, AIS, active-leg, cursor, viewport and native
-  plugin-message events. Signed manifest subscriptions and dynamic API `0.3`
-  subscriptions use the same permissions, topic filtering, queue limits and
-  lifecycle revocation.
+  plugin-message and host-environment events. Signed manifest subscriptions
+  and dynamic OPP API `0.4` subscriptions use the same permissions, topic
+  filtering, queue limits and lifecycle revocation.
 - High-rate state events coalesce by topic. Ordered streams drop the oldest
   entry at their declared bound. All guest calls run on package-serial
   executors with generation checks.
@@ -42,7 +42,7 @@ Status date: 2026-07-24.
   confirmation boundary.
 - A standalone Rust author kit creates a pinned project, lints its manifest,
   builds it and creates deterministic development packages.
-- A headless fake host runs the API `0.3` template through the production
+- A headless fake host runs the OPP API `0.4` template through the production
   bridge and exercises lifecycle, actions, settings, declarative surfaces,
   scenes, timers, storage and RPC registration.
 
@@ -50,11 +50,11 @@ Status date: 2026-07-24.
 
 | Probe | Current assertion |
 |---|---|
-| Compatibility | API `0.1`, modular API `0.2`, and author API `0.3` components use the same bridge |
+| Compatibility | API `0.1`–`0.3` and OPP API `0.4` components use the same bridge |
 | Event broker | Prefix filtering, FIFO sequence, queue bound, drop count, state coalescing and payload bound |
 | Live producers | NMEA 0183/2000, Signal K, position, AIS, active leg, cursor and viewport reach only permitted subscriptions |
 | Actions | Toolbar/context registration, state changes and lifecycle removal are host-owned |
-| Navigation | Reads are bounded; writes require user confirmation; NMEA output is validated and rate-limited |
+| Navigation | Reads are paged and revisioned; writes require user confirmation; NMEA output is allowlisted and rate-limited |
 | Scenes/input | Retained primitives render through host paths and interactive hits are delivered only to the owning package |
 | Storage | Private writes are atomic; user files require short-lived host grants |
 | Timers | Package quotas, minimum/maximum periods and lifecycle cancellation are enforced |
@@ -66,7 +66,7 @@ Status date: 2026-07-24.
 The detailed audit is in
 `docs/portable-plugin-runtime/third-party-portability-audit.md`. In summary:
 
-- `testplugin_pi` can be rewritten against API `0.3`; its ODAPI-style JSON
+- `testplugin_pi` can be rewritten against OPP API `0.4`; its ODAPI-style JSON
   exchange should become typed asynchronous RPC.
 - `windvane_pi` has the required event, overlay, toolbar, persistence and NMEA
   output building blocks.
@@ -76,17 +76,16 @@ The detailed audit is in
   scenes. Exact object hit-testing remains guest geometry driven; the host hit
   hint is deliberately only a bounded coarse filter.
 - `crowdsource_pi` is **not yet portable-ready**. Its raw socket transport is
-  intentionally unavailable, and the current host network capability is
-  download-only. It requires a constrained asynchronous HTTPS request/upload
-  capability and a compatible server endpoint.
+  intentionally unavailable. OPP API `0.4` now has bounded HTTPS
+  request/upload to exact domains, but this plugin still needs cancellation,
+  credential-provider integration, a compatible HTTPS server endpoint and
+  package-specific end-to-end security tests.
 
 ## Required before an OpenCPN alpha publication
 
-1. Specify and implement a bounded asynchronous HTTPS request/upload service:
-   TLS-only by default, explicit method/header policy, request and response
-   quotas, redirect policy, cancellation, credential-provider integration and
-   no raw sockets.
-2. Add API `0.3` integration fixtures through the real Manager for action,
+1. Add cancellation and credential-provider integration to the implemented
+   TLS-only, domain-scoped HTTPS broker.
+2. Add OPP API `0.4` integration fixtures through the real Manager for action,
    scene/input, surface/file, timer and two-package RPC lifecycle behavior;
    the fake host remains the fast author test.
 3. Complete accessibility, DPI, multi-canvas and failure-path GUI testing for

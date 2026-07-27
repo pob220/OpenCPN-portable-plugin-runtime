@@ -7,6 +7,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -41,6 +42,7 @@
 #include "declarative_ui.h"
 #include "environment_provider.h"
 #include "job_scheduler.h"
+#include "https_service.h"
 #include "permission_store.h"
 #include "service_version.h"
 #include "serial_executor.h"
@@ -203,6 +205,19 @@ bool ParseOverlayStyle(wxJSONValue value, OverlayStyle* style) {
   if (style->has_fill && !ParseOverlayColor(value["fill"], &style->fill))
     return false;
   style->width_pixels = static_cast<float>(value["width_pixels"].AsDouble());
+  style->dash_pattern.clear();
+  if (value.HasMember("dash_pattern")) {
+    if (!value["dash_pattern"].IsArray() || value["dash_pattern"].Size() > 16)
+      return false;
+    for (int index = 0; index < value["dash_pattern"].Size(); ++index) {
+      const float length =
+          static_cast<float>(value["dash_pattern"][index].AsDouble());
+      if (!std::isfinite(length) || length < 0.5F || length > 512.0F)
+        return false;
+      style->dash_pattern.push_back(length);
+    }
+    if (style->dash_pattern.size() % 2 != 0) return false;
+  }
   return std::isfinite(style->width_pixels) && style->width_pixels >= 0.5F &&
          style->width_pixels <= 64.0F;
 }
@@ -767,6 +782,8 @@ public:
     std::uint32_t portable_world = OCPN_PORTABLE_WORLD_PLUGIN;
     std::set<std::string> requested_permissions;
     std::set<std::string> permissions;
+    std::set<std::string> https_domains;
+    std::deque<std::chrono::steady_clock::time_point> https_history;
     std::map<std::string, std::string> provided_services;
     std::map<std::string, std::string> required_services;
     std::unique_ptr<EnvironmentProvider> environment_provider;
@@ -882,8 +899,8 @@ public:
   bool Unload(const std::string& package_id, std::string* diagnostic);
   bool IsEnabled(const std::string& package_id) const;
   void Shutdown();
-  bool HandleAction(const std::string& package_id,
-                    const std::string& action_id);
+  bool HandleAction(const std::string& package_id, const std::string& action_id,
+                    RuntimeActionContext context = {});
   bool HandleSurfaceEvent(const std::string& package_id,
                           const std::string& surface_id,
                           const std::string& control_id,
@@ -1079,7 +1096,8 @@ public:
     return OpenNamedSurface(user_data, "routing.workbench");
   }
   static std::int32_t OpenNamedSurface(void* user_data,
-                                       const std::string& surface_id);
+                                       const std::string& surface_id,
+                                       const std::string& role = {});
   static std::int32_t OpenSurface(void* user_data, const char* surface_id,
                                   std::size_t surface_id_length) {
     return OpenNamedSurface(user_data, Text(surface_id, surface_id_length));
@@ -1169,6 +1187,14 @@ public:
   double sog = 0.0;
   bool has_cog = false;
   bool has_sog = false;
+  double heading_true = 0.0;
+  double heading_magnetic = 0.0;
+  double magnetic_variation = 0.0;
+  bool has_heading_true = false;
+  bool has_heading_magnetic = false;
+  bool has_magnetic_variation = false;
+  std::int64_t fix_unix_time = 0;
+  std::uint16_t satellites = 0;
 };
 
 std::int32_t RuntimeEngine::Impl::StartJob(void* user_data, const char* job_id,
@@ -1374,18 +1400,23 @@ void RuntimeEngine::Impl::RunTimers() {
 }
 
 std::int32_t RuntimeEngine::Impl::OpenNamedSurface(
-    void* user_data, const std::string& surface_id) {
+    void* user_data, const std::string& surface_id, const std::string& role) {
   auto* instance = static_cast<Instance*>(user_data);
-  if (!instance || !instance->owner ||
-      !instance->owner->Permitted(*instance, "ui.commands") ||
-      !instance->enabled || instance->failed) {
+  const bool has_permission =
+      instance && instance->owner &&
+      (instance->owner->Permitted(*instance, "ui.commands") ||
+       (instance->portable_api == OCPN_PORTABLE_API_V04 &&
+        instance->owner->Permitted(*instance, "ui.surfaces")));
+  if (!instance || !instance->owner || !has_permission || !instance->enabled ||
+      instance->failed) {
     return -1;
   }
   const auto item = instance->surfaces.find(surface_id);
   if (item == instance->surfaces.end() || !instance->owner->surface_opened)
     return -2;
   const std::string package_id = instance->id;
-  const DeclarativeSurface surface = item->second;
+  DeclarativeSurface surface = item->second;
+  if (!role.empty()) surface.role = role;
   const auto opened = instance->owner->surface_opened;
   instance->owner->Publish(
       [opened, package_id, surface]() { opened(package_id, surface); });
@@ -1974,6 +2005,7 @@ std::int32_t RuntimeEngine::Impl::RegisterRuntimeAction(
   action.action_id = Text(action_id, action_id_length);
   action.label = Text(label, label_length);
   action.tooltip = Text(tooltip, tooltip_length);
+  action.locations = {"toolbar"};
   const wxString resource =
       wxString::FromUTF8(Text(icon_resource, icon_resource_length));
   if (!IsSafeName(action.action_id) || action.label.empty()) return -2;
@@ -2300,7 +2332,8 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
   const std::string operation_name = Text(operation, operation_length);
   const std::string request_text = Text(request_json, request_json_length);
   if (!instance || !instance->owner || !response_length ||
-      instance->portable_api != OCPN_PORTABLE_API_V03 ||
+      (instance->portable_api != OCPN_PORTABLE_API_V03 &&
+       instance->portable_api != OCPN_PORTABLE_API_V04) ||
       operation_name.empty() || operation_name.size() > 128 ||
       request_text.size() > kAuthorRequestLimit) {
     return -1;
@@ -2326,6 +2359,39 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
     return finish(status, AuthorError(code, message, retryable));
   };
 
+  if (operation_name == "navigation.get-vessel-position") {
+    if (!instance->owner->Permitted(*instance, "navigation.position.read"))
+      return fail(-4, "permission-denied",
+                  "vessel position permission was not granted");
+    wxJSONValue response;
+    {
+      std::lock_guard<std::mutex> lock(instance->owner->position_mutex);
+      if (!instance->owner->position_valid)
+        return fail(-6, "position-unavailable",
+                    "OpenCPN has no valid vessel position", true);
+      const auto& owner = *instance->owner;
+      response["latitude"] = owner.latitude;
+      response["longitude"] = owner.longitude;
+      response["course_over_ground"] =
+          owner.has_cog ? wxJSONValue(owner.cog) : wxJSONValue(wxJSONTYPE_NULL);
+      response["speed_over_ground"] =
+          owner.has_sog ? wxJSONValue(owner.sog) : wxJSONValue(wxJSONTYPE_NULL);
+      response["heading_true"] = owner.has_heading_true
+                                     ? wxJSONValue(owner.heading_true)
+                                     : wxJSONValue(wxJSONTYPE_NULL);
+      response["heading_magnetic"] = owner.has_heading_magnetic
+                                         ? wxJSONValue(owner.heading_magnetic)
+                                         : wxJSONValue(wxJSONTYPE_NULL);
+      response["magnetic_variation"] =
+          owner.has_magnetic_variation ? wxJSONValue(owner.magnetic_variation)
+                                       : wxJSONValue(wxJSONTYPE_NULL);
+      response["fix_unix_time"] =
+          static_cast<wxLongLong_t>(owner.fix_unix_time);
+      response["satellites"] = owner.satellites;
+    }
+    return finish(0, response);
+  }
+
   if (operation_name == "actions.register") {
     if (!instance->owner->Permitted(*instance, "ui.commands"))
       return fail(-4, "permission-denied",
@@ -2337,6 +2403,7 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
     action.tooltip = request["tooltip"].AsString().ToStdString();
     action.toolbar = false;
     action.context_menu = false;
+    action.locations.clear();
     if (!IsSafeName(action.action_id) || action.label.empty() ||
         action.label.size() > 256 || action.tooltip.size() > 1024 ||
         !request["locations"].IsArray()) {
@@ -2346,10 +2413,18 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
       const wxString location = request["locations"][index].AsString();
       if (location == "toolbar")
         action.toolbar = true;
-      else if (location == "chart-context-menu")
+      else if (location == "chart-context-menu") {
         action.context_menu = true;
-      else
+      } else if (instance->portable_api == OCPN_PORTABLE_API_V04 &&
+                 (location == "ais-context-menu" ||
+                  location == "route-context-menu" ||
+                  location == "waypoint-context-menu" ||
+                  location == "track-context-menu")) {
+        action.context_menu = true;
+      } else {
         return fail(-5, "invalid-action", "command location is invalid");
+      }
+      action.locations.push_back(location.ToStdString());
     }
     if (!action.toolbar && !action.context_menu)
       return fail(-5, "invalid-action",
@@ -2407,7 +2482,35 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
     update.package_id = instance->id;
     update.scene_id = request["scene_id"].AsString().ToStdString();
     update.revision = static_cast<std::uint64_t>(request["revision"].AsLong());
+    update.canvas_target =
+        request.HasMember("canvas_target")
+            ? request["canvas_target"].AsString().ToStdString()
+            : "all";
+    update.render_phase = request.HasMember("render_phase")
+                              ? request["render_phase"].AsString().ToStdString()
+                              : "below-vessels";
+    if (request.HasMember("selected_canvases")) {
+      if (!request["selected_canvases"].IsArray() ||
+          request["selected_canvases"].Size() > 16)
+        return fail(-5, "invalid-scene", "canvas selection is invalid");
+      std::set<std::uint32_t> unique_canvases;
+      for (int index = 0; index < request["selected_canvases"].Size();
+           ++index) {
+        const long canvas = request["selected_canvases"][index].AsLong();
+        if (canvas < 0 || canvas > 15 ||
+            !unique_canvases.insert(static_cast<std::uint32_t>(canvas)).second)
+          return fail(-5, "invalid-scene", "canvas selection is invalid");
+        update.selected_canvases.push_back(static_cast<std::uint32_t>(canvas));
+      }
+    }
     if (!IsSafeName(update.scene_id) || update.revision == 0 ||
+        (update.canvas_target != "all" && update.canvas_target != "primary" &&
+         update.canvas_target != "selected") ||
+        (update.render_phase != "below-vessels" &&
+         update.render_phase != "above-vessels" &&
+         update.render_phase != "above-ui") ||
+        (update.canvas_target == "selected" &&
+         update.selected_canvases.empty()) ||
         !request["layers"].IsArray() ||
         static_cast<std::size_t>(request["layers"].Size()) > kSceneLayerLimit) {
       return fail(-5, "invalid-scene", "scene update is invalid");
@@ -2496,6 +2599,15 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
               static_cast<float>(primitive_value["width_pixels"].AsDouble());
           primitive.height_pixels =
               static_cast<float>(primitive_value["height_pixels"].AsDouble());
+          if (primitive_value.HasMember("rotation_degrees"))
+            primitive.rotation_degrees = static_cast<float>(
+                primitive_value["rotation_degrees"].AsDouble());
+          if (primitive_value.HasMember("anchor_x"))
+            primitive.anchor_x =
+                static_cast<float>(primitive_value["anchor_x"].AsDouble());
+          if (primitive_value.HasMember("anchor_y"))
+            primitive.anchor_y =
+                static_cast<float>(primitive_value["anchor_y"].AsDouble());
           const wxString resource_name =
               primitive_value["resource_name"].AsString();
           if (!ParseOverlayPoint(primitive_value["position"],
@@ -2503,6 +2615,13 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
               !SafeRelativePath(resource_name) ||
               !std::isfinite(primitive.width_pixels) ||
               !std::isfinite(primitive.height_pixels) ||
+              !std::isfinite(primitive.rotation_degrees) ||
+              !std::isfinite(primitive.anchor_x) ||
+              !std::isfinite(primitive.anchor_y) ||
+              primitive.rotation_degrees < -3600.0F ||
+              primitive.rotation_degrees > 3600.0F ||
+              primitive.anchor_x < 0.0F || primitive.anchor_x > 1.0F ||
+              primitive.anchor_y < 0.0F || primitive.anchor_y > 1.0F ||
               primitive.width_pixels < 1.0F || primitive.height_pixels < 1.0F ||
               primitive.width_pixels > 512.0F ||
               primitive.height_pixels > 512.0F) {
@@ -2520,12 +2639,26 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
           primitive.text = primitive_value["value"].AsString().ToStdString();
           primitive.size_pixels =
               static_cast<float>(primitive_value["size_pixels"].AsDouble());
+          if (primitive_value.HasMember("rotation_degrees"))
+            primitive.rotation_degrees = static_cast<float>(
+                primitive_value["rotation_degrees"].AsDouble());
+          if (primitive_value.HasMember("horizontal_alignment"))
+            primitive.horizontal_alignment =
+                primitive_value["horizontal_alignment"]
+                    .AsString()
+                    .ToStdString();
           if (!ParseOverlayPoint(primitive_value["position"],
                                  &primitive.centre) ||
               !ParseOverlayColor(primitive_value["color"],
                                  &primitive.text_color) ||
               primitive.text.empty() || primitive.text.size() > 4096 ||
               !std::isfinite(primitive.size_pixels) ||
+              !std::isfinite(primitive.rotation_degrees) ||
+              primitive.rotation_degrees < -3600.0F ||
+              primitive.rotation_degrees > 3600.0F ||
+              (primitive.horizontal_alignment != "left" &&
+               primitive.horizontal_alignment != "centre" &&
+               primitive.horizontal_alignment != "right") ||
               primitive.size_pixels < 6.0F || primitive.size_pixels > 128.0F) {
             return fail(-5, "invalid-text", "text primitive is invalid");
           }
@@ -2548,6 +2681,9 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
       if (!request["replace"].AsBool() && existing != instance->scenes.end()) {
         OverlayScene merged = existing->second;
         merged.revision = update.revision;
+        merged.canvas_target = update.canvas_target;
+        merged.selected_canvases = update.selected_canvases;
+        merged.render_phase = update.render_phase;
         for (auto& incoming_layer : update.layers) {
           auto layer =
               std::find_if(merged.layers.begin(), merged.layers.end(),
@@ -2705,7 +2841,8 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
     if (!ParseCapabilityEventKind(kind_name, &kind))
       return fail(-5, "invalid-event", "event kind is invalid");
     const char* permission = CapabilityEventPermission(kind);
-    if (!permission || !instance->owner->Permitted(*instance, permission))
+    if (!permission || (*permission != '\0' &&
+                        !instance->owner->Permitted(*instance, permission)))
       return fail(-4, "permission-denied",
                   "event subscription permission was not granted");
     CapabilityEventSubscription subscription;
@@ -2842,7 +2979,8 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
       return fail(-5, "invalid-target", "RPC target package is invalid");
     Instance* target = instance->owner->Find(target_package);
     if (!target || !target->enabled || target->failed ||
-        target->portable_api != OCPN_PORTABLE_API_V03)
+        (target->portable_api != OCPN_PORTABLE_API_V03 &&
+         target->portable_api != OCPN_PORTABLE_API_V04))
       return fail(-6, "target-unavailable",
                   "RPC target package is not enabled for API 0.3", true);
 
@@ -2970,11 +3108,103 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
     return finish(0, wxJSONValue(wxJSONTYPE_OBJECT));
   }
 
+  if (operation_name == "https.request") {
+    if (!instance->owner->Permitted(*instance, "network.https"))
+      return fail(-4, "permission-denied",
+                  "controlled HTTPS permission was not granted");
+    if (instance->https_domains.empty())
+      return fail(-4, "domain-denied", "the package declares no HTTPS domains");
+    const std::string request_id =
+        request["request_id"].AsString().ToStdString();
+    const std::string method = request["method"].AsString().ToStdString();
+    const std::string body_base64 =
+        request["body_base64"].AsString().ToStdString();
+    const wxMemoryBuffer decoded = wxBase64Decode(
+        wxString::FromUTF8(body_base64), wxBase64DecodeMode_Strict);
+    if (!IsSafeName(request_id) ||
+        (!body_base64.empty() && decoded.GetDataLen() == 0) ||
+        !request["headers"].IsArray() || request["headers"].Size() > 64)
+      return fail(-5, "invalid-request",
+                  "HTTPS request identity, body or headers are invalid");
+    HttpsRequest https_request;
+    https_request.method = method;
+    https_request.url = request["url"].AsString().ToStdString();
+    https_request.timeout_milliseconds = static_cast<std::uint32_t>(
+        std::max<long>(0, request["timeout_milliseconds"].AsLong()));
+    https_request.maximum_response_bytes = static_cast<std::size_t>(
+        std::max<long>(0, request["maximum_response_bytes"].AsLong()));
+    const auto* body = static_cast<const std::uint8_t*>(decoded.GetData());
+    if (body && decoded.GetDataLen() != 0)
+      https_request.body.assign(body, body + decoded.GetDataLen());
+    for (int index = 0; index < request["headers"].Size(); ++index) {
+      wxJSONValue header = request["headers"][index];
+      if (!header.IsObject() || !header["name"].IsString() ||
+          !header["value"].IsString())
+        return fail(-5, "invalid-request",
+                    "HTTPS request contains a malformed header");
+      https_request.headers.push_back(
+          {header["name"].AsString().ToStdString(),
+           header["value"].AsString().ToStdString()});
+    }
+    const auto now = std::chrono::steady_clock::now();
+    while (!instance->https_history.empty() &&
+           now - instance->https_history.front() > std::chrono::minutes(1))
+      instance->https_history.pop_front();
+    if (instance->https_history.size() >= 30)
+      return fail(-9, "rate-limited",
+                  "package exceeded the controlled HTTPS request rate", true);
+    instance->https_history.push_back(now);
+    HttpsResponse https_response;
+    std::string https_diagnostic;
+    if (!PerformControlledHttps(https_request, instance->https_domains,
+                                &https_response, &https_diagnostic))
+      return fail(-10, "https-failed", https_diagnostic, true);
+    wxJSONValue response;
+    response["status"] = https_response.status;
+    response["headers"] = wxJSONValue(wxJSONTYPE_ARRAY);
+    for (const auto& [name, value] : https_response.headers) {
+      wxJSONValue header;
+      header["name"] = wxString::FromUTF8(name);
+      header["value"] = wxString::FromUTF8(value);
+      response["headers"].Append(header);
+    }
+    response["body_base64"] =
+        wxBase64Encode(https_response.body.data(), https_response.body.size());
+    response["final_url"] = wxString::FromUTF8(https_response.final_url);
+    return finish(0, response);
+  }
+
+  if (operation_name == "surfaces.open") {
+    if (!instance->owner->Permitted(*instance, "ui.surfaces"))
+      return fail(-4, "permission-denied",
+                  "surface permission was not granted");
+    const std::string surface_id =
+        request["surface_id"].AsString().ToStdString();
+    const std::string role = request["role"].AsString().ToStdString();
+    static const std::set<std::string> roles{"tool-window",    "preferences",
+                                             "options-page",   "modal-task",
+                                             "dockable-panel", "inspector"};
+    if (!IsSafeName(surface_id) || roles.count(role) == 0)
+      return fail(-5, "invalid-surface",
+                  "surface identifier or role is invalid");
+    const int status = OpenNamedSurface(instance, surface_id, role);
+    if (status != 0)
+      return fail(status, status == -2 ? "not-found" : "surface-unavailable",
+                  status == -2 ? "the declared surface was not found"
+                               : "the surface could not be opened");
+    return finish(0, wxJSONValue(wxJSONTYPE_OBJECT));
+  }
+
   const bool action_operation = operation_name.rfind("actions.", 0) == 0;
-  const bool navigation_read =
-      operation_name == "navigation.list" || operation_name == "navigation.get";
+  const bool navigation_read = operation_name == "navigation.list" ||
+                               operation_name == "navigation.list-page" ||
+                               operation_name == "navigation.get";
   const bool navigation_write = operation_name == "navigation.mutate";
-  const bool navigation_output = operation_name == "navigation.send-nmea0183";
+  const bool navigation_output = operation_name == "navigation.send-nmea0183" ||
+                                 operation_name == "navigation.send-nmea2000";
+  const bool host_environment = operation_name == "host-environment.get";
+  const bool communication_operation =
+      operation_name == "communications.list-outputs";
   if (action_operation && !instance->owner->Permitted(*instance, "ui.commands"))
     return fail(-4, "permission-denied",
                 "command registration permission was not granted");
@@ -2987,12 +3217,20 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
       !instance->owner->Permitted(*instance, "navigation.routes.write"))
     return fail(-4, "permission-denied",
                 "navigation object write permission was not granted");
-  if (navigation_output &&
+  if (operation_name == "navigation.send-nmea0183" &&
       !instance->owner->Permitted(*instance, "navigation.nmea.write"))
     return fail(-4, "permission-denied",
                 "NMEA output permission was not granted");
+  if (operation_name == "navigation.send-nmea2000" &&
+      !instance->owner->Permitted(*instance, "navigation.nmea2000.write"))
+    return fail(-4, "permission-denied",
+                "NMEA 2000 output permission was not granted");
+  if (communication_operation &&
+      !instance->owner->Permitted(*instance, "communications.outputs.read"))
+    return fail(-4, "permission-denied",
+                "communication output discovery permission was not granted");
   if (action_operation || navigation_read || navigation_write ||
-      navigation_output) {
+      navigation_output || host_environment || communication_operation) {
     if (!instance->owner->author_ui_request)
       return fail(-10, "service-unavailable",
                   "the OpenCPN UI service is unavailable");
@@ -3282,6 +3520,7 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
   const bool portable_api_v01 = portable_api == ">=0.1.0 <0.2.0";
   const bool portable_api_v02 = portable_api == ">=0.2.0 <0.3.0";
   const bool portable_api_v03 = portable_api == ">=0.3.0 <0.4.0";
+  const bool portable_api_v04 = portable_api == ">=0.4.0 <0.5.0";
   const wxString portable_world = manifest["portable_world"].IsString()
                                       ? manifest["portable_world"].AsString()
                                       : "plugin";
@@ -3300,11 +3539,12 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
   if (!typed || !IsPackageId(id) || name.empty() ||
       !IsSemanticVersion(version) || !SafeRelativePath(component) ||
       manifest["runtime"].AsString() != ">=0.1.0 <0.2.0" ||
-      (!portable_api_v01 && !portable_api_v02 && !portable_api_v03) ||
+      (!portable_api_v01 && !portable_api_v02 && !portable_api_v03 &&
+       !portable_api_v04) ||
       !supported_world || (portable_api_v01 && portable_world != "plugin") ||
-      ((portable_api_v02 || portable_api_v03) &&
+      ((portable_api_v02 || portable_api_v03 || portable_api_v04) &&
        !manifest["portable_world"].IsString()) ||
-      (portable_api_v03 && portable_world != "plugin") ||
+      ((portable_api_v03 || portable_api_v04) && portable_world != "plugin") ||
       root.filename() != id.ToStdString()) {
     if (diagnostic) *diagnostic = "incompatible installed package";
     wxLogError("PPM incompatible installed package at %s", root.string());
@@ -3320,8 +3560,20 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
   instance->component_path =
       (root / component.ToStdString()).lexically_normal();
   instance->private_root = storage_root / "data" / instance->id;
+  if (manifest["https_domains"].IsArray()) {
+    for (int index = 0; index < manifest["https_domains"].Size(); ++index) {
+      const std::string domain =
+          manifest["https_domains"][index].AsString().ToStdString();
+      if (!IsValidHttpsDomain(domain)) {
+        if (diagnostic) *diagnostic = "installed HTTPS domain is invalid";
+        return false;
+      }
+      instance->https_domains.insert(domain);
+    }
+  }
   instance->portable_api =
-      portable_api_v03
+      portable_api_v04 ? OCPN_PORTABLE_API_V04
+      : portable_api_v03
           ? OCPN_PORTABLE_API_V03
           : (portable_api_v02 ? OCPN_PORTABLE_API_V02 : OCPN_PORTABLE_API_V01);
   instance->portable_world = portable_world == "passage-weather-routing-plugin"
@@ -3700,7 +3952,8 @@ void RuntimeEngine::Impl::Fail(Instance& instance, const std::string& operation,
 }
 
 bool RuntimeEngine::Impl::HandleAction(const std::string& package_id,
-                                       const std::string& action_id) {
+                                       const std::string& action_id,
+                                       RuntimeActionContext context) {
   const auto item = std::find_if(
       instances.begin(), instances.end(),
       [&](const auto& candidate) { return candidate->id == package_id; });
@@ -3709,7 +3962,8 @@ bool RuntimeEngine::Impl::HandleAction(const std::string& package_id,
   if (!instance.enabled || instance.failed || !instance.runtime) return true;
   const std::uint64_t generation = instance.executor.Generation();
   const auto posted = instance.executor.Post(
-      generation, [&instance, action_id](std::uint64_t task_generation) {
+      generation, [&instance, action_id, context = std::move(context)](
+                      std::uint64_t task_generation) {
         if (task_generation != instance.executor.Generation() ||
             !instance.enabled || instance.failed) {
           return;
@@ -3720,9 +3974,41 @@ bool RuntimeEngine::Impl::HandleAction(const std::string& package_id,
           return;
         }
         std::array<char, kErrorCapacity> error{};
-        if (ocpn_portable_runtime_on_action(instance.runtime, action_id.data(),
-                                            action_id.size(), error.data(),
-                                            error.size()) != 0) {
+        int status = 0;
+        if (instance.portable_api == OCPN_PORTABLE_API_V04) {
+          const std::map<std::string, std::uint32_t> locations{
+              {"toolbar", 0},
+              {"chart-context-menu", 1},
+              {"ais-context-menu", 2},
+              {"route-context-menu", 3},
+              {"waypoint-context-menu", 4},
+              {"track-context-menu", 5}};
+          const auto location = locations.find(context.location);
+          if (location == locations.end()) {
+            instance.owner->Fail(instance, "action " + action_id,
+                                 "invalid OPP action context location");
+            return;
+          }
+          ocpn_portable_action_context invocation{};
+          invocation.location = location->second;
+          invocation.canvas_index = context.canvas_index;
+          invocation.has_canvas_index = context.has_canvas_index ? 1U : 0U;
+          invocation.latitude = context.latitude;
+          invocation.longitude = context.longitude;
+          invocation.has_position = context.has_position ? 1U : 0U;
+          invocation.object_kind = context.object_kind.data();
+          invocation.object_kind_len = context.object_kind.size();
+          invocation.object_id = context.object_id.data();
+          invocation.object_id_len = context.object_id.size();
+          status = ocpn_portable_runtime_on_action_v04(
+              instance.runtime, action_id.data(), action_id.size(), &invocation,
+              error.data(), error.size());
+        } else {
+          status = ocpn_portable_runtime_on_action(
+              instance.runtime, action_id.data(), action_id.size(),
+              error.data(), error.size());
+        }
+        if (status != 0) {
           instance.owner->Fail(
               instance, "action " + action_id,
               error[0] ? error.data() : "portable component action failed");
@@ -3981,8 +4267,9 @@ bool RuntimeEngine::IsEnabled(const std::string& package_id) const {
 void RuntimeEngine::Shutdown() { impl_->Shutdown(); }
 
 bool RuntimeEngine::HandleAction(const std::string& package_id,
-                                 const std::string& action_id) {
-  return impl_->HandleAction(package_id, action_id);
+                                 const std::string& action_id,
+                                 RuntimeActionContext context) {
+  return impl_->HandleAction(package_id, action_id, std::move(context));
 }
 
 bool RuntimeEngine::HandleSurfaceEvent(const std::string& package_id,
@@ -4074,6 +4361,15 @@ void RuntimeEngine::SetPositionFix(const PlugIn_Position_Fix_Ex& fix) {
     impl_->has_sog = std::isfinite(fix.Sog);
     impl_->cog = impl_->has_cog ? fix.Cog : 0.0;
     impl_->sog = impl_->has_sog ? fix.Sog : 0.0;
+    impl_->has_heading_true = std::isfinite(fix.Hdt);
+    impl_->heading_true = impl_->has_heading_true ? fix.Hdt : 0.0;
+    impl_->has_heading_magnetic = std::isfinite(fix.Hdm);
+    impl_->heading_magnetic = impl_->has_heading_magnetic ? fix.Hdm : 0.0;
+    impl_->has_magnetic_variation = std::isfinite(fix.Var);
+    impl_->magnetic_variation = impl_->has_magnetic_variation ? fix.Var : 0.0;
+    impl_->fix_unix_time = static_cast<std::int64_t>(fix.FixTime);
+    impl_->satellites =
+        static_cast<std::uint16_t>(std::clamp(fix.nSats, 0, 65'535));
   }
   if (valid) {
     wxJSONValue payload;
@@ -4089,6 +4385,15 @@ void RuntimeEngine::SetPositionFix(const PlugIn_Position_Fix_Ex& fix) {
       payload["speed_over_ground"] = wxJSONValue(wxJSONTYPE_NULL);
     payload["fix_unix_time"] = static_cast<wxLongLong_t>(fix.FixTime);
     payload["satellites"] = fix.nSats;
+    payload["heading_true"] = std::isfinite(fix.Hdt)
+                                  ? wxJSONValue(fix.Hdt)
+                                  : wxJSONValue(wxJSONTYPE_NULL);
+    payload["heading_magnetic"] = std::isfinite(fix.Hdm)
+                                      ? wxJSONValue(fix.Hdm)
+                                      : wxJSONValue(wxJSONTYPE_NULL);
+    payload["magnetic_variation"] = std::isfinite(fix.Var)
+                                        ? wxJSONValue(fix.Var)
+                                        : wxJSONValue(wxJSONTYPE_NULL);
     impl_->PublishCapabilityEvent({CapabilityEventKind::kNavigationPosition,
                                    "vessel", JsonText(payload)});
   }
@@ -4182,6 +4487,12 @@ void RuntimeEngine::DeliverSignalK(const std::string& payload) {
       {CapabilityEventKind::kSignalK, "OCPN_CORE_SIGNALK", payload});
 }
 
+void RuntimeEngine::DeliverHostEnvironment(const std::string& payload) {
+  if (payload.empty() || payload.size() > 64 * 1024) return;
+  impl_->PublishCapabilityEvent(
+      {CapabilityEventKind::kHostEnvironment, "host", payload});
+}
+
 bool RuntimeEngine::DeliverPointerEvent(
     std::uint32_t kind, std::uint32_t button, std::uint32_t canvas_index,
     std::int32_t x_pixels, std::int32_t y_pixels, double latitude,
@@ -4191,7 +4502,8 @@ bool RuntimeEngine::DeliverPointerEvent(
   for (auto& item : impl_->instances) {
     auto& instance = *item;
     if (!instance.enabled || instance.failed || !instance.runtime ||
-        instance.portable_api != OCPN_PORTABLE_API_V03 ||
+        (instance.portable_api != OCPN_PORTABLE_API_V03 &&
+         instance.portable_api != OCPN_PORTABLE_API_V04) ||
         !impl_->Permitted(instance, "chart.input.pointer"))
       continue;
     std::lock_guard<std::mutex> lock(instance.runtime_mutex);
@@ -4223,7 +4535,8 @@ bool RuntimeEngine::DeliverKeyEvent(std::uint32_t key_code,
   for (auto& item : impl_->instances) {
     auto& instance = *item;
     if (!instance.enabled || instance.failed || !instance.runtime ||
-        instance.portable_api != OCPN_PORTABLE_API_V03 ||
+        (instance.portable_api != OCPN_PORTABLE_API_V03 &&
+         instance.portable_api != OCPN_PORTABLE_API_V04) ||
         !impl_->Permitted(instance, "chart.input.keyboard"))
       continue;
     std::lock_guard<std::mutex> lock(instance.runtime_mutex);

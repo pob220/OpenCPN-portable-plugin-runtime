@@ -1,4 +1,4 @@
-# Portable API contracts
+# OpenCPN Portable Plugin API contracts
 
 `0.1` remains the compatibility world in `portable-runtime/wit`. The manager
 selects it from the signed manifest and a dedicated legacy guest is exercised
@@ -21,6 +21,13 @@ timers, validated NMEA output, dynamic subscriptions and asynchronous typed
 plugin RPC. Dynamic subscriptions are owned by the enabled package generation
 and are revoked on disable, failure or unload.
 
+`0.4` is the first contract named **OpenCPN Portable Plugin API (OPP API)**.
+Its WIT namespace is `opencpn:opp@0.4.0`. It adds typed event variants,
+context-rich actions, host environment snapshots, semantic surface roles,
+revisioned/paged navigation objects, multi-canvas/render-phase scenes,
+package-scoped communication endpoints, allowlisted NMEA 2000 output and
+controlled HTTPS. The 0.1–0.3 contracts remain frozen.
+
 `chart-safety` is a host-owned, renderer-independent service. Portable route
 engines submit value-only segment geometry and vessel clearance requirements;
 the host retains all chart objects and returns typed land, drying, depth and
@@ -29,7 +36,7 @@ from authoritative vector/CM93 chart semantics.
 
 The complete versioned WIT directory is shipped in each reference package.
 Installed manifests select exactly one compatible major-minor range:
-`>=0.1.0 <0.2.0`, `>=0.2.0 <0.3.0`, or `>=0.3.0 <0.4.0`. API `0.2` and
-`0.3` manifests must declare their world. The bridge keeps all three versions
-side by side; adding `0.3` does not reinterpret an installed `0.1` or `0.2`
-component.
+`>=0.1.0 <0.2.0`, `>=0.2.0 <0.3.0`, `>=0.3.0 <0.4.0`, or
+`>=0.4.0 <0.5.0`. API `0.2` and later manifests must declare their world. The
+bridge keeps all four versions side by side; OPP API 0.4 does not reinterpret
+an installed component.

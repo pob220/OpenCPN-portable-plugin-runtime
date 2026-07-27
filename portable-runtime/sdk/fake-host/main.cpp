@@ -14,8 +14,8 @@ struct State {
 };
 
 int32_t AuthorCall(void* user_data, const char* operation,
-                   std::size_t operation_length, const char*,
-                   std::size_t, char* response, std::size_t capacity,
+                   std::size_t operation_length, const char*, std::size_t,
+                   char* response, std::size_t capacity,
                    std::size_t* response_length) {
   auto* state = static_cast<State*>(user_data);
   if (!state || !operation || !response_length) return -1;
@@ -42,8 +42,8 @@ bool CallOkay(int status, const std::array<char, 4096>& error,
   return false;
 }
 
-int32_t SettingSet(void* user_data, const char*, std::size_t,
-                   const char*, std::size_t) {
+int32_t SettingSet(void* user_data, const char*, std::size_t, const char*,
+                   std::size_t) {
   auto* state = static_cast<State*>(user_data);
   if (!state) return -1;
   state->operations.insert("settings.set");
@@ -73,8 +73,8 @@ int main(int argc, char** argv) {
   callbacks.author_service_call = AuthorCall;
   std::array<char, 4096> error{};
   ocpn_portable_runtime* runtime = ocpn_portable_runtime_create(
-      argv[1], &callbacks, OCPN_PORTABLE_API_V03,
-      OCPN_PORTABLE_WORLD_PLUGIN, error.data(), error.size());
+      argv[1], &callbacks, OCPN_PORTABLE_API_V04, OCPN_PORTABLE_WORLD_PLUGIN,
+      error.data(), error.size());
   if (!runtime) {
     std::cerr << "create failed: " << error.data() << '\n';
     return 1;
@@ -84,43 +84,49 @@ int main(int argc, char** argv) {
   const std::string name = "Portable Plugin Template";
   const std::string version = "0.1.0";
   if (!CallOkay(ocpn_portable_runtime_initialize(
-                     runtime, id.data(), id.size(), name.data(), name.size(),
-                     version.data(), version.size(), error.data(),
-                     error.size()),
-                 error, "initialize") ||
-      !CallOkay(ocpn_portable_runtime_enable(runtime, error.data(),
-                                             error.size()),
-                 error, "enable")) {
+                    runtime, id.data(), id.size(), name.data(), name.size(),
+                    version.data(), version.size(), error.data(), error.size()),
+                error, "initialize") ||
+      !CallOkay(
+          ocpn_portable_runtime_enable(runtime, error.data(), error.size()),
+          error, "enable")) {
     destroy();
     return 1;
   }
   const std::string action = "template.hello";
   std::array<char, 4096> surface_state{};
   std::size_t surface_state_length = 0;
-  if (!CallOkay(ocpn_portable_runtime_on_action(
-                     runtime, action.data(), action.size(), error.data(),
-                     error.size()),
-                 error, "on-action") ||
+  ocpn_portable_action_context action_context{};
+  action_context.location = 1;
+  action_context.canvas_index = 0;
+  action_context.has_canvas_index = 1;
+  action_context.latitude = 50.0;
+  action_context.longitude = -5.0;
+  action_context.has_position = 1;
+  if (!CallOkay(ocpn_portable_runtime_on_action_v04(
+                    runtime, action.data(), action.size(), &action_context,
+                    error.data(), error.size()),
+                error, "on-action") ||
       !CallOkay(ocpn_portable_runtime_on_surface_event(
-                     runtime, "template.main", 13, "hello", 5, "{}", 2,
-                     surface_state.data(), surface_state.size(),
-                     &surface_state_length, error.data(), error.size()),
-                 error, "on-surface-event") ||
-      !CallOkay(ocpn_portable_runtime_on_timer(
-                     runtime, "template.tick", 13, 1000, 1000, error.data(),
-                     error.size()),
-                 error, "on-timer") ||
-      !CallOkay(ocpn_portable_runtime_disable(runtime, error.data(),
-                                              error.size()),
-                 error, "disable")) {
+                    runtime, "template.main", 13, "hello", 5, "{}", 2,
+                    surface_state.data(), surface_state.size(),
+                    &surface_state_length, error.data(), error.size()),
+                error, "on-surface-event") ||
+      !CallOkay(
+          ocpn_portable_runtime_on_timer(runtime, "template.tick", 13, 1000,
+                                         1000, error.data(), error.size()),
+          error, "on-timer") ||
+      !CallOkay(
+          ocpn_portable_runtime_disable(runtime, error.data(), error.size()),
+          error, "disable")) {
     destroy();
     return 1;
   }
   destroy();
   const std::set<std::string> required = {
-      "actions.register", "scenes.submit", "timers.schedule",
+      "actions.register", "scenes.submit",        "timers.schedule",
       "rpc.register",     "storage.write-atomic", "scenes.clear",
-      "timers.cancel",    "rpc.unregister", "settings.set",
+      "timers.cancel",    "rpc.unregister",       "settings.set",
       "surfaces.open"};
   for (const auto& operation : required) {
     if (state.operations.count(operation) == 0) {
@@ -132,6 +138,6 @@ int main(int argc, char** argv) {
     std::cerr << "surface callback returned empty state\n";
     return 1;
   }
-  std::cout << "API 0.3 fake-host conformance passed\n";
+  std::cout << "OPP API 0.4 fake-host conformance passed\n";
   return 0;
 }

@@ -18,13 +18,13 @@
 #include <string>
 #include <vector>
 
-#define CHECK(expression)                                                   \
-  do {                                                                      \
-    if (!(expression)) {                                                    \
-      std::cerr << "check failed at " << __FILE__ << ':' << __LINE__       \
-                << ": " #expression "\n";                                  \
-      return 1;                                                             \
-    }                                                                       \
+#define CHECK(expression)                                            \
+  do {                                                               \
+    if (!(expression)) {                                             \
+      std::cerr << "check failed at " << __FILE__ << ':' << __LINE__ \
+                << ": " #expression "\n";                            \
+      return 1;                                                      \
+    }                                                                \
   } while (false)
 
 namespace {
@@ -93,24 +93,21 @@ std::string Base64(const unsigned char* bytes, std::size_t length) {
   return encoded;
 }
 
-std::string Sign(EVP_PKEY* key, const std::string& checksums,
-                 bool corrupt) {
+std::string Sign(EVP_PKEY* key, const std::string& checksums, bool corrupt) {
   std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> context(
       EVP_MD_CTX_new(), &EVP_MD_CTX_free);
   std::vector<unsigned char> signature(64);
   std::size_t signature_length = signature.size();
   if (!context ||
       EVP_DigestSignInit(context.get(), nullptr, nullptr, nullptr, key) != 1 ||
-      EVP_DigestSign(
-          context.get(), signature.data(), &signature_length,
-          reinterpret_cast<const unsigned char*>(checksums.data()),
-          checksums.size()) != 1) {
+      EVP_DigestSign(context.get(), signature.data(), &signature_length,
+                     reinterpret_cast<const unsigned char*>(checksums.data()),
+                     checksums.size()) != 1) {
     return {};
   }
   signature.resize(signature_length);
   std::string encoded = Base64(signature.data(), signature.size());
-  if (corrupt && !encoded.empty())
-    encoded[0] = encoded[0] == 'A' ? 'B' : 'A';
+  if (corrupt && !encoded.empty()) encoded[0] = encoded[0] == 'A' ? 'B' : 'A';
   return "{\"algorithm\":\"Ed25519\",\"signed\":\"checksums.sha256\","
          "\"key_id\":\"org.opencpn.test-key\",\"signature\":\"" +
          encoded + "\"}";
@@ -128,6 +125,9 @@ struct PackageOptions {
   bool symlink = false;
   bool wrong_magic = false;
   bool corrupt_signature = false;
+  bool https_permission = false;
+  std::string portable_api = ">=0.2.0 <0.3.0";
+  std::string https_domain;
   EVP_PKEY* signing_key = nullptr;
 };
 
@@ -152,11 +152,17 @@ bool BuildPackage(const fs::path& output_path, const std::string& version,
       "\","
       "\"component\":\"component/test.wasm\","
       "\"runtime\":\">=0.1.0 <0.2.0\","
-      "\"portable_api\":\">=0.2.0 <0.3.0\","
+      "\"portable_api\":\"" +
+      options.portable_api +
+      "\","
       "\"portable_world\":\"plugin\","
-      "\"permissions\":[\"ui.commands\"],"
-      "\"development\":" +
-      std::string(options.development ? "true" : "false") + "}";
+      "\"permissions\":[\"ui.commands\"" +
+      std::string(options.https_permission ? ",\"network.https\"" : "") + "]," +
+      (options.https_domain.empty()
+           ? std::string()
+           : "\"https_domains\":[\"" + options.https_domain + "\"],") +
+      "\"development\":" + std::string(options.development ? "true" : "false") +
+      "}";
   struct File {
     std::string contents;
     int mode = 0644;
@@ -170,8 +176,7 @@ bool BuildPackage(const fs::path& output_path, const std::string& version,
     files.emplace("resources/Icon.svg", File{"first", 0644});
     files.emplace("resources/icon.svg", File{"second", 0644});
   }
-  if (options.symlink)
-    files.emplace("resources/link", File{"target", 0644});
+  if (options.symlink) files.emplace("resources/link", File{"target", 0644});
 
   std::ostringstream checksums;
   for (const auto& item : files) {
@@ -197,9 +202,9 @@ bool BuildPackage(const fs::path& output_path, const std::string& version,
     if (options.symlink && item.first == "resources/link")
       okay = AddSymlink(output, item.first, "target") && okay;
     else
-      okay = AddFile(output, item.first, item.second.contents,
-                     item.second.mode) &&
-              okay;
+      okay =
+          AddFile(output, item.first, item.second.contents, item.second.mode) &&
+          okay;
   }
   okay = AddFile(output, "checksums.sha256", checksums.str()) && okay;
   if (!signature.empty())
@@ -242,6 +247,27 @@ int main() {
   packages = store.Installed();
   CHECK(packages[0].enabled);
   CHECK(!store.Install(first, false).okay);
+
+  const fs::path api_v04 = archive_dir / "opp api 0.4.ocpnp";
+  PackageOptions api_v04_options;
+  api_v04_options.portable_api = ">=0.4.0 <0.5.0";
+  CHECK(BuildPackage(api_v04, "0.1.1", api_v04_options));
+  CHECK(store.Inspect(api_v04).okay);
+
+  const fs::path missing_https_permission =
+      archive_dir / "missing https permission.ocpnp";
+  PackageOptions missing_https_permission_options = api_v04_options;
+  missing_https_permission_options.https_domain = "api.example.org";
+  CHECK(BuildPackage(missing_https_permission, "0.1.1",
+                     missing_https_permission_options));
+  CHECK(!store.Inspect(missing_https_permission).okay);
+
+  const fs::path ip_https_domain = archive_dir / "ip https domain.ocpnp";
+  PackageOptions ip_https_domain_options = missing_https_permission_options;
+  ip_https_domain_options.https_permission = true;
+  ip_https_domain_options.https_domain = "127.0.0.1";
+  CHECK(BuildPackage(ip_https_domain, "0.1.1", ip_https_domain_options));
+  CHECK(!store.Inspect(ip_https_domain).okay);
 
   const fs::path second = archive_dir / "updated package.ocpnp";
   CHECK(BuildPackage(second, "0.2.0"));
@@ -290,8 +316,7 @@ int main() {
   const fs::path malformed_number = archive_dir / "bad number.ocpnp";
   PackageOptions malformed_number_options;
   malformed_number_options.malformed_number = true;
-  CHECK(BuildPackage(malformed_number, "0.3.0",
-                     malformed_number_options));
+  CHECK(BuildPackage(malformed_number, "0.3.0", malformed_number_options));
   CHECK(!store.Inspect(malformed_number).okay);
 
   const fs::path malformed_version = archive_dir / "bad version.ocpnp";
@@ -338,16 +363,14 @@ int main() {
   std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> signing_key(
       generated_key, &EVP_PKEY_free);
   fs::create_directories(store.TrustRoot());
-  const fs::path public_key =
-      store.TrustRoot() / "org.opencpn.test-key.pem";
+  const fs::path public_key = store.TrustRoot() / "org.opencpn.test-key.pem";
   {
     std::unique_ptr<FILE, FileCloser> output(
         std::fopen(public_key.c_str(), "wb"));
     CHECK(output);
     CHECK(PEM_write_PUBKEY(output.get(), signing_key.get()) == 1);
   }
-  const fs::path signed_production =
-      archive_dir / "signed production.ocpnp";
+  const fs::path signed_production = archive_dir / "signed production.ocpnp";
   PackageOptions signed_options;
   signed_options.development = false;
   signed_options.signing_key = signing_key.get();
@@ -355,11 +378,10 @@ int main() {
   CHECK(store.Inspect(signed_production).okay);
   CHECK(store.Install(signed_production, true).okay);
   CHECK(store.AuditInstalled("org.opencpn.test-package").okay);
-  CHECK(fs::is_regular_file(
-      store.PackagesRoot() / "org.opencpn.test-package" / "signature.json"));
+  CHECK(fs::is_regular_file(store.PackagesRoot() / "org.opencpn.test-package" /
+                            "signature.json"));
 
-  const fs::path corrupt_signature =
-      archive_dir / "corrupt signature.ocpnp";
+  const fs::path corrupt_signature = archive_dir / "corrupt signature.ocpnp";
   signed_options.corrupt_signature = true;
   CHECK(BuildPackage(corrupt_signature, "0.4.0", signed_options));
   CHECK(!store.Inspect(corrupt_signature).okay);
@@ -368,8 +390,7 @@ int main() {
   CHECK(!untrusted_store.Inspect(signed_production).okay);
 
   const fs::path installed_component =
-      store.PackagesRoot() / "org.opencpn.test-package" /
-      "component/test.wasm";
+      store.PackagesRoot() / "org.opencpn.test-package" / "component/test.wasm";
   fs::permissions(installed_component, fs::perms::owner_write,
                   fs::perm_options::add);
   {

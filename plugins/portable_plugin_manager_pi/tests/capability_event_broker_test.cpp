@@ -70,7 +70,22 @@ int main() {
   CHECK(parsed == CapabilityEventKind::kNmea2000);
   CHECK(std::string(ppm::CapabilityEventPermission(parsed)) ==
         "navigation.nmea2000.read");
+  CHECK(ppm::ParseCapabilityEventKind("host.environment", &parsed));
+  CHECK(parsed == CapabilityEventKind::kHostEnvironment);
+  CHECK(std::string(ppm::CapabilityEventPermission(parsed)).empty());
   CHECK(!ppm::ParseCapabilityEventKind("native.pointer", &parsed));
+
+  CHECK(broker.Subscribe(
+      {"org.opencpn.environment", CapabilityEventKind::kHostEnvironment, "", 1},
+      &diagnostic));
+  CHECK(broker.Publish({CapabilityEventKind::kHostEnvironment, "host",
+                        R"({"color_scheme":"day"})"}));
+  CHECK(broker.Publish({CapabilityEventKind::kHostEnvironment, "host",
+                        R"({"color_scheme":"night"})"}));
+  const auto environment = broker.Drain("org.opencpn.environment", 1);
+  CHECK(environment.size() == 1);
+  CHECK(environment.front().payload.find("night") != std::string::npos);
+  CHECK(broker.Stats("org.opencpn.environment").coalesced == 1);
 
   broker.RemovePackage("org.opencpn.events");
   CHECK(broker.Pending("org.opencpn.events") == 0);

@@ -32,9 +32,7 @@
 namespace ppm {
 namespace {
 
-wxString Text(const std::string& value) {
-  return wxString::FromUTF8(value);
-}
+wxString Text(const std::string& value) { return wxString::FromUTF8(value); }
 
 std::string JsonString(const wxString& value) {
   const wxScopedCharBuffer bytes = value.utf8_str();
@@ -81,13 +79,24 @@ std::string JsonString(const wxString& value) {
 }
 
 bool IsButton(const std::string& type) {
-  return type == "button" || type == "cancel" ||
-         type == "file-open" || type == "file-open-multiple" ||
-         type == "file-save" || type == "navigation-create";
+  return type == "button" || type == "cancel" || type == "file-open" ||
+         type == "file-open-multiple" || type == "file-save" ||
+         type == "navigation-create";
+}
+
+long SurfaceWindowStyle(const DeclarativeSurface& definition) {
+  if (definition.role == "tool-window" || definition.role == "dockable-panel" ||
+      definition.role == "inspector") {
+    return wxCAPTION | wxCLOSE_BOX | wxRESIZE_BORDER | wxFRAME_TOOL_WINDOW |
+           wxFRAME_FLOAT_ON_PARENT;
+  }
+  if (definition.role == "modal-task")
+    return wxCAPTION | wxCLOSE_BOX | wxFRAME_FLOAT_ON_PARENT;
+  return wxDEFAULT_FRAME_STYLE | wxFRAME_FLOAT_ON_PARENT;
 }
 
 class PolarPlotPanel final : public wxPanel {
- public:
+public:
   explicit PolarPlotPanel(wxWindow* parent, const wxString& accessible_name)
       : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(-1, 420)) {
     SetName(accessible_name);
@@ -143,28 +152,24 @@ class PolarPlotPanel final : public wxPanel {
     Refresh(false);
   }
 
- private:
+private:
   static wxColour CurveColour(std::size_t index) {
     static const wxColour colours[] = {
-        wxColour(24, 101, 171),  wxColour(0, 136, 122),
-        wxColour(236, 112, 20),  wxColour(178, 54, 147),
-        wxColour(93, 63, 152),   wxColour(44, 145, 48),
-        wxColour(200, 65, 58),   wxColour(34, 139, 160),
-        wxColour(137, 104, 22),  wxColour(118, 79, 143),
-        wxColour(25, 125, 95),   wxColour(209, 92, 135)};
+        wxColour(24, 101, 171), wxColour(0, 136, 122),  wxColour(236, 112, 20),
+        wxColour(178, 54, 147), wxColour(93, 63, 152),  wxColour(44, 145, 48),
+        wxColour(200, 65, 58),  wxColour(34, 139, 160), wxColour(137, 104, 22),
+        wxColour(118, 79, 143), wxColour(25, 125, 95),  wxColour(209, 92, 135)};
     return colours[index % (sizeof(colours) / sizeof(colours[0]))];
   }
 
   void OnPaint(wxPaintEvent&) {
     wxAutoBufferedPaintDC dc(this);
-    dc.SetBackground(
-        wxBrush(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW)));
+    dc.SetBackground(wxBrush(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW)));
     dc.Clear();
     const wxSize size = GetClientSize();
     if (size.x < 120 || size.y < 120) return;
 
-    dc.SetTextForeground(
-        wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
+    dc.SetTextForeground(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
     dc.SetFont(wxFontInfo(11).Bold());
     dc.DrawText("Polar diagram — STW by TWA and TWS", 12, 8);
     dc.SetFont(*wxSMALL_FONT);
@@ -185,12 +190,10 @@ class PolarPlotPanel final : public wxPanel {
     }
     const double scale_max = std::max(1.0, std::ceil(maximum_speed));
     const int legend_width = size.x >= 720 ? 145 : 90;
-    const int radius =
-        std::max(45, std::min((size.x - legend_width - 28) / 2,
-                             (size.y - 62) / 2));
+    const int radius = std::max(
+        45, std::min((size.x - legend_width - 28) / 2, (size.y - 62) / 2));
     const wxPoint centre(16 + radius, 46 + radius);
-    const wxColour grid =
-        wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT);
+    const wxColour grid = wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT);
     dc.SetPen(wxPen(grid, 1, wxPENSTYLE_DOT));
     dc.SetBrush(*wxTRANSPARENT_BRUSH);
     for (int ring = 1; ring <= 4; ++ring) {
@@ -202,12 +205,9 @@ class PolarPlotPanel final : public wxPanel {
     constexpr double kPi = 3.14159265358979323846;
     for (int angle = 0; angle <= 180; angle += 30) {
       const double radians = angle * kPi / 180.0;
-      const int dx =
-          static_cast<int>(std::lround(std::sin(radians) * radius));
-      const int dy =
-          static_cast<int>(std::lround(std::cos(radians) * radius));
-      dc.DrawLine(centre.x - dx, centre.y - dy, centre.x + dx,
-                  centre.y - dy);
+      const int dx = static_cast<int>(std::lround(std::sin(radians) * radius));
+      const int dy = static_cast<int>(std::lround(std::cos(radians) * radius));
+      dc.DrawLine(centre.x - dx, centre.y - dy, centre.x + dx, centre.y - dy);
       if (angle % 60 == 0)
         dc.DrawText(wxString::Format("%d°", angle), centre.x + dx + 2,
                     centre.y - dy - 7);
@@ -219,8 +219,8 @@ class PolarPlotPanel final : public wxPanel {
     for (std::size_t wind = 0; wind < winds_.size(); ++wind) {
       std::vector<wxPoint> starboard;
       std::vector<wxPoint> port;
-      for (std::size_t row = 0;
-           row < angles_.size() && row < speeds_.size(); ++row) {
+      for (std::size_t row = 0; row < angles_.size() && row < speeds_.size();
+           ++row) {
         if (wind >= speeds_[row].size() || !speeds_[row][wind]) continue;
         const double radians = angles_[row] * kPi / 180.0;
         const double distance =
@@ -249,8 +249,8 @@ class PolarPlotPanel final : public wxPanel {
         dc.DrawLine(legend_x, legend_y + 6, legend_x + 18, legend_y + 6);
         dc.SetTextForeground(
             wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
-        dc.DrawText(wxString::Format("%.1f kn", winds_[wind]),
-                    legend_x + 24, legend_y);
+        dc.DrawText(wxString::Format("%.1f kn", winds_[wind]), legend_x + 24,
+                    legend_y);
       }
     }
   }
@@ -262,14 +262,21 @@ class PolarPlotPanel final : public wxPanel {
 
 }  // namespace
 
-SurfaceDialog::SurfaceDialog(wxWindow* parent,
-                             DeclarativeSurface definition,
+SurfaceDialog::SurfaceDialog(wxWindow* parent, DeclarativeSurface definition,
                              EventCallback callback)
     : wxFrame(parent, wxID_ANY, Text(definition.title), wxDefaultPosition,
-              wxSize(900, 700),
-              wxDEFAULT_FRAME_STYLE | wxFRAME_FLOAT_ON_PARENT),
+              wxSize(900, 700), SurfaceWindowStyle(definition)),
       definition_(std::move(definition)),
       callback_(std::move(callback)) {
+  SetName(Text("OPP surface " + definition_.id));
+  Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent& event) {
+    if (event.CanVeto()) {
+      Hide();
+      event.Veto();
+    } else {
+      event.Skip();
+    }
+  });
   CreateStatusBar();
   SetStatusText("Ready");
 
@@ -284,16 +291,16 @@ SurfaceDialog::SurfaceDialog(wxWindow* parent,
         }
         const int id = wxWindow::NewControlId();
         wxString label = Text(item.label);
-        if (!item.accelerator.empty())
-          label += "\t" + Text(item.accelerator);
+        if (!item.accelerator.empty()) label += "\t" + Text(item.accelerator);
         menu->Append(id, label, wxEmptyString,
                      item.checkable ? wxITEM_CHECK : wxITEM_NORMAL);
-        Bind(wxEVT_MENU,
-             [this, action = item.id](wxCommandEvent& event) {
-               SendEvent(action,
-                         event.IsChecked() ? "true" : "{\"pressed\":true}");
-             },
-             id);
+        Bind(
+            wxEVT_MENU,
+            [this, action = item.id](wxCommandEvent& event) {
+              SendEvent(action,
+                        event.IsChecked() ? "true" : "{\"pressed\":true}");
+            },
+            id);
       }
       bar->Append(menu, Text(menu_definition.label));
     }
@@ -360,8 +367,7 @@ wxWindow* SurfaceDialog::BuildControl(wxWindow* parent,
   auto* row = new wxPanel(parent);
   auto* sizer = new wxBoxSizer(
       control.type == "table" || control.type == "grid" ||
-              control.type == "diagnostics" ||
-              control.type == "polar-plot"
+              control.type == "diagnostics" || control.type == "polar-plot"
           ? wxVERTICAL
           : wxHORIZONTAL);
   row->SetSizer(sizer);
@@ -381,48 +387,40 @@ wxWindow* SurfaceDialog::BuildControl(wxWindow* parent,
     if (IsButton(control.type)) {
       widget = new wxButton(row, wxID_ANY, Text(control.label));
       sizer->Add(widget, 0, wxALIGN_CENTER_VERTICAL);
-      widget->Bind(wxEVT_BUTTON,
-                   [this, id = control.id, type = control.type,
-                    filter = control.file_filter](
-                       wxCommandEvent&) {
-                     if (type == "file-open" ||
-                         type == "file-open-multiple" ||
-                         type == "file-save") {
-                       long style = type == "file-save"
-                                        ? wxFD_SAVE | wxFD_OVERWRITE_PROMPT
-                                        : wxFD_OPEN | wxFD_FILE_MUST_EXIST;
-                       if (type == "file-open-multiple")
-                         style |= wxFD_MULTIPLE;
-                       wxFileDialog picker(
-                           this, type == "file-save" ? "Save file"
-                                                    : "Choose file",
-                           wxEmptyString, wxEmptyString,
-                           filter.empty() ? "All files|*" : Text(filter),
-                                           style);
-                       if (picker.ShowModal() == wxID_OK) {
-                         wxArrayString paths;
-                         if (type == "file-open-multiple")
-                           picker.GetPaths(paths);
-                         else
-                           paths.Add(picker.GetPath());
-                         std::vector<UserFileSelection> selections;
-                         selections.reserve(paths.size());
-                         for (const auto& path : paths) {
-                           const wxScopedCharBuffer bytes = path.utf8_str();
-                           selections.push_back(
-                               {bytes ? std::string(bytes.data(),
-                                                   bytes.length())
-                                      : std::string(),
-                                type == "file-save"});
-                         }
-                         SendEvent(id, "null", std::move(selections));
-                       }
-                     } else {
-                       SendEvent(id, "{\"pressed\":true}");
-                     }
-                   });
-    } else if (control.type == "choice" ||
-               control.type == "position-source" ||
+      widget->Bind(wxEVT_BUTTON, [this, id = control.id, type = control.type,
+                                  filter =
+                                      control.file_filter](wxCommandEvent&) {
+        if (type == "file-open" || type == "file-open-multiple" ||
+            type == "file-save") {
+          long style = type == "file-save" ? wxFD_SAVE | wxFD_OVERWRITE_PROMPT
+                                           : wxFD_OPEN | wxFD_FILE_MUST_EXIST;
+          if (type == "file-open-multiple") style |= wxFD_MULTIPLE;
+          wxFileDialog picker(
+              this, type == "file-save" ? "Save file" : "Choose file",
+              wxEmptyString, wxEmptyString,
+              filter.empty() ? "All files|*" : Text(filter), style);
+          if (picker.ShowModal() == wxID_OK) {
+            wxArrayString paths;
+            if (type == "file-open-multiple")
+              picker.GetPaths(paths);
+            else
+              paths.Add(picker.GetPath());
+            std::vector<UserFileSelection> selections;
+            selections.reserve(paths.size());
+            for (const auto& path : paths) {
+              const wxScopedCharBuffer bytes = path.utf8_str();
+              selections.push_back(
+                  {bytes ? std::string(bytes.data(), bytes.length())
+                         : std::string(),
+                   type == "file-save"});
+            }
+            SendEvent(id, "null", std::move(selections));
+          }
+        } else {
+          SendEvent(id, "{\"pressed\":true}");
+        }
+      });
+    } else if (control.type == "choice" || control.type == "position-source" ||
                control.type == "navigation-object" ||
                control.type == "navigation-route") {
       widget = new wxChoice(row, wxID_ANY);
@@ -442,75 +440,69 @@ wxWindow* SurfaceDialog::BuildControl(wxWindow* parent,
                      SendEvent(id, std::to_string(event.GetInt()));
                    });
     } else if (control.type == "table") {
-      auto* table = new wxListCtrl(
-          row, wxID_ANY, wxDefaultPosition, wxSize(-1, 180),
-          wxLC_REPORT | wxLC_SINGLE_SEL);
+      auto* table =
+          new wxListCtrl(row, wxID_ANY, wxDefaultPosition, wxSize(-1, 180),
+                         wxLC_REPORT | wxLC_SINGLE_SEL);
       for (std::size_t index = 0; index < control.columns.size(); ++index)
         table->InsertColumn(static_cast<long>(index),
                             Text(control.columns[index]));
       widget = table;
       sizer->Add(widget, 1, wxEXPAND);
-      widget->Bind(wxEVT_LIST_ITEM_SELECTED,
-                   [this, id = control.id](wxListEvent& event) {
-                     if (!applying_response_)
-                       SendEvent(id, "{\"row\":" +
-                                         std::to_string(event.GetIndex()) +
-                                         "}");
-                     event.Skip();
-                   });
+      widget->Bind(wxEVT_LIST_ITEM_SELECTED, [this, id = control.id](
+                                                 wxListEvent& event) {
+        if (!applying_response_)
+          SendEvent(id, "{\"row\":" + std::to_string(event.GetIndex()) + "}");
+        event.Skip();
+      });
     } else if (control.type == "grid") {
-      auto* grid = new wxGrid(row, wxID_ANY, wxDefaultPosition,
-                              wxSize(-1, 300));
+      auto* grid =
+          new wxGrid(row, wxID_ANY, wxDefaultPosition, wxSize(-1, 300));
       grid->CreateGrid(0, static_cast<int>(control.columns.size()));
       for (std::size_t index = 0; index < control.columns.size(); ++index)
         grid->SetColLabelValue(static_cast<int>(index),
                                Text(control.columns[index]));
       grid->EnableEditing(true);
-      grid->Bind(wxEVT_GRID_CELL_CHANGED,
-                 [this, id = control.id](wxGridEvent& event) {
-                   if (!applying_response_) {
-                     auto* source = dynamic_cast<wxGrid*>(event.GetEventObject());
-                     if (source) {
-                       const std::string value =
-                           "{\"row\":" + std::to_string(event.GetRow()) +
-                           ",\"column\":" + std::to_string(event.GetCol()) +
-                           ",\"value\":" +
-                           JsonString(source->GetCellValue(event.GetRow(),
-                                                           event.GetCol())) +
-                           "}";
-                       SendEvent(id, value);
-                     }
-                   }
-                   event.Skip();
-                 });
-      grid->Bind(wxEVT_GRID_SELECT_CELL,
-                 [this, id = control.id](wxGridEvent& event) {
-                   if (!applying_response_) {
-                     SendEvent(id,
-                               "{\"row\":" +
-                                   std::to_string(event.GetRow()) +
-                                   ",\"column\":" +
-                                   std::to_string(event.GetCol()) + "}");
-                   }
-                   event.Skip();
-                 });
+      grid->Bind(
+          wxEVT_GRID_CELL_CHANGED, [this, id = control.id](wxGridEvent& event) {
+            if (!applying_response_) {
+              auto* source = dynamic_cast<wxGrid*>(event.GetEventObject());
+              if (source) {
+                const std::string value =
+                    "{\"row\":" + std::to_string(event.GetRow()) +
+                    ",\"column\":" + std::to_string(event.GetCol()) +
+                    ",\"value\":" +
+                    JsonString(
+                        source->GetCellValue(event.GetRow(), event.GetCol())) +
+                    "}";
+                SendEvent(id, value);
+              }
+            }
+            event.Skip();
+          });
+      grid->Bind(wxEVT_GRID_SELECT_CELL, [this,
+                                          id = control.id](wxGridEvent& event) {
+        if (!applying_response_) {
+          SendEvent(id, "{\"row\":" + std::to_string(event.GetRow()) +
+                            ",\"column\":" + std::to_string(event.GetCol()) +
+                            "}");
+        }
+        event.Skip();
+      });
       widget = grid;
       sizer->Add(widget, 1, wxEXPAND);
     } else if (control.type == "polar-plot") {
       widget = new PolarPlotPanel(row, Text(control.label));
       sizer->Add(widget, 1, wxEXPAND);
     } else if (control.type == "diagnostics") {
-      widget = new wxTextCtrl(row, wxID_ANY, wxEmptyString,
-                              wxDefaultPosition, wxSize(-1, 100),
-                              wxTE_MULTILINE | wxTE_READONLY);
+      widget = new wxTextCtrl(row, wxID_ANY, wxEmptyString, wxDefaultPosition,
+                              wxSize(-1, 100), wxTE_MULTILINE | wxTE_READONLY);
       sizer->Add(widget, 1, wxEXPAND);
     } else if (control.type == "status") {
       widget = new wxStaticText(row, wxID_ANY, "—");
       sizer->Add(widget, 1, wxALIGN_CENTER_VERTICAL);
     } else {
-      widget = new wxTextCtrl(row, wxID_ANY, wxEmptyString,
-                              wxDefaultPosition, wxDefaultSize,
-                              wxTE_PROCESS_ENTER);
+      widget = new wxTextCtrl(row, wxID_ANY, wxEmptyString, wxDefaultPosition,
+                              wxDefaultSize, wxTE_PROCESS_ENTER);
       sizer->Add(widget, 1, wxEXPAND);
       widget->Bind(wxEVT_TEXT_ENTER,
                    [this, id = control.id](wxCommandEvent& event) {
@@ -559,8 +551,7 @@ void SurfaceDialog::ApplyResponse(const std::string& control_id,
       plot->Apply(value);
     } else if (auto* grid = dynamic_cast<wxGrid*>(item->second)) {
       const wxJSONValue rows = value.ItemAt("rows");
-      if (!value.IsObject() || !value.HasMember("rows") ||
-          !rows.IsArray())
+      if (!value.IsObject() || !value.HasMember("rows") || !rows.IsArray())
         continue;
       if (value.HasMember("columns")) {
         const wxJSONValue columns = value.ItemAt("columns");
@@ -571,8 +562,7 @@ void SurfaceDialog::ApplyResponse(const std::string& control_id,
           else if (grid->GetNumberCols() > wanted_columns)
             grid->DeleteCols(0, grid->GetNumberCols() - wanted_columns);
           for (int column = 0; column < wanted_columns; ++column)
-            grid->SetColLabelValue(column,
-                                   columns.ItemAt(column).AsString());
+            grid->SetColLabelValue(column, columns.ItemAt(column).AsString());
         }
       }
       const int wanted_rows = rows.Size();
@@ -593,26 +583,22 @@ void SurfaceDialog::ApplyResponse(const std::string& control_id,
     } else if (auto* table = dynamic_cast<wxListCtrl*>(item->second)) {
       table->DeleteAllItems();
       const wxJSONValue rows = value.ItemAt("rows");
-      if (!value.IsObject() || !value.HasMember("rows") ||
-          !rows.IsArray())
+      if (!value.IsObject() || !value.HasMember("rows") || !rows.IsArray())
         continue;
       for (int row = 0; row < rows.Size(); ++row) {
         const wxJSONValue cells = rows.ItemAt(row);
         if (!cells.IsArray() || cells.Size() == 0) continue;
-        const long inserted =
-            table->InsertItem(table->GetItemCount(),
-                              cells.ItemAt(0).AsString());
+        const long inserted = table->InsertItem(table->GetItemCount(),
+                                                cells.ItemAt(0).AsString());
         for (int column = 1; column < cells.Size(); ++column)
-          table->SetItem(inserted, column,
-                         cells.ItemAt(column).AsString());
+          table->SetItem(inserted, column, cells.ItemAt(column).AsString());
       }
     } else if (auto* status = dynamic_cast<wxStaticText*>(item->second)) {
       if (value.IsString()) status->SetLabel(value.AsString());
     } else if (auto* text = dynamic_cast<wxTextCtrl*>(item->second)) {
       if (value.IsString()) text->ChangeValue(value.AsString());
     } else if (auto* gauge = dynamic_cast<wxGauge*>(item->second)) {
-      if (value.IsInt())
-        gauge->SetValue(std::clamp(value.AsInt(), 0, 100));
+      if (value.IsInt()) gauge->SetValue(std::clamp(value.AsInt(), 0, 100));
     } else if (auto* toggle = dynamic_cast<wxCheckBox*>(item->second)) {
       if (value.IsBool()) toggle->SetValue(value.AsBool());
     }

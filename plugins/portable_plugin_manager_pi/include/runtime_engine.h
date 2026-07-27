@@ -23,6 +23,18 @@ struct RuntimeAction {
   std::string icon_path;
   bool toolbar = true;
   bool context_menu = false;
+  std::vector<std::string> locations;
+};
+
+struct RuntimeActionContext {
+  std::string location = "toolbar";
+  std::uint32_t canvas_index = 0;
+  bool has_canvas_index = false;
+  double latitude = 0.0;
+  double longitude = 0.0;
+  bool has_position = false;
+  std::string object_kind;
+  std::string object_id;
 };
 
 struct PackageSnapshot {
@@ -60,6 +72,7 @@ struct OverlayStyle {
   bool has_fill = false;
   OverlayColor fill;
   float width_pixels = 1.0F;
+  std::vector<float> dash_pattern;
 };
 
 enum class OverlayPrimitiveKind {
@@ -82,6 +95,10 @@ struct OverlayPrimitive {
   float width_pixels = 0.0F;
   float height_pixels = 0.0F;
   float size_pixels = 0.0F;
+  float rotation_degrees = 0.0F;
+  float anchor_x = 0.5F;
+  float anchor_y = 0.5F;
+  std::string horizontal_alignment = "left";
   OverlayColor text_color;
   bool interactive = false;
 };
@@ -97,6 +114,9 @@ struct OverlayScene {
   std::string package_id;
   std::string scene_id;
   std::uint64_t revision = 0;
+  std::string canvas_target = "all";
+  std::vector<std::uint32_t> selected_canvases;
+  std::string render_phase = "below-vessels";
   std::vector<OverlayLayer> layers;
 
   // API 0.1/0.2 compatibility representation.
@@ -158,8 +178,8 @@ public:
   bool Unload(const std::string& package_id, std::string* diagnostic);
   bool IsEnabled(const std::string& package_id) const;
   void Shutdown();
-  bool HandleAction(const std::string& package_id,
-                    const std::string& action_id);
+  bool HandleAction(const std::string& package_id, const std::string& action_id,
+                    RuntimeActionContext context = {});
   bool HandleSurfaceEvent(const std::string& package_id,
                           const std::string& surface_id,
                           const std::string& control_id,
@@ -203,6 +223,7 @@ public:
                        const std::vector<std::uint8_t>& payload);
   void DeliverAisSentence(const std::string& sentence);
   void DeliverSignalK(const std::string& payload);
+  void DeliverHostEnvironment(const std::string& payload);
   bool DeliverPointerEvent(std::uint32_t kind, std::uint32_t button,
                            std::uint32_t canvas_index, std::int32_t x_pixels,
                            std::int32_t y_pixels, double latitude,

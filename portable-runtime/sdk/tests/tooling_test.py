@@ -29,7 +29,7 @@ class ToolingTest(unittest.TestCase):
             "description": "fixture",
             "component": "component/plugin.wasm",
             "runtime": ">=0.1.0 <0.2.0",
-            "portable_api": ">=0.3.0 <0.4.0",
+            "portable_api": ">=0.4.0 <0.5.0",
             "portable_world": "plugin",
             "event_subscriptions": [
                 {
@@ -59,6 +59,10 @@ class ToolingTest(unittest.TestCase):
         self.write_manifest()
         with self.assertRaises(portable_plugin.LintError):
             portable_plugin.lint_manifest(self.manifest_path)
+        self.manifest["https_domains"] = ["127.0.0.1"]
+        self.write_manifest()
+        with self.assertRaises(portable_plugin.LintError):
+            portable_plugin.lint_manifest(self.manifest_path)
 
     def test_packages_are_deterministic(self):
         first = self.root / "first.ocpnp"
@@ -72,6 +76,34 @@ class ToolingTest(unittest.TestCase):
         self.write_manifest()
         with self.assertRaises(portable_plugin.LintError):
             portable_plugin.lint_manifest(self.manifest_path)
+
+    def test_https_domains_require_permission_and_exact_names(self):
+        self.manifest["https_domains"] = ["api.example.org"]
+        self.write_manifest()
+        with self.assertRaises(portable_plugin.LintError):
+            portable_plugin.lint_manifest(self.manifest_path)
+        self.manifest["permissions"].append("network.https")
+        self.write_manifest()
+        portable_plugin.lint_manifest(self.manifest_path)
+        self.manifest["https_domains"] = ["*.example.org"]
+        self.write_manifest()
+        with self.assertRaises(portable_plugin.LintError):
+            portable_plugin.lint_manifest(self.manifest_path)
+        self.manifest["https_domains"] = ["127.0.0.1"]
+        self.write_manifest()
+        with self.assertRaises(portable_plugin.LintError):
+            portable_plugin.lint_manifest(self.manifest_path)
+
+    def test_host_environment_subscription_needs_no_permission(self):
+        self.manifest["event_subscriptions"] = [
+            {
+                "event": "host.environment",
+                "topic_prefix": "",
+                "queue_limit": 1,
+            }
+        ]
+        self.write_manifest()
+        portable_plugin.lint_manifest(self.manifest_path)
 
 
 if __name__ == "__main__":

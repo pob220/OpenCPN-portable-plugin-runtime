@@ -95,6 +95,30 @@ bool IsSafeIdentifier(const std::string& value, bool require_dot) {
   return !label_start && previous != '-';
 }
 
+bool IsSafeHttpsDomain(const std::string& value) {
+  if (value.empty() || value.size() > 253 || value.front() == '.' ||
+      value.back() == '.')
+    return false;
+  bool label_start = true;
+  bool has_letter = false;
+  char previous = '\0';
+  for (const unsigned char character : value) {
+    if (character == '.') {
+      if (label_start || previous == '-') return false;
+      label_start = true;
+    } else if (std::islower(character) || std::isdigit(character)) {
+      has_letter = has_letter || std::islower(character);
+      label_start = false;
+    } else if (character == '-' && !label_start) {
+      label_start = false;
+    } else {
+      return false;
+    }
+    previous = static_cast<char>(character);
+  }
+  return has_letter && !label_start && previous != '-';
+}
+
 bool IsSemanticVersion(const std::string& value) {
   if (value.empty() || value.size() > 128) return false;
   std::size_t cursor = 0;
@@ -575,6 +599,7 @@ bool ValidateManifestFields(ValidatedArchive* validated,
   const bool portable_api_v01 = portable_api == ">=0.1.0 <0.2.0";
   const bool portable_api_v02 = portable_api == ">=0.2.0 <0.3.0";
   const bool portable_api_v03 = portable_api == ">=0.3.0 <0.4.0";
+  const bool portable_api_v04 = portable_api == ">=0.4.0 <0.5.0";
   const wxString portable_world = manifest["portable_world"].IsString()
                                       ? manifest["portable_world"].AsString()
                                       : "plugin";
@@ -586,11 +611,12 @@ bool ValidateManifestFields(ValidatedArchive* validated,
       !IsSemanticVersion(validated->version) || validated->name.empty() ||
       validated->name.size() > 256 ||
       manifest["runtime"].AsString() != ">=0.1.0 <0.2.0" ||
-      (!portable_api_v01 && !portable_api_v02 && !portable_api_v03) ||
+      (!portable_api_v01 && !portable_api_v02 && !portable_api_v03 &&
+       !portable_api_v04) ||
       !valid_world || (portable_api_v01 && portable_world != "plugin") ||
-      ((portable_api_v02 || portable_api_v03) &&
+      ((portable_api_v02 || portable_api_v03 || portable_api_v04) &&
        !manifest["portable_world"].IsString()) ||
-      (portable_api_v03 && portable_world != "plugin") ||
+      ((portable_api_v03 || portable_api_v04) && portable_world != "plugin") ||
       !CheckedArchivePath(manifest["component"].AsString().utf8_str(),
                           &component, diagnostic) ||
       validated->entries.count(component) == 0 ||
@@ -608,6 +634,30 @@ bool ValidateManifestFields(ValidatedArchive* validated,
     const std::string permission = permissions[index].AsString().ToStdString();
     if (permission.empty() || !unique_permissions.insert(permission).second) {
       *diagnostic = "manifest permission is empty or duplicated";
+      return false;
+    }
+  }
+  if (manifest.HasMember("https_domains")) {
+    const wxJSONValue domains = manifest["https_domains"];
+    std::set<std::string> unique_domains;
+    if (!domains.IsArray() || domains.Size() > 32) {
+      *diagnostic = "https_domains is not a bounded array";
+      return false;
+    }
+    for (int index = 0; index < domains.Size(); ++index) {
+      if (!domains.ItemAt(index).IsString()) {
+        *diagnostic = "HTTPS domain is not a string";
+        return false;
+      }
+      const std::string domain = domains.ItemAt(index).AsString().ToStdString();
+      if (!IsSafeHttpsDomain(domain) || !unique_domains.insert(domain).second) {
+        *diagnostic = "HTTPS domain is invalid or duplicated";
+        return false;
+      }
+    }
+    if (!unique_domains.empty() &&
+        unique_permissions.count("network.https") == 0) {
+      *diagnostic = "https_domains requires the network.https permission";
       return false;
     }
   }

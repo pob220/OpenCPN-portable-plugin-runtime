@@ -21,13 +21,16 @@ struct Action {
   ActionKey key;
   int tool_id = -1;
   int context_id = -1;
+  std::vector<int> context_ids;
   bool checked = false;
   bool dispatchable = true;
 };
 
 class ActionRegistry {
- public:
+public:
   bool Add(const ActionKey& key, int tool_id, int context_id = -1);
+  bool Add(const ActionKey& key, int tool_id,
+           const std::vector<int>& context_ids);
   bool Remove(const ActionKey& key);
   std::vector<Action> RemovePackage(const std::string& package_id);
   std::optional<Action> FindByToolId(int tool_id) const;
@@ -37,7 +40,7 @@ class ActionRegistry {
   std::vector<Action> Clear();
   std::size_t Size() const { return by_key_.size(); }
 
- private:
+private:
   std::map<ActionKey, Action> by_key_;
   std::map<int, ActionKey> by_tool_id_;
   std::map<int, ActionKey> by_context_id_;

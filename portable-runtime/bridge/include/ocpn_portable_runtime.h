@@ -12,11 +12,30 @@ extern "C" {
 #define OCPN_PORTABLE_API_V01 1u
 #define OCPN_PORTABLE_API_V02 2u
 #define OCPN_PORTABLE_API_V03 3u
+#define OCPN_PORTABLE_API_V04 4u
 #define OCPN_PORTABLE_WORLD_PLUGIN 0u
 #define OCPN_PORTABLE_WORLD_WEATHER_ROUTING 1u
 #define OCPN_PORTABLE_WORLD_PASSAGE_ROUTING 2u
 
 typedef struct ocpn_portable_runtime ocpn_portable_runtime;
+
+/*
+ * OPP API 0.4 action invocation context. location values follow the WIT
+ * action-location declaration: 0 toolbar, 1 chart, 2 AIS, 3 route,
+ * 4 waypoint and 5 track context menu.
+ */
+typedef struct ocpn_portable_action_context {
+  uint32_t location;
+  uint32_t canvas_index;
+  uint8_t has_canvas_index;
+  double latitude;
+  double longitude;
+  uint8_t has_position;
+  const char* object_kind;
+  size_t object_kind_len;
+  const char* object_id;
+  size_t object_id_len;
+} ocpn_portable_action_context;
 
 typedef struct ocpn_portable_geo_point {
   double latitude;
@@ -342,6 +361,10 @@ int32_t ocpn_portable_runtime_on_action(ocpn_portable_runtime* runtime,
                                         const char* action_id,
                                         size_t action_id_len, char* error,
                                         size_t error_capacity);
+int32_t ocpn_portable_runtime_on_action_v04(
+    ocpn_portable_runtime* runtime, const char* action_id, size_t action_id_len,
+    const ocpn_portable_action_context* context, char* error,
+    size_t error_capacity);
 int32_t ocpn_portable_runtime_on_surface_event(
     ocpn_portable_runtime* runtime, const char* surface_id,
     size_t surface_id_len, const char* control_id, size_t control_id_len,

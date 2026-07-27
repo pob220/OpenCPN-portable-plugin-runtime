@@ -21,6 +21,7 @@ enum class CapabilityEventKind {
   kCursor,
   kViewport,
   kPluginMessage,
+  kHostEnvironment,
 };
 
 const char* CapabilityEventName(CapabilityEventKind kind);

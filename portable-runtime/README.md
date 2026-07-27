@@ -1,10 +1,15 @@
-# Experimental OpenCPN portable-plugin runtime
+# Experimental OpenCPN Portable Plugin Runtime
 
 This directory contains the Component Model runtime, contracts, author SDK and
 reference portable packages used by the **Portable Plugin Manager**. The
 Manager is a conventional native OpenCPN plugin loaded by an otherwise stock
 OpenCPN 5.14.0 build. Portable support is therefore opt-in without modifying
 or replacing OpenCPN's native plugin loader.
+
+Portable guests use the **OpenCPN Portable Plugin API (OPP API)**. Installable
+`.ocpnp` files are **OpenCPN Portable Plugin packages**. These names distinguish
+the public guest contract, the complete runtime architecture, its native host
+plugin and its package container.
 
 The earlier core-integrated prototype is retained in repository history and
 some historical test documents. The current runtime-host build and isolated

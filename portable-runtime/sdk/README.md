@@ -1,4 +1,4 @@
-# Portable plugin author kit (API 0.3)
+# OpenCPN Portable Plugin author kit (OPP API 0.4)
 
 This directory is the plugin-author boundary. A portable plugin needs a Rust
 toolchain with the `wasm32-wasip2` target; it does not need the OpenCPN source
@@ -27,17 +27,18 @@ validated and rate-limited by the host.
 
 The generated project demonstrates a toolbar and chart-context action,
 host-owned declarative surface, persistent setting and atomic private value,
-retained interactive scene, timer and typed RPC service. See
-[`API-0.3.md`](API-0.3.md) for the capability model, limits and native-to-
-portable migration table.
+retained interactive scene, timer and typed RPC service. The frozen
+[`API-0.3.md`](API-0.3.md) describes the preceding compatibility profile;
+[`OPP-API-0.4.md`](OPP-API-0.4.md) is the current author guide and the
+authoritative WIT source is `contracts/0.4`.
 
 `ppm_portable_fake_host` is a deterministic, headless local runner built by
-the manager's CMake test configuration. It executes the API 0.3 template
+the manager's CMake test configuration. It executes the OPP API 0.4 template
 through the production Wasmtime bridge and checks lifecycle, action, atomic
 storage, scene, timer and service-registration calls:
 
 ```sh
-ctest --test-dir BUILD_DIR -R ppm_portable_api_v03_fake_host
+ctest --test-dir BUILD_DIR -R ppm_opp_api_v04_fake_host
 ```
 
 The fake host does not claim chart or navigation-safety parity with OpenCPN;

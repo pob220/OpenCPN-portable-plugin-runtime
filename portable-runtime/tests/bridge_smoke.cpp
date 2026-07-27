@@ -893,7 +893,7 @@ bool RoutingLifecycle(const char* component_path) {
   // automatic destination-side reverse-isocrone recovery. The stage must be
   // visible through progress and recorded in the result diagnostic.
   auto reverse_request = irish_sea_request;
-  reverse_request.max_states = 8000;
+  reverse_request.max_states = 4000;
   state.routing_stage = 0;
   result.point_count = 0;
   result.diagnostic_len = 0;
@@ -906,7 +906,9 @@ bool RoutingLifecycle(const char* component_path) {
        std::string(diagnostic, result.diagnostic_len)
                .find("reverse-isocrone recovery") != std::string::npos;
   if (!ok) {
-    std::cerr << "reverse recovery assertions failed: " << error << '\n';
+    std::cerr << "reverse recovery assertions failed: " << error
+              << " stage=" << state.routing_stage.load() << " diagnostic="
+              << std::string(diagnostic, result.diagnostic_len) << '\n';
     ocpn_portable_runtime_destroy(runtime);
     return false;
   }

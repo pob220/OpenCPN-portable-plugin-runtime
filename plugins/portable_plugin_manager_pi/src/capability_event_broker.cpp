@@ -14,7 +14,7 @@ struct EventDescriptor {
   const char* permission;
 };
 
-constexpr std::array<EventDescriptor, 9> kEventDescriptors{{
+constexpr std::array<EventDescriptor, 10> kEventDescriptors{{
     {CapabilityEventKind::kNmea0183, "navigation.nmea0183",
      "navigation.nmea.read"},
     {CapabilityEventKind::kNmea2000, "navigation.nmea2000",
@@ -30,6 +30,7 @@ constexpr std::array<EventDescriptor, 9> kEventDescriptors{{
     {CapabilityEventKind::kViewport, "chart.viewport", "chart.viewport.read"},
     {CapabilityEventKind::kPluginMessage, "opencpn.plugin-message",
      "plugin.messages.receive"},
+    {CapabilityEventKind::kHostEnvironment, "host.environment", ""},
 }};
 
 bool SafePackageId(const std::string& value) {
@@ -110,11 +111,10 @@ bool CapabilityEventBroker::Unsubscribe(const std::string& package_id,
   const auto package = packages_.find(package_id);
   if (package == packages_.end()) return false;
   auto& subscriptions = package->second.subscriptions;
-  const auto item =
-      std::find_if(subscriptions.begin(), subscriptions.end(),
-                   [subscription_id](const auto& subscription) {
-                     return subscription.id == subscription_id;
-                   });
+  const auto item = std::find_if(subscriptions.begin(), subscriptions.end(),
+                                 [subscription_id](const auto& subscription) {
+                                   return subscription.id == subscription_id;
+                                 });
   if (item == subscriptions.end()) return false;
   subscriptions.erase(item);
   return true;
@@ -148,6 +148,7 @@ bool CapabilityEventBroker::Coalesces(CapabilityEventKind kind) {
     case CapabilityEventKind::kActiveLeg:
     case CapabilityEventKind::kCursor:
     case CapabilityEventKind::kViewport:
+    case CapabilityEventKind::kHostEnvironment:
       return true;
     default:
       return false;

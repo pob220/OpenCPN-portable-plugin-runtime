@@ -97,10 +97,11 @@ messages. Declare the narrowest topic prefix and smallest practical queue.
 
 ## Network status
 
-API `0.3` intentionally has no raw sockets. The current general author profile
-also does not yet expose a request/upload interface. Network-server plugins
-must wait for the planned bounded asynchronous HTTPS capability; do not work
-around this with WASI socket access or a bundled unsupervised helper.
+API `0.3` intentionally has no raw sockets or request/upload interface. OPP API
+`0.4` supersedes this author profile with bounded host-brokered HTTPS to exact
+manifest-declared domains. A 0.3 component must migrate explicitly; do not
+work around the frozen profile with WASI socket access or an unsupervised
+helper.
 
 ## Development workflow
 

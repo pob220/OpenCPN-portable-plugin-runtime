@@ -1,6 +1,6 @@
 # Portable runtime implementation status
 
-Status date: 2026-07-24. The current deployment baseline is the separate
+Status date: 2026-07-27. The current deployment baseline is the separate
 RuntimeHost OpenCPN profile using stock OpenCPN Release 5.14.0 and the
 conventional Portable Plugin Manager. The earlier Test-OpenCPN core-integrated
 prototype remains historical evidence; the modified working OpenCPN 5.15
@@ -14,6 +14,10 @@ Manager and approving individual package capabilities.
 
 - Conventional native Portable Plugin Manager using Wasmtime 46.0.1; stock
   OpenCPN's loader and C++ ABI remain intact.
+- Frozen API 0.1–0.3 contracts remain loadable beside the new OPP API 0.4
+  general author profile. OPP API 0.4 adds typed events, contextual actions,
+  host-environment values, semantic surface roles, revisioned navigation,
+  multi-canvas scenes, safe communication endpoints and controlled HTTPS.
 - Bounded manifest discovery, runtime/API negotiation, permission allow-list,
   component/manifest identity matching, inert ambient WASI, 256 MiB component
   memory limit, finite fuel and epoch interruption.
@@ -204,8 +208,11 @@ Measured conformance values for this machine are recorded in
   host renderer, not pixel-for-pixel inheritance of native wxWidgets. A future
   visual refinement must remain package-driven and must not move provider code
   back into core.
-- Chart coverage batching is real, but structured land/depth/drying/conflict
-  safety evidence and route-shaped immutable caches are not yet implemented.
+- The generic OPP navigation service is revisioned and paged, while the
+  weather-routing chart-safety service provides structured
+  land/depth/drying/coverage evidence and immutable semantic caches. These are
+  distinct contracts: generic navigation mutations remain user-confirmed and
+  chart safety remains host-owned.
 - iWeatherRouting supports start/destination selection from live position,
   OpenCPN waypoint snapshots, chart cursor or manual coordinates. It loads
   bounded OpenCPN `.pol` tables and boat `.xml` manifests, transfers typed

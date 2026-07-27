@@ -6,6 +6,7 @@
 #include <chrono>
 #include <deque>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -28,7 +29,7 @@ class ManagerDialog;
 class SurfaceDialog;
 
 class PortablePluginManagerPi final : public opencpn_plugin_121 {
- public:
+public:
   explicit PortablePluginManagerPi(void* manager);
   ~PortablePluginManagerPi() override;
 
@@ -46,6 +47,9 @@ class PortablePluginManagerPi final : public opencpn_plugin_121 {
   wxString GetLongDescription() override;
   void OnToolbarToolCallback(int id) override;
   void OnContextMenuItemCallback(int id) override;
+  void OnContextMenuItemCallbackExt(int id, std::string object_ident,
+                                    std::string object_type, double latitude,
+                                    double longitude) override;
   void PrepareContextMenu(int canvas_index) override;
   void ShowPreferencesDialog(wxWindow* parent) override;
   void SetPositionFixEx(PlugIn_Position_Fix_Ex& fix) override;
@@ -53,18 +57,17 @@ class PortablePluginManagerPi final : public opencpn_plugin_121 {
   void SetAISSentence(wxString& sentence) override;
   void SetActiveLegInfo(Plugin_Active_Leg_Info& leg_info) override;
   void SetColorScheme(PI_ColorScheme scheme) override;
-  void SetPluginMessage(wxString& message_id,
-                        wxString& message_body) override;
+  void SetPluginMessage(wxString& message_id, wxString& message_body) override;
   void SetCursorLatLon(double latitude, double longitude) override;
   bool MouseEventHook(wxMouseEvent& event) override;
   bool KeyboardEventHook(wxKeyEvent& event) override;
   bool RenderOverlayMultiCanvas(wxDC& dc, PlugIn_ViewPort* viewport,
                                 int canvas_index, int priority) override;
   bool RenderGLOverlayMultiCanvas(wxGLContext* context,
-                                  PlugIn_ViewPort* viewport,
-                                  int canvas_index, int priority) override;
+                                  PlugIn_ViewPort* viewport, int canvas_index,
+                                  int priority) override;
 
- private:
+private:
   bool RegisterManagerAction();
   int RegisterPortableAction(const RuntimeAction& action,
                              std::uint32_t* host_action_id);
@@ -89,23 +92,22 @@ class PortablePluginManagerPi final : public opencpn_plugin_121 {
                           wxString* diagnostic);
   void SetManagerStatus(const wxString& status);
   bool RestorePreviousPackage(const std::string& package_id,
-                              bool enable_after_restore,
-                              wxString* diagnostic);
+                              bool enable_after_restore, wxString* diagnostic);
   void ShowManager(wxWindow* parent);
   void OnEngineStateChanged();
   void RefreshManager();
   std::vector<PortableNavigationPosition> ListWaypoints() const;
   std::vector<PortableNavigationRoute> ListRoutes() const;
-  bool CreateOpenCpnRoute(
-      const wxString& name,
-      const std::vector<PortableNavigationPosition>& points,
-      wxString* diagnostic);
+  bool CreateOpenCpnRoute(const wxString& name,
+                          const std::vector<PortableNavigationPosition>& points,
+                          wxString* diagnostic);
   int HandleAuthorUiRequest(const std::string& package_id,
                             const std::string& operation,
                             const std::string& request_json,
                             std::string* response_json);
   void HandleNmea2000(std::uint32_t pgn, ObservedEvt event);
   void RefreshSceneHitRegions(PlugIn_ViewPort* viewport, int canvas_index);
+  void PublishHostEnvironment();
 
   struct SceneHitRegion {
     std::string package_id;
@@ -137,6 +139,7 @@ class PortablePluginManagerPi final : public opencpn_plugin_121 {
   double cursor_longitude_ = 0.0;
   bool vessel_position_valid_ = false;
   bool cursor_position_valid_ = false;
+  int context_canvas_index_ = 0;
   double view_west_ = 0.0;
   double view_south_ = 0.0;
   double view_east_ = 0.0;
@@ -148,9 +151,12 @@ class PortablePluginManagerPi final : public opencpn_plugin_121 {
   bool developer_mode_ = false;
   bool initialized_ = false;
   PI_ColorScheme colour_scheme_ = PI_GLOBAL_COLOR_SCHEME_DAY;
-  std::map<std::string,
-           std::deque<std::chrono::steady_clock::time_point>>
+  std::map<std::string, std::deque<std::chrono::steady_clock::time_point>>
       nmea_output_history_;
+  std::map<std::string, DriverHandle> communication_endpoints_;
+  std::map<DriverHandle, std::set<int>> registered_nmea2000_pgns_;
+  std::map<std::string, std::deque<std::chrono::steady_clock::time_point>>
+      nmea2000_output_history_;
   std::vector<SceneHitRegion> scene_hit_regions_;
   std::vector<std::shared_ptr<ObservableListener>> nmea2000_listeners_;
   std::vector<wxEventType> nmea2000_event_types_;

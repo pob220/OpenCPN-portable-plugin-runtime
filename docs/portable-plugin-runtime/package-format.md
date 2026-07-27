@@ -4,7 +4,8 @@
 
 Use `.ocpnp` (**OpenCPN Portable Plugin**) as a deterministic ZIP container. A Wasm-only `.ocpnp` is the same byte sequence on every supported host. Optional native helpers may be present under target-qualified paths; the archive remains a single file, but capabilities then differ by target and the plugin is not strictly Wasm-only.
 
-Package format `1` is independent of OpenCPN version, portable API version, component encoding and plugin version.
+Package format `1` is independent of OpenCPN version, OPP API version,
+component encoding and plugin version.
 
 Prototype implementation note: the current deterministic producer uses
 `format_version`, `component`, a complete `checksums.sha256` inventory and an
@@ -53,44 +54,37 @@ the separately supervised, streaming and batched environment service.
 
 The WIT copies are documentation; the component's embedded type information is authoritative and must match the declared world. The host never executes a core Wasm module disguised as a component.
 
-## Manifest essentials
+## Implemented development manifest
 
-Illustrative shape (field names are a proposal):
+The current signed development profile uses this shape:
 
 ```json
 {
-  "package_format": 1,
+  "format_version": 1,
   "id": "org.example.weather",
   "name": "Example Weather",
   "version": "2.3.1",
-  "publisher": "org.example",
-  "entry": "component/plugin.wasm",
-  "runtime": {
-    "portable_runtime": ">=0.1.0 <0.2.0",
-    "component_profile": "opencpn-component-p3-2026-06",
-    "wasi": "0.3.0"
+  "component": "component/plugin.wasm",
+  "runtime": ">=0.1.0 <0.2.0",
+  "portable_api": ">=0.4.0 <0.5.0",
+  "portable_world": "plugin",
+  "surfaces": {
+    "weather.main": "ui/weather.ui.json"
   },
-  "opencpn_api": ">=1.0.0 <2.0.0",
-  "world": "opencpn:plugin/runtime@1",
-  "requires": [
-    {"interface": "opencpn:navigation", "range": ">=1.0 <2.0", "features": ["position"]},
-    {"interface": "opencpn:jobs", "range": ">=1.0 <2.0"}
-  ],
-  "optional": [
-    {"interface": "opencpn:charts-safety", "range": ">=1.0 <2.0"}
+  "event_subscriptions": [
+    {"event": "navigation.position", "topic_prefix": "", "queue_limit": 8}
   ],
   "permissions": [
-    {"name": "navigation.read", "reason": "Seed route calculations"},
-    {"name": "overlay.submit", "limits": {"max_scene_bytes": 4194304}},
-    {"name": "network.http", "domains": ["weather.example"], "methods": ["GET"]}
+    "ui.commands",
+    "ui.surfaces",
+    "navigation.position.read",
+    "overlay.submit",
+    "network.https"
   ],
-  "provides": [{"interface": "org.example:environment-provider", "version": "1.1.0"}],
-  "resources": {"ui": "resources/ui/main.json", "icon": "resources/icons/plugin.svg"},
-  "state_schema": 3,
-  "migrations": [{"from": 2, "to": 3, "component": "migrations/2-3.wasm"}],
-  "helpers": [],
-  "files": [{"path": "component/plugin.wasm", "size": 1234, "sha256": "..."}],
-  "licenses": ["Apache-2.0"]
+  "https_domains": ["weather.example"],
+  "resources": ["ui/weather.ui.json"],
+  "licenses": ["Apache-2.0"],
+  "development": true
 }
 ```
 
@@ -98,12 +92,23 @@ Requirements:
 
 - `id` is reverse-DNS, lowercase ASCII and immutable; it namespaces storage/settings/services.
 - `version` is SemVer 2.0.0. Build metadata does not determine update precedence.
-- `portable_runtime` versions OpenCPN's loader/supervisor contract, not Wasmtime's library release; `component_profile` pins the accepted component encoding/async ABI and `wasi` pins imported WASI semantics. This avoids pretending the still-pre-1.0 Component Model has WASI's version number.
+- `runtime` versions the loader/supervisor contract, not Wasmtime's library
+  release. `portable_api` independently selects a frozen WIT profile and
+  `portable_world` selects its world. OPP API 0.4 accepts only `plugin`.
 - ranges use one documented grammar; prereleases require explicit opt-in.
-- unknown fields are retained for signatures but ignored only when schema declares them optional. Unknown required features reject compatibility.
-- permissions contain machine scope and localisable reason key. A manifest cannot grant itself a permission or enlarge host quotas.
-- files list every non-signature regular file exactly once. Checksums file is a convenient duplicate view; signed manifest file list is authoritative.
-- component/resources/license/SBOM size and count limits are policy inputs, not suggestions.
+- permissions are exact capability identifiers. A manifest cannot grant itself
+  a capability or enlarge host quotas.
+- event subscriptions are bounded and permission-checked; dynamic
+  subscriptions use the same broker policy.
+- `https_domains` contains at most 32 unique lower-case exact DNS names. It
+  requires `network.https`; wildcards and IP literals are rejected.
+- `resources` lists every package file a declarative surface may load. The
+  complete non-signature file inventory and digest are carried by
+  `checksums.sha256`.
+
+The richer publisher, catalogue, migration and canonical-manifest fields
+described below remain the production profile proposal. They must be added by
+a versioned schema rather than inferred by the current installer.
 
 ### Optional helper declaration
 

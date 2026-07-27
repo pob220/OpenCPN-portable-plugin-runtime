@@ -1,5 +1,7 @@
 #include "action_registry.h"
 
+#include <set>
+
 namespace ppm {
 
 bool ActionKey::operator<(const ActionKey& other) const {
@@ -12,14 +14,32 @@ bool ActionKey::operator==(const ActionKey& other) const {
 }
 
 bool ActionRegistry::Add(const ActionKey& key, int tool_id, int context_id) {
-  if ((tool_id < 0 && context_id < 0) || by_key_.count(key) != 0 ||
-      (tool_id >= 0 && by_tool_id_.count(tool_id) != 0) ||
-      (context_id >= 0 && by_context_id_.count(context_id) != 0)) {
+  return Add(
+      key, tool_id,
+      context_id < 0 ? std::vector<int>{} : std::vector<int>{context_id});
+}
+
+bool ActionRegistry::Add(const ActionKey& key, int tool_id,
+                         const std::vector<int>& context_ids) {
+  if ((tool_id < 0 && context_ids.empty()) || by_key_.count(key) != 0 ||
+      (tool_id >= 0 && by_tool_id_.count(tool_id) != 0)) {
     return false;
   }
-  by_key_.emplace(key, Action{key, tool_id, context_id, false, true});
+  std::set<int> unique_context_ids;
+  for (const int context_id : context_ids) {
+    if (context_id < 0 || by_context_id_.count(context_id) != 0 ||
+        !unique_context_ids.insert(context_id).second)
+      return false;
+  }
+  Action action;
+  action.key = key;
+  action.tool_id = tool_id;
+  action.context_id = context_ids.empty() ? -1 : context_ids.front();
+  action.context_ids = context_ids;
+  by_key_.emplace(key, std::move(action));
   if (tool_id >= 0) by_tool_id_.emplace(tool_id, key);
-  if (context_id >= 0) by_context_id_.emplace(context_id, key);
+  for (const int context_id : context_ids)
+    by_context_id_.emplace(context_id, key);
   return true;
 }
 
@@ -27,8 +47,8 @@ bool ActionRegistry::Remove(const ActionKey& key) {
   const auto item = by_key_.find(key);
   if (item == by_key_.end()) return false;
   if (item->second.tool_id >= 0) by_tool_id_.erase(item->second.tool_id);
-  if (item->second.context_id >= 0)
-    by_context_id_.erase(item->second.context_id);
+  for (const int context_id : item->second.context_ids)
+    by_context_id_.erase(context_id);
   by_key_.erase(item);
   return true;
 }
@@ -43,8 +63,8 @@ std::vector<Action> ActionRegistry::RemovePackage(
     }
     removed.push_back(item->second);
     if (item->second.tool_id >= 0) by_tool_id_.erase(item->second.tool_id);
-    if (item->second.context_id >= 0)
-      by_context_id_.erase(item->second.context_id);
+    for (const int context_id : item->second.context_ids)
+      by_context_id_.erase(context_id);
     item = by_key_.erase(item);
   }
   return removed;

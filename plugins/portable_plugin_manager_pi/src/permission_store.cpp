@@ -20,8 +20,8 @@ constexpr std::size_t kGrantFileLimit = 64 * 1024;
 
 StoreResult Failure(std::string code, std::string message,
                     std::string package_id = {}) {
-  return {false, std::move(code), std::move(message), std::move(package_id),
-          {}, {}};
+  return {false, std::move(code), std::move(message), std::move(package_id), {},
+          {}};
 }
 
 bool SafePackageId(const std::string& value) {
@@ -103,8 +103,8 @@ bool ReadGrant(const fs::path& path, GrantRecord* grant,
   }
   if (!input.eof() || !format_seen || !digest_seen ||
       grant->manifest_digest.size() != 64 ||
-      !std::all_of(grant->manifest_digest.begin(),
-                   grant->manifest_digest.end(), [](unsigned char value) {
+      !std::all_of(grant->manifest_digest.begin(), grant->manifest_digest.end(),
+                   [](unsigned char value) {
                      return std::isdigit(value) ||
                             (value >= 'a' && value <= 'f');
                    })) {
@@ -121,6 +121,9 @@ const std::vector<PermissionDescriptor>& PermissionCatalogue() {
   static const std::vector<PermissionDescriptor> catalogue = {
       {"ui.commands", "Toolbar commands",
        "Add package-owned commands to the OpenCPN toolbar.",
+       PermissionRisk::kLow},
+      {"ui.surfaces", "Portable user-interface surfaces",
+       "Open host-owned tool, preferences, task and dockable surfaces.",
        PermissionRisk::kLow},
       {"navigation.position.read", "Vessel position",
        "Read the current vessel position, course and speed.",
@@ -150,9 +153,14 @@ const std::vector<PermissionDescriptor>& PermissionCatalogue() {
        "Transmit validated, rate-limited NMEA 0183 sentences through "
        "OpenCPN.",
        PermissionRisk::kHigh},
+      {"communications.outputs.read", "Communication outputs",
+       "List opaque identifiers for active OpenCPN output connections.",
+       PermissionRisk::kModerate},
+      {"navigation.nmea2000.write", "Transmit safe NMEA 2000 data",
+       "Transmit allowlisted, rate-limited informational NMEA 2000 PGNs.",
+       PermissionRisk::kHigh},
       {"chart.cursor.read", "Chart cursor",
-       "Receive the current chart-cursor position.",
-       PermissionRisk::kLow},
+       "Receive the current chart-cursor position.", PermissionRisk::kLow},
       {"chart.viewport.read", "Chart viewport",
        "Receive bounded chart viewport and scale updates.",
        PermissionRisk::kLow},
@@ -211,6 +219,9 @@ const std::vector<PermissionDescriptor>& PermissionCatalogue() {
        PermissionRisk::kHigh},
       {"network.http", "Constrained Internet access",
        "Make policy-limited HTTPS requests through the host.",
+       PermissionRisk::kHigh},
+      {"network.https", "Controlled HTTPS access",
+       "Make bounded HTTPS requests only to manifest-declared domains.",
        PermissionRisk::kHigh},
       {"storage.private", "Private package files",
        "Read and write files in this package's isolated private storage.",
@@ -272,8 +283,7 @@ PermissionEvaluation PermissionStore::Evaluate(
   }
   GrantRecord grant;
   std::string diagnostic;
-  if (!ReadGrant(GrantsRoot() / (package.id + ".grant"), &grant,
-                 &diagnostic)) {
+  if (!ReadGrant(GrantsRoot() / (package.id + ".grant"), &grant, &diagnostic)) {
     result.okay = true;
     result.message = diagnostic;
     result.added = result.requested;
@@ -287,12 +297,10 @@ PermissionEvaluation PermissionStore::Evaluate(
                       std::back_inserter(result.removed));
   result.okay = true;
   result.current = result.added.empty() && result.removed.empty();
-  result.manifest_current =
-      grant.manifest_digest == package.manifest_digest;
-  result.message =
-      result.current
-          ? "Previously approved permissions still match"
-          : "Package permissions changed since the last approval";
+  result.manifest_current = grant.manifest_digest == package.manifest_digest;
+  result.message = result.current
+                       ? "Previously approved permissions still match"
+                       : "Package permissions changed since the last approval";
   return result;
 }
 
@@ -327,10 +335,8 @@ StoreResult PermissionStore::Grant(const StoredPackage& package) {
     error.clear();
     fs::rename(temporary, target, error);
   }
-  if (error)
-    return Failure("grant-failed", error.message(), package.id);
-  return {true, "granted", "Package permissions approved", package.id, {},
-          {}};
+  if (error) return Failure("grant-failed", error.message(), package.id);
+  return {true, "granted", "Package permissions approved", package.id, {}, {}};
 }
 
 StoreResult PermissionStore::Revoke(const std::string& package_id) {

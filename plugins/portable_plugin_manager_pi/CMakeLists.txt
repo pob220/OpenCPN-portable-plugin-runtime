@@ -27,6 +27,7 @@ include(${wxWidgets_USE_FILE})
 find_package(Threads REQUIRED)
 find_package(LibArchive REQUIRED)
 find_package(OpenSSL REQUIRED)
+find_package(CURL REQUIRED)
 find_program(PPM_CARGO_EXECUTABLE cargo REQUIRED)
 
 set(PPM_RUNTIME_SOURCE_DIR "${OPENCPN_SOURCE_DIR}/portable-runtime" CACHE PATH
@@ -77,6 +78,7 @@ add_library(portable_plugin_manager_pi MODULE
   src/environment_provider.cpp
   src/environment_workbench.cpp
   src/job_scheduler.cpp
+  src/https_service.cpp
   src/manager_dialog.cpp
   src/package_store.cpp
   src/permission_store.cpp
@@ -119,6 +121,7 @@ target_link_libraries(portable_plugin_manager_pi PRIVATE
   ocpn::pugixml
   LibArchive::LibArchive
   OpenSSL::Crypto
+  CURL::libcurl
   ppm_runtime_bridge
   Threads::Threads
   ${CMAKE_DL_LIBS})
@@ -163,7 +166,7 @@ if(BUILD_TESTING)
       "${PPM_SDK_TEMPLATE_TARGET_DIR}/wasm32-wasip2/release/portable_plugin_template.wasm")
   file(GLOB_RECURSE PPM_SDK_TEMPLATE_SOURCES CONFIGURE_DEPENDS
     "${PPM_SDK_TEMPLATE_DIR}/src/*.rs"
-    "${PPM_RUNTIME_SOURCE_DIR}/contracts/0.3/*.wit")
+    "${PPM_RUNTIME_SOURCE_DIR}/contracts/0.4/*.wit")
   add_custom_command(
     OUTPUT "${PPM_SDK_TEMPLATE_COMPONENT}"
     COMMAND ${CMAKE_COMMAND} -E env
@@ -174,7 +177,7 @@ if(BUILD_TESTING)
     DEPENDS ${PPM_SDK_TEMPLATE_SOURCES}
             "${PPM_SDK_TEMPLATE_DIR}/Cargo.toml"
             "${PPM_SDK_TEMPLATE_DIR}/Cargo.lock"
-    COMMENT "Building the standalone API 0.3 author template"
+    COMMENT "Building the standalone OPP API 0.4 author template"
     VERBATIM)
   add_custom_target(ppm_sdk_template_build
                     DEPENDS "${PPM_SDK_TEMPLATE_COMPONENT}")
@@ -185,7 +188,7 @@ if(BUILD_TESTING)
   target_link_libraries(ppm_portable_fake_host PRIVATE
     ppm_runtime_bridge Threads::Threads ${CMAKE_DL_LIBS})
   add_dependencies(ppm_portable_fake_host ppm_sdk_template_build)
-  add_test(NAME ppm_portable_api_v03_fake_host
+  add_test(NAME ppm_opp_api_v04_fake_host
            COMMAND ppm_portable_fake_host "${PPM_SDK_TEMPLATE_COMPONENT}")
 
   add_executable(ppm_cm93_semantic_reader_test
@@ -298,6 +301,21 @@ if(BUILD_TESTING)
       -Wall -Wextra -Wpedantic)
   endif()
   add_test(NAME ppm_action_registry COMMAND ppm_action_registry_test)
+
+  add_executable(ppm_https_service_test
+    src/https_service.cpp
+    tests/https_service_test.cpp
+  )
+  target_include_directories(ppm_https_service_test PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include")
+  target_link_libraries(ppm_https_service_test PRIVATE CURL::libcurl)
+  if(MSVC)
+    target_compile_options(ppm_https_service_test PRIVATE /W4)
+  else()
+    target_compile_options(ppm_https_service_test PRIVATE
+      -Wall -Wextra -Wpedantic)
+  endif()
+  add_test(NAME ppm_https_service COMMAND ppm_https_service_test)
 
   add_executable(ppm_declarative_ui_test
     src/declarative_ui.cpp
@@ -524,6 +542,7 @@ if(BUILD_TESTING)
     src/environment_provider.cpp
     src/environment_service.cpp
     src/job_scheduler.cpp
+    src/https_service.cpp
     src/permission_store.cpp
     src/portable_polar.cpp
     src/runtime_engine.cpp
@@ -541,6 +560,7 @@ if(BUILD_TESTING)
     ocpn::pugixml
     ocpn::wxjson
     OpenSSL::Crypto
+    CURL::libcurl
     ppm_runtime_bridge
     Threads::Threads
     ${CMAKE_DL_LIBS})
@@ -696,6 +716,7 @@ if(BUILD_TESTING)
     src/environment_provider.cpp
     src/environment_service.cpp
     src/job_scheduler.cpp
+    src/https_service.cpp
     src/permission_store.cpp
     src/runtime_engine.cpp
     src/serial_executor.cpp
@@ -714,6 +735,7 @@ if(BUILD_TESTING)
     ${wxWidgets_LIBRARIES}
     ocpn::wxjson
     OpenSSL::Crypto
+    CURL::libcurl
     ppm_runtime_bridge
     Threads::Threads
     ${CMAKE_DL_LIBS})
@@ -736,6 +758,7 @@ if(BUILD_TESTING)
     src/environment_provider.cpp
     src/environment_service.cpp
     src/job_scheduler.cpp
+    src/https_service.cpp
     src/permission_store.cpp
     src/runtime_engine.cpp
     src/serial_executor.cpp
@@ -753,12 +776,13 @@ if(BUILD_TESTING)
     PPM_TEST_IGRIB_UI="${OPENCPN_SOURCE_DIR}/portable-plugins/igrib/package/igrib-viewer.ui.json"
     PPM_TEST_IWEATHER_WASM="${PPM_TEST_IWEATHER_WASM}"
     PPM_TEST_IWEATHER_UI="${OPENCPN_SOURCE_DIR}/portable-plugins/iweather-routing/package/iweather-routing.ui.json"
-    PPM_TEST_API_V03_WASM="${PPM_SDK_TEMPLATE_COMPONENT}"
-    PPM_TEST_API_V03_UI="${PPM_RUNTIME_SOURCE_DIR}/sdk/rust-template/package/ui/template.ui.json")
+    PPM_TEST_API_V04_WASM="${PPM_SDK_TEMPLATE_COMPONENT}"
+    PPM_TEST_API_V04_UI="${PPM_RUNTIME_SOURCE_DIR}/sdk/rust-template/package/ui/template.ui.json")
   target_link_libraries(ppm_runtime_engine_test PRIVATE
     ${wxWidgets_LIBRARIES}
     ocpn::wxjson
     OpenSSL::Crypto
+    CURL::libcurl
     ppm_runtime_bridge
     Threads::Threads
     ${CMAKE_DL_LIBS})
@@ -781,6 +805,7 @@ if(BUILD_TESTING)
     src/environment_provider.cpp
     src/environment_service.cpp
     src/job_scheduler.cpp
+    src/https_service.cpp
     src/permission_store.cpp
     src/portable_polar.cpp
     src/runtime_engine.cpp
@@ -803,6 +828,7 @@ if(BUILD_TESTING)
     ocpn::pugixml
     ocpn::wxjson
     OpenSSL::Crypto
+    CURL::libcurl
     ppm_runtime_bridge
     Threads::Threads
     ${CMAKE_DL_LIBS})

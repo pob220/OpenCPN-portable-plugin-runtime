@@ -1,7 +1,9 @@
 # Portable Plugin Manager
 
 Portable Plugin Manager is a conventional OpenCPN plugin which hosts
-capability-limited, WebAssembly-based portable packages. OpenCPN itself remains
+capability-limited, WebAssembly-based OpenCPN Portable Plugin packages. It is
+the native host for the OpenCPN Portable Plugin API (OPP API), not the API
+itself. OpenCPN itself remains
 stock: the manager uses only the published `ocpn_plugin.h` boundary.
 
 This implementation branch is intentionally stopped before cross-platform
@@ -30,10 +32,12 @@ a successful module build alone is not runtime evidence.
 - enable, disable, unload and clean runtime shutdown;
 - bounded Wasm execution, supervised helpers and failure diagnostics;
 - one ordinary OpenCPN toolbar action per enabled portable package;
-- declarative modeless and modal surfaces plus package-scoped file grants;
+- role-aware host-owned surfaces plus package-scoped file grants;
 - modeless surfaces owned by the OpenCPN frame, with deferred foreground
   activation after toolbar events;
 - versioned navigation, environmental, chart, routing and overlay services;
+- OPP API 0.4 typed events, contextual actions, multi-canvas scenes,
+  revisioned navigation, safe NMEA 2000 output and controlled HTTPS;
 - iPolars, iGRIB and iWeatherRouting as complete reference workloads.
 
 Disabling a package first cancels its work, removes its actions and surfaces,

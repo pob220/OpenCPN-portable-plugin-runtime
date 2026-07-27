@@ -2,13 +2,13 @@
 
 #include <iostream>
 
-#define CHECK(expression)                                                   \
-  do {                                                                      \
-    if (!(expression)) {                                                    \
-      std::cerr << "check failed at " << __FILE__ << ':' << __LINE__       \
-                << ": " #expression "\n";                                  \
-      return 1;                                                             \
-    }                                                                       \
+#define CHECK(expression)                                            \
+  do {                                                               \
+    if (!(expression)) {                                             \
+      std::cerr << "check failed at " << __FILE__ << ':' << __LINE__ \
+                << ": " #expression "\n";                            \
+      return 1;                                                      \
+    }                                                                \
   } while (false)
 
 int main() {
@@ -24,6 +24,8 @@ int main() {
   CHECK(!registry.Add(igrib, 103));
   CHECK(!registry.Add({"org.opencpn.other", "open"}, 102));
   CHECK(!registry.Add({"org.opencpn.invalid", "open"}, -1));
+  CHECK(!registry.Add({"org.opencpn.invalid", "duplicate-context"}, -1,
+                      std::vector<int>{200, 200}));
 
   auto mapped = registry.FindByToolId(101);
   CHECK(mapped && mapped->key == igrib);
@@ -42,11 +44,19 @@ int main() {
   CHECK(registry.Add(igrib, 220));
   CHECK(registry.Size() == 3);
 
-  CHECK(registry.Add({"org.opencpn.routing", "settings"}, 221));
+  const ppm::ActionKey routing_settings{"org.opencpn.routing", "settings"};
+  CHECK(registry.Add(routing_settings, -1, std::vector<int>{221, 222, 223}));
+  CHECK(registry.FindByContextId(221)->key == routing_settings);
+  CHECK(registry.FindByContextId(222)->key == routing_settings);
+  CHECK(registry.FindByContextId(223)->key == routing_settings);
+  CHECK(!registry.Add({"org.opencpn.other", "context"}, -1,
+                      std::vector<int>{223}));
   const auto package_actions = registry.RemovePackage("org.opencpn.routing");
   CHECK(package_actions.size() == 2);
   CHECK(!registry.FindByToolId(102));
-  CHECK(!registry.FindByToolId(221));
+  CHECK(!registry.FindByContextId(221));
+  CHECK(!registry.FindByContextId(222));
+  CHECK(!registry.FindByContextId(223));
   CHECK(registry.Size() == 2);
   CHECK(registry.RemovePackage("org.opencpn.missing").empty());
 

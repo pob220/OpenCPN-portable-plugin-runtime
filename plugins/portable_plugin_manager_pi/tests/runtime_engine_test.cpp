@@ -565,19 +565,19 @@ int main() {
   const std::string author_package_id = "org.opencpn.portable-template";
   const fs::path author_root =
       fs::temp_directory_path() /
-      fs::path("ppm api v03 author " + std::to_string(stamp));
+      fs::path("ppm opp api v04 author " + std::to_string(stamp));
   const fs::path author_package_root =
       author_root / "packages" / author_package_id;
   fs::create_directories(author_package_root / "component", error);
   CHECK(!error);
   fs::copy_file(
-      PPM_TEST_API_V03_WASM,
+      PPM_TEST_API_V04_WASM,
       author_package_root / "component" / "portable-plugin-template.wasm",
       fs::copy_options::overwrite_existing, error);
   CHECK(!error);
   fs::create_directories(author_package_root / "ui", error);
   CHECK(!error);
-  fs::copy_file(PPM_TEST_API_V03_UI,
+  fs::copy_file(PPM_TEST_API_V04_UI,
                 author_package_root / "ui" / "template.ui.json",
                 fs::copy_options::overwrite_existing, error);
   CHECK(!error);
@@ -589,10 +589,11 @@ int main() {
               "\"version\":\"0.1.0\","
               "\"component\":\"component/portable-plugin-template.wasm\","
               "\"runtime\":\">=0.1.0 <0.2.0\","
-              "\"portable_api\":\">=0.3.0 <0.4.0\","
+              "\"portable_api\":\">=0.4.0 <0.5.0\","
               "\"portable_world\":\"plugin\","
               "\"surfaces\":{\"template.main\":\"ui/template.ui.json\"},"
-              "\"permissions\":[\"ui.commands\",\"settings.read-write\","
+              "\"permissions\":[\"ui.commands\",\"ui.surfaces\","
+              "\"settings.read-write\","
               "\"storage.private\",\"overlay.submit\",\"timers.schedule\","
               "\"plugin.rpc.provide\"],"
               "\"development\":true"
@@ -615,7 +616,7 @@ int main() {
             const std::string&) {
           if (id == author_package_id && surface == "template.main" &&
               control == "hello" &&
-              state.find("API 0.3 surface callback is working") !=
+              state.find("OPP API 0.4 surface callback is working") !=
                   std::string::npos)
             ++author_responses;
         });

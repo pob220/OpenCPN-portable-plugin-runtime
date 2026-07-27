@@ -1,12 +1,12 @@
 # Portable-runtime conformance matrix
 
-Status date: 2026-07-21. A row is **pass** only when the named executable was
+Status date: 2026-07-27. A row is **pass** only when the named executable was
 run on that architecture and the signed aggregate package was verified. Source
 review, cross-compilation and emulation are not counted as passes.
 
 | Target | Local evidence | Required CI evidence | Current status |
 |---|---|---|---|
-| Linux x86-64 | complete source build, 12 focused tests, runtime-OFF build, installed GUI/helper run | `linux-source-and-stock-gate`, native package conformance | local pass; CI pending |
+| Linux x86-64 | complete source build, focused native/bridge/SDK tests, runtime-OFF build, installed GUI/helper run | `linux-source-and-stock-gate`, native package conformance | local pass; CI pending |
 | Linux ARM64 / Raspberry Pi 64-bit | none on this machine | native `ubuntu-24.04-arm` build and package execution | pending |
 | Windows x86-64 | source/Job Object review only | MSVC/vcpkg helper build and Windows package execution | pending |
 | macOS Intel | source/sandbox profile review only | `macos-15-intel` helper build and package execution | pending |

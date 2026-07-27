@@ -36,25 +36,29 @@ Permissions are manifest-declared, user-visible and linked only after approval. 
 
 | Permission | Scope/constraints | Default |
 |---|---|---|
-| `navigation.read` | selected vessel snapshot and bounded subscriptions | deny |
-| `navigation.routes.read` | public route/waypoint/track values | deny |
-| `navigation.routes.write` | create/update/apply with confirmation policy and revision checks | deny; prominent |
+| `navigation.position.read` | selected vessel snapshot and bounded subscriptions | deny |
+| `navigation.objects.read` | paged route/waypoint/track values | deny |
+| `navigation.objects.write` | create/update/delete with confirmation and revision checks | deny; prominent |
 | `charts.coverage` | coverage metadata only | deny |
 | `charts.safety` | structured batched safety evidence | deny; advisory label |
 | `environment.consume` | selected datasets/providers | deny |
 | `environment.provide` | register typed provider; separate catalogue review initially | deny |
 | `overlay.submit` | bounded retained scenes | deny |
-| `ui.basic` / `ui.panel` | actions/forms and later dockable surface | deny |
+| `ui.commands` / `ui.surfaces` | actions and host-owned role-aware surfaces | deny |
 | `jobs.compute` | bounded worker allocation | deny |
 | `settings` | namespaced small non-secret values | grant with install consent |
 | `storage.private/cache/temp` | quota-bound plugin directories/resources | grant by class |
 | `storage.user-open/save` | only files/locations explicitly selected by user | per operation or persisted grant |
-| `network.http` | declared domains, schemes, methods and size/rate limits | deny |
+| `network.https` | exact declared DNS domains, HTTPS, bounded methods/size/rate/redirects and public destinations | deny |
 | `credentials.use:<provider>` | broker uses named credential; token injection preferred | deny; explicit |
 | `network.raw` | unrestricted socket capability | absent in v1; strongest review if ever added |
 | `helper.execute:<id>` | one signed declared helper/profile | deny; explicit experimental warning |
 
-Permission expansion on update disables the plugin until consent. Domain wildcards, IP literals, redirects across scopes, local/link-local addresses and proxy behavior have explicit policy. Core may reduce grants below requested scope.
+Permission expansion on update disables the plugin until consent. Domain
+wildcards and IP literals are rejected; every redirect is revalidated,
+sensitive headers are removed across origins, proxy inheritance is disabled,
+and local/link-local/private/special destinations are rejected after DNS
+resolution. Core may reduce grants below requested scope.
 
 ## Package and update trust
 

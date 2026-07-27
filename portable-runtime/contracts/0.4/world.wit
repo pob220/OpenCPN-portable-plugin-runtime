@@ -1,0 +1,27 @@
+package opencpn:opp@0.4.0;
+
+world plugin-world {
+  import diagnostics;
+  import settings;
+  import actions;
+  import surfaces;
+  import navigation;
+  import scenes;
+  import private-storage;
+  import user-files;
+  import timers;
+  import navigation-output;
+  import host-environment;
+  import communications;
+  import https;
+  import plugin-messages;
+  import plugin-rpc;
+  import event-subscriptions;
+
+  export lifecycle;
+  export surface-event-sink;
+  export event-sink;
+  export input-sink;
+  export timer-sink;
+  export rpc-sink;
+}
