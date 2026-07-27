@@ -52,6 +52,26 @@ int main() {
   }
   std::cout << reported_route.diagnostic << '\n';
 
+  // A safe tile may be certified only after an exact query has already
+  // loaded every CM93 cell touching it. The second query exercises the
+  // no-extra-decode fast path; land/depth queries above must never use it.
+  const ppm::SemanticGeoPoint open_sea_west{53.4500, -5.5800};
+  const ppm::SemanticGeoPoint open_sea_east{53.4600, -5.5200};
+  const auto first_open_sea =
+      reader.QuerySegment(open_sea_west, open_sea_east, 0.0, 0.0);
+  const auto cached_open_sea =
+      reader.QuerySegment(open_sea_west, open_sea_east, 0.0, 0.0);
+  if (first_open_sea.state != ppm::SemanticSegmentAssessment::State::kSafe ||
+      cached_open_sea.state !=
+          ppm::SemanticSegmentAssessment::State::kSafe ||
+      cached_open_sea.diagnostic.find("tile certificate") ==
+          std::string::npos) {
+    std::cerr << "Expected repeat open-sea query to use a safe certificate: "
+              << first_open_sea.diagnostic << " / "
+              << cached_open_sea.diagnostic << '\n';
+    return 1;
+  }
+
   // Departure-time optimisation may run several route searches in parallel.
   // Exercise the shared immutable dictionary and decoded-cell cache under the
   // same concurrent read pattern.

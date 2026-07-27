@@ -5,12 +5,15 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <system_error>
@@ -27,8 +30,11 @@ constexpr double kDegree = kPi / 180.0;
 constexpr double kCm93SemiMajorAxisMetres = 6378388.0;
 constexpr double kNmPerDegreeLatitude = 60.0;
 constexpr double kSemanticSampleNm = 0.025;
+constexpr double kOpenSeaTileDegrees = 0.1;
 constexpr std::size_t kMaxRecords = 2000000;
 constexpr std::size_t kMaxPoints = 20000000;
+constexpr std::size_t kOpenSeaTileCacheLimit = 65536;
+constexpr std::size_t kDecodedCellCacheBudget = 512U * 1024U * 1024U;
 constexpr auto kCellModificationCheckInterval = std::chrono::seconds(30);
 
 const std::array<unsigned char, 256> kTable0 = {
@@ -229,6 +235,16 @@ public:
     return candidates;
   }
 
+  std::size_t ApproximateBytes() const {
+    std::size_t bytes =
+        sizeof(*this) + global_.capacity() * sizeof(std::uint32_t);
+    for (const auto& item : bins_) {
+      bytes += sizeof(item) + 3 * sizeof(void*) +
+               item.second.capacity() * sizeof(std::uint32_t);
+    }
+    return bytes;
+  }
+
 private:
   static constexpr double kBinDegrees = 0.05;
   static constexpr std::uint64_t kMaximumBinsPerArea = 4096;
@@ -250,6 +266,23 @@ struct SemanticCell {
   SemanticAreaIndex hazard_index;
   SemanticAreaIndex classified_index;
 };
+
+std::size_t ApproximateCellBytes(const SemanticCell& cell) {
+  std::size_t bytes = sizeof(cell) + cell.path.native().capacity() *
+                                         sizeof(fs::path::value_type);
+  bytes += cell.areas.capacity() * sizeof(SemanticArea);
+  for (const auto& area : cell.areas) {
+    bytes += area.rings.capacity() *
+             sizeof(std::vector<SemanticGeoPoint>);
+    for (const auto& ring : area.rings)
+      bytes += ring.capacity() * sizeof(SemanticGeoPoint);
+  }
+  bytes += cell.hazard_areas.capacity() * sizeof(std::uint32_t);
+  bytes += cell.classified_areas.capacity() * sizeof(std::uint32_t);
+  bytes += cell.hazard_index.ApproximateBytes();
+  bytes += cell.classified_index.ApproximateBytes();
+  return bytes;
+}
 
 std::vector<std::string> Split(const std::string& line, char separator) {
   std::vector<std::string> fields;
@@ -948,6 +981,31 @@ double SegmentDistanceNm(const SemanticGeoPoint& a, const SemanticGeoPoint& b,
                    PointSegmentDistanceNm(local_d, local_a, local_b)});
 }
 
+bool AreaIntersectsBounds(const SemanticArea& area, const BBox& bounds) {
+  if (!area.bounds.Intersects(bounds)) return false;
+  const std::array<SemanticGeoPoint, 4> corners = {{
+      {bounds.min_lat, bounds.min_lon},
+      {bounds.min_lat, bounds.max_lon},
+      {bounds.max_lat, bounds.max_lon},
+      {bounds.max_lat, bounds.min_lon},
+  }};
+  for (const auto& corner : corners)
+    if (PointInArea(corner, area)) return true;
+  for (const auto& ring : area.rings) {
+    for (const auto& point : ring)
+      if (bounds.Contains(point)) return true;
+    for (std::size_t index = 1; index < ring.size(); ++index) {
+      for (std::size_t edge = 0; edge < corners.size(); ++edge) {
+        if (SegmentDistanceNm(ring[index - 1], ring[index], corners[edge],
+                              corners[(edge + 1) % corners.size()]) <=
+            1e-9)
+          return true;
+      }
+    }
+  }
+  return false;
+}
+
 bool SegmentHitsArea(const SemanticGeoPoint& start, const SemanticGeoPoint& end,
                      const SemanticArea& area,
                      double safety_margin_nautical_miles) {
@@ -985,6 +1043,38 @@ BBox SegmentQueryBounds(const SemanticGeoPoint& start,
   return bounds;
 }
 
+struct OpenSeaTileKey {
+  int latitude = 0;
+  int longitude = 0;
+
+  bool operator==(const OpenSeaTileKey& other) const {
+    return latitude == other.latitude && longitude == other.longitude;
+  }
+};
+
+struct OpenSeaTileKeyHash {
+  std::size_t operator()(const OpenSeaTileKey& key) const {
+    const std::uint64_t latitude =
+        static_cast<std::uint32_t>(key.latitude);
+    const std::uint64_t longitude =
+        static_cast<std::uint32_t>(key.longitude);
+    return static_cast<std::size_t>((latitude << 32U) ^ longitude);
+  }
+};
+
+std::optional<OpenSeaTileKey> OpenSeaTileForSegment(
+    const SemanticGeoPoint& start, const SemanticGeoPoint& end) {
+  if (std::abs(end.longitude - start.longitude) > 180.0)
+    return std::nullopt;
+  const OpenSeaTileKey start_tile{
+      static_cast<int>(std::floor(start.latitude / kOpenSeaTileDegrees)),
+      static_cast<int>(std::floor(start.longitude / kOpenSeaTileDegrees))};
+  const OpenSeaTileKey end_tile{
+      static_cast<int>(std::floor(end.latitude / kOpenSeaTileDegrees)),
+      static_cast<int>(std::floor(end.longitude / kOpenSeaTileDegrees))};
+  return start_tile == end_tile ? std::optional{start_tile} : std::nullopt;
+}
+
 }  // namespace
 
 struct Cm93SemanticReader::Impl {
@@ -996,12 +1086,19 @@ struct Cm93SemanticReader::Impl {
     fs::file_time_type modified;
     std::chrono::steady_clock::time_point last_checked;
     std::shared_ptr<SemanticCell> cell;
+    std::size_t bytes = 0;
+    std::uint64_t last_used = 0;
   };
-
   mutable std::mutex mutex;
+  mutable std::condition_variable cache_changed;
   std::vector<std::shared_ptr<const Root>> roots;
   mutable std::unordered_map<std::string, CachedCell> cache;
+  mutable std::size_t cache_bytes = 0;
+  mutable std::uint64_t cache_clock = 0;
   mutable std::unordered_map<std::string, fs::path> cell_path_cache;
+  mutable std::set<std::string> loading_cells;
+  mutable std::unordered_map<OpenSeaTileKey, bool, OpenSeaTileKeyHash>
+      open_sea_tile_cache;
   std::string status = "no CM93 chart root has been indexed";
 
   fs::path Find(const Root& root, const SemanticGeoPoint& point,
@@ -1029,11 +1126,18 @@ struct Cm93SemanticReader::Impl {
     const std::string key = path.string();
     const auto now = std::chrono::steady_clock::now();
     {
-      std::lock_guard<std::mutex> lock(mutex);
-      const auto found = cache.find(key);
-      if (found != cache.end() &&
-          now - found->second.last_checked < kCellModificationCheckInterval) {
-        return found->second.cell;
+      std::unique_lock<std::mutex> lock(mutex);
+      for (;;) {
+        const auto found = cache.find(key);
+        if (found != cache.end() &&
+            now - found->second.last_checked <
+                kCellModificationCheckInterval) {
+          found->second.last_used = ++cache_clock;
+          return found->second.cell;
+        }
+        if (loading_cells.insert(key).second) break;
+        cache_changed.wait(lock,
+                           [&] { return loading_cells.count(key) == 0; });
       }
     }
 
@@ -1045,21 +1149,123 @@ struct Cm93SemanticReader::Impl {
       if (found != cache.end() && !error &&
           found->second.modified == modified) {
         found->second.last_checked = now;
+        found->second.last_used = ++cache_clock;
+        loading_cells.erase(key);
+        cache_changed.notify_all();
         return found->second.cell;
       }
       if (error) {
-        cache.erase(key);
+        const auto old = cache.find(key);
+        if (old != cache.end()) {
+          cache_bytes -= old->second.bytes;
+          cache.erase(old);
+        }
+        loading_cells.erase(key);
+        cache_changed.notify_all();
         if (diagnostic)
           *diagnostic = "CM93 cell metadata is no longer available";
         return {};
       }
     }
-    auto decoded = DecodeCell(path, detail, root.dictionary, diagnostic);
-    if (decoded) {
+    std::shared_ptr<SemanticCell> decoded;
+    try {
+      decoded = DecodeCell(path, detail, root.dictionary, diagnostic);
+    } catch (...) {
       std::lock_guard<std::mutex> lock(mutex);
-      cache[key] = {modified, now, decoded};
+      loading_cells.erase(key);
+      cache_changed.notify_all();
+      throw;
+    }
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (decoded) {
+        const std::size_t bytes = ApproximateCellBytes(*decoded);
+        const auto old = cache.find(key);
+        if (old != cache.end()) {
+          cache_bytes -= old->second.bytes;
+          cache.erase(old);
+        }
+        cache.emplace(
+            key, CachedCell{modified, now, decoded, bytes, ++cache_clock});
+        cache_bytes += bytes;
+        while (cache_bytes > kDecodedCellCacheBudget && cache.size() > 1) {
+          auto oldest = cache.begin();
+          for (auto candidate = std::next(cache.begin());
+               candidate != cache.end(); ++candidate) {
+            if (candidate->second.last_used < oldest->second.last_used)
+              oldest = candidate;
+          }
+          cache_bytes -= oldest->second.bytes;
+          cache.erase(oldest);
+        }
+      }
+      loading_cells.erase(key);
+      cache_changed.notify_all();
     }
     return decoded;
+  }
+
+  bool OpenSeaTileCertified(const OpenSeaTileKey& key) const {
+    std::lock_guard<std::mutex> lock(mutex);
+    return open_sea_tile_cache.find(key) != open_sea_tile_cache.end();
+  }
+
+  void TryCertifyOpenSeaTile(
+      const std::vector<std::shared_ptr<const Root>>& root_handles,
+      const OpenSeaTileKey& key,
+      const std::map<std::string, std::shared_ptr<SemanticCell>>& cells) const {
+    if (OpenSeaTileCertified(key)) return;
+    BBox tile_bounds;
+    tile_bounds.min_lat =
+        static_cast<double>(key.latitude) * kOpenSeaTileDegrees;
+    tile_bounds.max_lat = tile_bounds.min_lat + kOpenSeaTileDegrees;
+    tile_bounds.min_lon =
+        static_cast<double>(key.longitude) * kOpenSeaTileDegrees;
+    tile_bounds.max_lon = tile_bounds.min_lon + kOpenSeaTileDegrees;
+    const SemanticGeoPoint southwest{tile_bounds.min_lat, tile_bounds.min_lon};
+    const SemanticGeoPoint southeast{tile_bounds.min_lat, tile_bounds.max_lon};
+    const SemanticGeoPoint northwest{tile_bounds.max_lat, tile_bounds.min_lon};
+    const SemanticGeoPoint northeast{tile_bounds.max_lat, tile_bounds.max_lon};
+
+    // A 0.1-degree tile is smaller than the finest 1/3-degree CM93 cell.
+    // Corner probes therefore identify every chart cell touching the tile.
+    // Certification is opportunistic: if the exact segment query did not
+    // already load every required cell, do nothing rather than decoding more.
+    std::set<std::string> required_paths;
+    constexpr double epsilon = 1e-9;
+    for (const auto& root_handle : root_handles) {
+      const auto& root = *root_handle;
+      for (const auto& scale : kScales) {
+        for (const auto& corner :
+             {southwest, southeast, northwest, northeast}) {
+          for (const double latitude_offset : {-epsilon, epsilon}) {
+            for (const double longitude_offset : {-epsilon, epsilon}) {
+              const SemanticGeoPoint point{
+                  corner.latitude + latitude_offset,
+                  corner.longitude + longitude_offset};
+              const fs::path path = Find(root, point, scale);
+              if (!path.empty()) required_paths.insert(path.string());
+            }
+          }
+        }
+      }
+    }
+    if (required_paths.empty()) return;
+    for (const auto& path : required_paths) {
+      const auto found = cells.find(path);
+      if (found == cells.end()) return;
+      const auto& cell = *found->second;
+      for (const std::uint32_t area_index :
+           cell.hazard_index.Query(tile_bounds)) {
+        if (AreaIntersectsBounds(cell.areas[area_index], tile_bounds)) return;
+      }
+    }
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (open_sea_tile_cache.size() >= kOpenSeaTileCacheLimit)
+        open_sea_tile_cache.clear();
+      open_sea_tile_cache[key] = true;
+    }
   }
 };
 
@@ -1083,7 +1289,10 @@ void Cm93SemanticReader::SetChartRoots(const std::vector<std::string>& roots) {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   impl_->roots = std::move(indexed);
   impl_->cache.clear();
+  impl_->cache_bytes = 0;
+  impl_->cache_clock = 0;
   impl_->cell_path_cache.clear();
+  impl_->open_sea_tile_cache.clear();
   if (impl_->roots.empty())
     impl_->status = last_error.empty()
                         ? "no configured CM93 semantic chart root found"
@@ -1124,6 +1333,21 @@ SemanticSegmentAssessment Cm93SemanticReader::QuerySegment(
   if (roots.empty()) {
     result.state = SemanticSegmentAssessment::State::kMissingCoverage;
     result.diagnostic = "no configured CM93 semantic chart root";
+    return result;
+  }
+
+  // Search-time checks may reuse only whole-tile certificates built
+  // opportunistically by an earlier exact query against this same immutable
+  // chart snapshot. Depth always remains an exact final-delivery requirement.
+  const auto search_tile =
+      safety_margin_nautical_miles == 0.0 && minimum_depth_metres == 0.0
+          ? OpenSeaTileForSegment(start, end)
+          : std::nullopt;
+  if (search_tile && impl_->OpenSeaTileCertified(*search_tile)) {
+    result.state = SemanticSegmentAssessment::State::kSafe;
+    result.charts_considered = 1;
+    result.diagnostic =
+        "authoritative CM93 hazard-free open-sea tile certificate passed";
     return result;
   }
 
@@ -1173,6 +1397,8 @@ SemanticSegmentAssessment Cm93SemanticReader::QuerySegment(
   }
 
   if (minimum_depth_metres <= 0.0) {
+    if (search_tile)
+      impl_->TryCertifyOpenSeaTile(roots, *search_tile, cells);
     result.state = SemanticSegmentAssessment::State::kSafe;
     result.diagnostic =
         "authoritative CM93 LNDARE/DRGARE search-time validation passed";

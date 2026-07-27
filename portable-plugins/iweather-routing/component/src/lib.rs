@@ -144,7 +144,7 @@ fn retain_preliminary_candidate(
     alternatives_per_cell: usize,
     sequence: usize,
     candidate: Node,
-    preliminary: &mut BTreeMap<SearchCell, Vec<(f64, usize, Node)>>,
+    preliminary: &mut HashMap<SearchCell, Vec<(f64, usize, Node)>>,
     selected: &mut Vec<(usize, Node)>,
 ) {
     let remaining = distance_nm(
@@ -161,8 +161,20 @@ fn retain_preliminary_candidate(
         .entry(search_cell(request, &candidate))
         .or_default();
     labels.push((candidate_score(request, &candidate), sequence, candidate));
-    labels.sort_by(|a, b| a.0.total_cmp(&b.0));
+    labels.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     labels.truncate(alternatives_per_cell);
+}
+
+fn compare_scored_nodes(left: &(f64, Node), right: &(f64, Node)) -> std::cmp::Ordering {
+    left.0
+        .total_cmp(&right.0)
+        .then_with(|| left.1.time.cmp(&right.1.time))
+        .then_with(|| left.1.lat.total_cmp(&right.1.lat))
+        .then_with(|| left.1.lon.total_cmp(&right.1.lon))
+        .then_with(|| left.1.incoming_heading.total_cmp(&right.1.incoming_heading))
+        .then_with(|| left.1.tack.cmp(&right.1.tack))
+        .then_with(|| left.1.propulsion_mode.cmp(&right.1.propulsion_mode))
+        .then_with(|| left.1.motor_seconds.cmp(&right.1.motor_seconds))
 }
 
 /// Apply the deterministic sector-balanced outer-front reduction used by
@@ -357,18 +369,6 @@ fn route_chain_indices(nodes: &[Node], endpoint: usize) -> Vec<usize> {
     chain
 }
 
-fn detached_route(nodes: &[Node], endpoint: usize) -> Vec<Node> {
-    route_chain_indices(nodes, endpoint)
-        .into_iter()
-        .enumerate()
-        .map(|(position, index)| {
-            let mut node = nodes[index].clone();
-            node.parent = position.checked_sub(1);
-            node
-        })
-        .collect()
-}
-
 fn install_detached_route(nodes: &mut Vec<Node>, route: &[Node]) -> Option<usize> {
     if route.is_empty() {
         return None;
@@ -425,6 +425,7 @@ fn detached_route_from_points(points: &[RoutePoint]) -> Option<Vec<Node>> {
     Some(route)
 }
 
+#[cfg(test)]
 fn retain_earliest_route(incumbent: &mut Option<Vec<Node>>, candidate: Vec<Node>) -> bool {
     let replace =
         incumbent
@@ -441,6 +442,17 @@ fn retain_earliest_route(incumbent: &mut Option<Vec<Node>>, candidate: Vec<Node>
         *incumbent = Some(candidate);
     }
     replace
+}
+
+fn forward_frontier_limit(labels_per_cell: u8, guided_refinement: bool) -> usize {
+    // The global discovery front keeps broad sector diversity. Corridor
+    // refinement already has an independently validated warm route and a
+    // narrow geographic envelope, so a smaller deterministic beam can reach
+    // the incumbent ETA at the halved time step instead of exhausting its
+    // state allowance halfway through the passage.
+    let labels = usize::from(labels_per_cell);
+    let states_per_label: usize = if guided_refinement { 32 } else { 96 };
+    states_per_label.saturating_mul(labels).min(1280)
 }
 
 fn validation_failure_leg(error: &str) -> Option<usize> {
@@ -2549,6 +2561,7 @@ fn reverse_isochrone_recovery(
     state_limit: u32,
     corridor: Option<&RouteCorridor>,
     invalid_prefixes: &mut BTreeSet<usize>,
+    validated_prefixes: &mut BTreeSet<usize>,
     progress: ProgressRange<'_>,
     progress_base: u8,
     progress_span: u8,
@@ -2586,7 +2599,9 @@ fn reverse_isochrone_recovery(
             ));
         }
     }
-    const MAX_REVERSE_SEEDS: usize = 32;
+    const MAX_REVERSE_PREFIX_CHECKS: usize = 32;
+    const MAX_REVERSE_SEEDS: usize = 16;
+    let mut prefix_checks = 0usize;
     let mut seed_number = 0usize;
     for seed in seeds {
         if ancestry_has_invalid_prefix(nodes, seed, invalid_prefixes) {
@@ -2595,13 +2610,20 @@ fn reverse_isochrone_recovery(
         if seed_number >= MAX_REVERSE_SEEDS {
             break;
         }
-        let seed_indices = route_chain_indices(nodes, seed);
-        let seed_chain = route_chain(nodes, seed);
-        if let Err(error) = validate_route_prefix(request, &seed_chain, initial_state) {
-            remember_invalid_prefix(&error, &seed_indices, nodes.len(), invalid_prefixes);
-            outcome.rejected_candidates = outcome.rejected_candidates.saturating_add(1);
-            outcome.last_rejection = Some(error);
-            continue;
+        if !validated_prefixes.contains(&seed) {
+            if prefix_checks >= MAX_REVERSE_PREFIX_CHECKS {
+                break;
+            }
+            prefix_checks += 1;
+            let seed_indices = route_chain_indices(nodes, seed);
+            let seed_chain = route_chain(nodes, seed);
+            if let Err(error) = validate_route_prefix(request, &seed_chain, initial_state) {
+                remember_invalid_prefix(&error, &seed_indices, nodes.len(), invalid_prefixes);
+                outcome.rejected_candidates = outcome.rejected_candidates.saturating_add(1);
+                outcome.last_rejection = Some(error);
+                continue;
+            }
+            validated_prefixes.insert(seed);
         }
         seed_number += 1;
         let stage_progress = (seed_number * 4 / MAX_REVERSE_SEEDS).min(4) as u8;
@@ -2960,6 +2982,7 @@ fn time_dependent_graph_fallback(
     state_limit: u32,
     corridor: Option<&RouteCorridor>,
     invalid_prefixes: &mut BTreeSet<usize>,
+    validated_prefixes: &mut BTreeSet<usize>,
     progress: ProgressRange<'_>,
     progress_base: u8,
     progress_span: u8,
@@ -2972,19 +2995,29 @@ fn time_dependent_graph_fallback(
     let mut open = BinaryHeap::new();
     let mut labels: BTreeMap<(SearchCell, i64, u32), Vec<GraphLabel>> = BTreeMap::new();
     let mut serial = 0u64;
+    const MAX_GRAPH_PREFIX_CHECKS: usize = 96;
+    const MAX_GRAPH_SEEDS: usize = 64;
+    let mut prefix_checks = 0usize;
     let mut accepted_seeds = 0usize;
     for seed in seeds {
         if ancestry_has_invalid_prefix(nodes, seed, invalid_prefixes) {
             continue;
         }
-        if accepted_seeds >= 128 {
+        if accepted_seeds >= MAX_GRAPH_SEEDS {
             break;
         }
-        let seed_indices = route_chain_indices(nodes, seed);
-        let seed_chain = route_chain(nodes, seed);
-        if let Err(error) = validate_route_prefix(request, &seed_chain, initial_state) {
-            remember_invalid_prefix(&error, &seed_indices, nodes.len(), invalid_prefixes);
-            continue;
+        if !validated_prefixes.contains(&seed) {
+            if prefix_checks >= MAX_GRAPH_PREFIX_CHECKS {
+                break;
+            }
+            prefix_checks += 1;
+            let seed_indices = route_chain_indices(nodes, seed);
+            let seed_chain = route_chain(nodes, seed);
+            if let Err(error) = validate_route_prefix(request, &seed_chain, initial_state) {
+                remember_invalid_prefix(&error, &seed_indices, nodes.len(), invalid_prefixes);
+                continue;
+            }
+            validated_prefixes.insert(seed);
         }
         accepted_seeds += 1;
         let cost = nodes[seed].time - request.departure_unix_time;
@@ -3208,6 +3241,7 @@ fn calculate_pass(
         reached_destination: false,
     }];
     let mut invalid_prefixes = BTreeSet::new();
+    let mut validated_prefixes = BTreeSet::new();
     let mut frontier = vec![0usize];
     let max_layers = request.max_hours.saturating_mul(3600) / request.time_step_seconds;
     // `max_states` is a bound on the feasible labels retained by the search,
@@ -3228,17 +3262,9 @@ fn calculate_pass(
     // Otherwise a difficult forward search can consume every label before the
     // explicitly requested reverse and graph stages begin.
     let forward_state_limit = request.max_states.saturating_mul(3) / 5;
-    let interleave_interval = (forward_state_limit / 4).clamp(4_000, 12_000);
-    let recovery_slice = (request.max_states / 20).clamp(1_000, 4_000);
-    let mut next_interleaved_recovery = interleave_interval;
-    let mut recovery_incumbent = warm_start.and_then(detached_route_from_points);
-    let mut incumbent_solver_path = if recovery_incumbent.is_some() {
-        "validated coarse-route warm start"
-    } else {
-        "interleaved reverse-isocrone recovery"
-    };
-    let mut interleaved_recovery_attempts = 0u32;
-    let mut progress_floor = 0u8;
+    let recovery_incumbent = warm_start.and_then(detached_route_from_points);
+    let guided_refinement = recovery_incumbent.is_some();
+    let incumbent_solver_path = "validated coarse-route warm start";
     let mut isochrones = Vec::new();
     let mut traces = Vec::new();
     let mut last_inspection_time = request.departure_unix_time;
@@ -3379,7 +3405,7 @@ fn calculate_pass(
         let alternatives_per_cell = usize::from(request.labels_per_cell)
             .saturating_mul(4)
             .max(4);
-        let mut preliminary: BTreeMap<SearchCell, Vec<(f64, usize, Node)>> = BTreeMap::new();
+        let mut preliminary: HashMap<SearchCell, Vec<(f64, usize, Node)>> = HashMap::new();
         let mut selected_candidates = Vec::new();
         let mut provisional_arrivals: Vec<Node> = Vec::new();
         let mut provisional_sequences = Vec::new();
@@ -3630,7 +3656,7 @@ fn calculate_pass(
         // arena.  This is the portable analogue of reducing an isochrone
         // frontier: discarded candidates consume neither the retained-state
         // budget nor long-lived Wasm memory.
-        let mut bucketed: BTreeMap<SearchCell, Vec<(f64, Node)>> = BTreeMap::new();
+        let mut bucketed: HashMap<SearchCell, Vec<(f64, Node)>> = HashMap::new();
         for (candidate_index, candidate) in candidates.into_iter().enumerate() {
             if request.avoid_unsafe_charts
                 && !chart_corridor_is_covered(&chart_results[chart_ranges[candidate_index].clone()])
@@ -3691,14 +3717,14 @@ fn calculate_pass(
                 .entry(search_cell(&request, &candidate))
                 .or_default();
             labels.push((score, candidate));
-            labels.sort_by(|a, b| a.0.total_cmp(&b.0));
+            labels.sort_by(compare_scored_nodes);
             labels.truncate(usize::from(request.labels_per_cell));
         }
         if winner.is_some() {
             break;
         }
         let mut ranked: Vec<_> = bucketed.into_values().flatten().collect();
-        ranked.sort_by(|a, b| a.0.total_cmp(&b.0));
+        ranked.sort_by(compare_scored_nodes);
         if ranked.is_empty() {
             forward_failure = format!(
                 "no chart-safe route states remain after forecast step {}",
@@ -3706,9 +3732,7 @@ fn calculate_pass(
             );
             break 'forward;
         }
-        let frontier_limit = 320usize
-            .saturating_mul(usize::from(request.labels_per_cell))
-            .min(1280);
+        let frontier_limit = forward_frontier_limit(request.labels_per_cell, guided_refinement);
         let retained_limit = frontier_limit.min(ranked.len());
         let ranked = sector_balanced_frontier(&request, ranked, retained_limit);
         let remaining_budget = forward_state_limit.saturating_sub(examined) as usize;
@@ -3750,7 +3774,7 @@ fn calculate_pass(
             }
             last_inspection_time = frontier_time;
         }
-        let percent = ((((layer + 1) * 90) / max_layers.max(1)).min(89) as u8).max(progress_floor);
+        let percent = (((layer + 1) * 90) / max_layers.max(1)).min(89) as u8;
         progress.report(
             percent,
             &format!(
@@ -3773,86 +3797,6 @@ fn calculate_pass(
             );
             solver_path = incumbent_solver_path;
             break;
-        }
-        if winner.is_none()
-            && examined >= next_interleaved_recovery
-            && examined < forward_state_limit
-        {
-            interleaved_recovery_attempts = interleaved_recovery_attempts.saturating_add(1);
-            progress.report(
-                percent,
-                &format!(
-                    "Forward isochrone checkpoint: trying bounded reverse recovery before resuming ({examined}/{forward_state_limit} forward-stage states)"
-                ),
-            );
-            let checkpoint = nodes.len();
-            let reverse_limit = examined
-                .saturating_add(recovery_slice)
-                .min(forward_state_limit);
-            let reverse = reverse_isochrone_recovery(
-                &request,
-                initial_state,
-                &mut nodes,
-                &mut examined,
-                reverse_limit,
-                corridor,
-                &mut invalid_prefixes,
-                progress,
-                percent,
-                0,
-            )?;
-            if let Some(index) = reverse.winner {
-                if retain_earliest_route(&mut recovery_incumbent, detached_route(&nodes, index)) {
-                    incumbent_solver_path = "interleaved reverse-isocrone recovery";
-                }
-            }
-            nodes.truncate(checkpoint);
-
-            if recovery_incumbent.is_none() && examined < forward_state_limit {
-                progress.report(
-                    percent,
-                    "Time-dependent graph fallback: reverse checkpoint was incomplete; trying a bounded graph tranche",
-                );
-                let graph_limit = examined
-                    .saturating_add(recovery_slice)
-                    .min(forward_state_limit);
-                if let Some(index) = time_dependent_graph_fallback(
-                    &request,
-                    initial_state,
-                    &mut nodes,
-                    &mut examined,
-                    graph_limit,
-                    corridor,
-                    &mut invalid_prefixes,
-                    progress,
-                    percent,
-                    0,
-                )? {
-                    if retain_earliest_route(&mut recovery_incumbent, detached_route(&nodes, index))
-                    {
-                        incumbent_solver_path = "interleaved time-dependent graph fallback";
-                    }
-                }
-                nodes.truncate(checkpoint);
-            }
-            progress_floor = percent;
-            next_interleaved_recovery = examined
-                .saturating_add(interleave_interval)
-                .min(forward_state_limit);
-            if recovery_incumbent
-                .as_ref()
-                .and_then(|route| route.last())
-                .is_some_and(|incumbent| frontier_time >= incumbent.time)
-            {
-                winner = install_detached_route(
-                    &mut nodes,
-                    recovery_incumbent
-                        .as_ref()
-                        .expect("checked recovery incumbent"),
-                );
-                solver_path = incumbent_solver_path;
-                break;
-            }
         }
         if budget_exhausted {
             break;
@@ -3920,6 +3864,7 @@ fn calculate_pass(
             reverse_limit,
             corridor,
             &mut invalid_prefixes,
+            &mut validated_prefixes,
             progress,
             90,
             4,
@@ -3967,6 +3912,7 @@ fn calculate_pass(
             request.max_states,
             corridor,
             &mut invalid_prefixes,
+            &mut validated_prefixes,
             progress,
             95,
             4,
@@ -4004,7 +3950,7 @@ fn calculate_pass(
                 duration_seconds: (winner_node.time - request.departure_unix_time).max(0) as u64,
                 states_examined: examined,
                 diagnostic: format!(
-                    "The {solver_path} stage completed using typed iGRIB samples, polar-optimal tack/gybe headings, and batched host chart checks. The exact delivered geometry passed an independent chronological replay using {validation_samples} fresh environmental/chart samples. Solver cascade used {interleaved_recovery_attempts} bounded recovery checkpoint(s) before final forward/reverse/graph completion."
+                    "The {solver_path} stage completed using typed iGRIB samples, polar-optimal tack/gybe headings, and batched host chart checks. The exact delivered geometry passed an independent chronological replay using {validation_samples} fresh environmental/chart samples. Solver cascade ran forward discovery first, then reverse recovery and the time-dependent graph only when required."
                 ),
                 points: chain,
                 isochrones,
@@ -4790,7 +4736,7 @@ mod tests {
     }
 
     #[test]
-    fn interleaved_incumbent_keeps_the_earliest_arrival() {
+    fn recovery_incumbent_keeps_the_earliest_arrival() {
         let mut slower = vec![test_node()];
         slower[0].time = 500;
         let mut incumbent = Some(slower);
@@ -5311,5 +5257,12 @@ mod tests {
         assert_eq!(refined.heading_step_degrees, 5);
         assert_eq!(refined.refined_heading_step_degrees, 5);
         assert_eq!(refined.spatial_cell_nautical_miles, 1.5);
+    }
+
+    #[test]
+    fn corridor_refinement_uses_a_bounded_route_guided_frontier() {
+        assert_eq!(forward_frontier_limit(2, false), 192);
+        assert_eq!(forward_frontier_limit(2, true), 64);
+        assert_eq!(forward_frontier_limit(u8::MAX, false), 1280);
     }
 }
