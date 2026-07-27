@@ -77,8 +77,14 @@ int main() {
   fs::copy_file(PPM_TEST_IPOLARS_MANIFEST, package / "manifest.json",
                 fs::copy_options::overwrite_existing, error);
   CHECK(!error);
+  const std::string manifest = Read(package / "manifest.json");
+  CHECK(manifest.find(R"("portable_api": ">=0.4.0 <0.5.0")") !=
+        std::string::npos);
+  CHECK(manifest.find(R"("event": "navigation.nmea0183")") !=
+        std::string::npos);
 
   std::set<std::string> actions;
+  bool action_valid = true;
   std::string last_state;
   std::string last_error;
   int opened = 0;
@@ -86,6 +92,9 @@ int main() {
   ppm::RuntimeEngine engine(
       root.string(),
       [&](const ppm::RuntimeAction& action, std::uint32_t* host_id) {
+        if (!action.toolbar || action.context_menu ||
+            action.locations != std::vector<std::string>{"toolbar"})
+          action_valid = false;
         actions.insert(action.action_id);
         *host_id = 1;
         return 0;
@@ -94,7 +103,8 @@ int main() {
   engine.SetSurfaceOpenedCallback(
       [&](const std::string& package_id,
           const ppm::DeclarativeSurface& surface) {
-        if (package_id != id || surface.id != "polars.editor")
+        if (package_id != id || surface.id != "polars.editor" ||
+            surface.role != "tool-window")
           opened_valid = false;
         ++opened;
       });
@@ -110,6 +120,7 @@ int main() {
       id, engine.RequestedPermissions(id), &diagnostic));
   CHECK(engine.Enable(id, &diagnostic));
   CHECK(actions.count("ipolars.open") == 1);
+  CHECK(action_valid);
   CHECK(engine.HandleAction(id, "ipolars.open"));
   CHECK(engine.WaitForIdle(id, std::chrono::seconds(2)));
   CHECK(opened == 1);

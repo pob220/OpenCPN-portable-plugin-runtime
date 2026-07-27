@@ -16,7 +16,9 @@ iPolars. It stages complete package roots and produces deterministic,
 development-signed `.ocpnp` archives below
 `/home/paul/RuntimeHost-OpenCPN/build-reference-packages/packages` by default.
 This replaces the prototype's former dependency on modifying stock OpenCPN's
-top-level CMake build.
+top-level CMake build. iPolars uses the general-author OPP API 0.4 profile;
+iGRIB and iWeatherRouting retain their specialist API 0.2 worlds until those
+services are represented in a later OPP API contract.
 
 Every package build runs archive-level signature, manifest, UI and helper
 conformance. Set `PPM_CONFORMANCE_GRIB_FIXTURE` to a real GRIB file to add the

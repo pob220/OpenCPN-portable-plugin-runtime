@@ -46,6 +46,8 @@ file(GLOB_RECURSE PPM_RUNTIME_BRIDGE_SOURCES CONFIGURE_DEPENDS
   "${PPM_RUNTIME_SOURCE_DIR}/contracts/*.wit")
 file(GLOB_RECURSE PPM_PORTABLE_API_V02_SOURCES CONFIGURE_DEPENDS
   "${OPENCPN_SOURCE_DIR}/portable-runtime/contracts/0.2/*.wit")
+file(GLOB_RECURSE PPM_OPP_API_V04_SOURCES CONFIGURE_DEPENDS
+  "${OPENCPN_SOURCE_DIR}/portable-runtime/contracts/0.4/*.wit")
 add_custom_command(
   OUTPUT "${PPM_RUNTIME_BRIDGE}"
   COMMAND ${CMAKE_COMMAND} -E env
@@ -637,7 +639,7 @@ if(BUILD_TESTING)
     DEPENDS ${PPM_TEST_IPOLARS_SOURCES}
             "${OPENCPN_SOURCE_DIR}/portable-plugins/ipolars/component/Cargo.toml"
             "${OPENCPN_SOURCE_DIR}/portable-plugins/ipolars/component/Cargo.lock"
-            ${PPM_PORTABLE_API_V02_SOURCES}
+            ${PPM_OPP_API_V04_SOURCES}
     COMMENT "Building the iPolars lifecycle test component"
     VERBATIM)
   add_custom_target(ppm_test_ipolars_component

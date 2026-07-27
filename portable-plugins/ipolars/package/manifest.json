@@ -2,15 +2,22 @@
   "format_version": 1,
   "id": "org.opencpn.ipolars",
   "name": "iPolars",
-  "version": "0.1.4",
-  "description": "Portable polar and OpenCPN Weather Routing boat editor",
+  "version": "0.2.0",
+  "description": "OPP API 0.4 polar and OpenCPN Weather Routing boat editor",
   "component": "component/ipolars.wasm",
   "runtime": ">=0.1.0 <0.2.0",
-  "portable_api": ">=0.2.0 <0.3.0",
+  "portable_api": ">=0.4.0 <0.5.0",
   "portable_world": "plugin",
   "surfaces": {
     "polars.editor": "ui/ipolars.ui.json"
   },
+  "event_subscriptions": [
+    {
+      "event": "navigation.nmea0183",
+      "topic_prefix": "$",
+      "queue_limit": 128
+    }
+  ],
   "provides": [
     {
       "interface": "org.opencpn.vessel-performance.editor",
@@ -19,7 +26,7 @@
   ],
   "permissions": [
     "ui.commands",
-    "settings.read-write",
+    "ui.surfaces",
     "storage.user-selected",
     "navigation.nmea.read"
   ],

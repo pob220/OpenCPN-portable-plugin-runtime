@@ -214,8 +214,8 @@ copy_file \
   "${ipolars_root}/resources/ipolars.svg"
 copy_file "${source_root}/portable-plugins/ipolars/package/ui/ipolars.ui.json" \
   "${ipolars_root}/ui/ipolars.ui.json"
-cmake -E copy_directory "${source_root}/portable-runtime/contracts/0.2" \
-  "${ipolars_root}/interfaces/opencpn-portable-0.2"
+cmake -E copy_directory "${source_root}/portable-runtime/contracts/0.4" \
+  "${ipolars_root}/interfaces/opencpn-opp-0.4"
 copy_file "${source_root}/COPYING.gplv2" \
   "${ipolars_root}/licenses/GPL-2.0.txt"
 copy_file "${source_root}/portable-plugins/ipolars/README.md" \
@@ -296,6 +296,9 @@ fi
 python3 \
   "${source_root}/portable-runtime/tests/routing_package_conformance.py" \
   --package "${iweather_archive}" --trusted-key "${public_key}"
+python3 \
+  "${source_root}/portable-runtime/tests/ipolars_package_conformance.py" \
+  --package "${ipolars_archive}" --trusted-key "${public_key}"
 
 printf '\nCurrent-contract reference packages are ready:\n'
 printf '  %s\n' "${igrib_archive}" "${iweather_archive}" "${ipolars_archive}"

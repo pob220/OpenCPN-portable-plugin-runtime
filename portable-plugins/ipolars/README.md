@@ -1,7 +1,8 @@
 # iPolars
 
-iPolars is the small reference portable-runtime package used to exercise the
-Portable Plugin Manager lifecycle and declarative UI. It is also a functional
+iPolars is the first substantial reference package for OPP API 0.4. It
+exercises typed actions and NMEA events, role-aware host surfaces, scoped user
+files, the Portable Plugin Manager lifecycle and declarative UI. It is also a functional
 editor for matrix `.pol` files and OpenCPN Weather Routing boat `.xml` files.
 It edits polar cells and axes, interpolates bounded gaps, and creates, names,
 adds, removes and reorders the polar references in boat XML documents.

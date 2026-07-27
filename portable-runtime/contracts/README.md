@@ -4,7 +4,7 @@
 selects it from the signed manifest and a dedicated legacy guest is exercised
 by the bridge smoke test.
 
-`0.2` is the additive, modular API used by the reference iGRIB, iPolars,
+`0.2` is the additive, modular API used by the reference iGRIB,
 iWeatherRouting and capability-lab packages. Host services, lifecycle,
 filtered events, plugin messages and callback sinks are separate interfaces.
 Most packages select `plugin-world`; route engines select the strictly larger
@@ -26,7 +26,8 @@ Its WIT namespace is `opencpn:opp@0.4.0`. It adds typed event variants,
 context-rich actions, host environment snapshots, semantic surface roles,
 revisioned/paged navigation objects, multi-canvas/render-phase scenes,
 package-scoped communication endpoints, allowlisted NMEA 2000 output and
-controlled HTTPS. The 0.1–0.3 contracts remain frozen.
+controlled HTTPS. iPolars is the first substantial reference package migrated
+to this profile. The 0.1–0.3 contracts remain frozen.
 
 `chart-safety` is a host-owned, renderer-independent service. Portable route
 engines submit value-only segment geometry and vessel clearance requirements;

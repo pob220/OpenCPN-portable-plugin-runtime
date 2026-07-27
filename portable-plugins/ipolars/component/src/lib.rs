@@ -1,9 +1,12 @@
 wit_bindgen::generate!({
-    path: "../../../portable-runtime/contracts/0.2",
+    path: "../../../portable-runtime/contracts/0.4",
     world: "plugin-world",
 });
 
-use opencpn::portable::types::{Event, EventKind, JobEvent, LogLevel, ServiceError};
+use opencpn::opp::types::{
+    ActionInvocation, ActionLocation, ActionRegistration, Event, EventPayload, KeyEvent, LogLevel,
+    PointerEvent, RpcRequest, RpcResponse, ServiceError, SurfaceRole, TimerEvent,
+};
 use std::fmt::Write as _;
 use std::sync::Mutex;
 
@@ -27,19 +30,26 @@ mod host {
         tooltip: &str,
         icon: Option<&str>,
     ) -> Result<u32, String> {
-        opencpn::portable::actions::register(action_id, label, tooltip, icon).map_err(text)
+        opencpn::opp::actions::register(&ActionRegistration {
+            action_id: action_id.into(),
+            label: label.into(),
+            tooltip: tooltip.into(),
+            icon_resource: icon.map(str::to_owned),
+            locations: vec![ActionLocation::Toolbar],
+        })
+        .map_err(text)
     }
     pub fn log(level: LogLevel, message: &str) {
-        opencpn::portable::diagnostics::log(level, message)
+        opencpn::opp::diagnostics::log(level, message)
     }
     pub fn open_surface(surface: &str) -> Result<(), String> {
-        opencpn::portable::surfaces::open(surface).map_err(text)
+        opencpn::opp::surfaces::open(surface, SurfaceRole::ToolWindow).map_err(text)
     }
     pub fn user_file_read(grant: &str) -> Result<Vec<u8>, String> {
-        opencpn::portable::storage::user_file_read(grant).map_err(text)
+        opencpn::opp::user_files::read(grant).map_err(text)
     }
     pub fn user_file_write(grant: &str, value: &[u8]) -> Result<(), String> {
-        opencpn::portable::storage::user_file_write(grant, value).map_err(text)
+        opencpn::opp::user_files::write(grant, value).map_err(text)
     }
 }
 
@@ -1060,7 +1070,7 @@ fn looks_like_logbook_konni(text: &str) -> bool {
 
 struct IPolars;
 impl IPolars {
-    fn initialize() -> Result<exports::opencpn::portable::lifecycle::PluginInfo, String> {
+    fn initialize() -> Result<exports::opencpn::opp::lifecycle::PluginInfo, String> {
         host::register_action(
             "ipolars.open",
             "iPolars",
@@ -1073,7 +1083,7 @@ impl IPolars {
         e.new_crossover = "0".into();
         e.status = "New cruising polar — open a .pol or boat .xml file, or begin editing.".into();
         refresh(&mut e);
-        Ok(exports::opencpn::portable::lifecycle::PluginInfo {
+        Ok(exports::opencpn::opp::lifecycle::PluginInfo {
             id: "org.opencpn.ipolars".into(),
             name: "iPolars".into(),
             version: env!("CARGO_PKG_VERSION").into(),
@@ -1509,8 +1519,8 @@ impl IPolars {
     }
 }
 
-impl exports::opencpn::portable::lifecycle::Guest for IPolars {
-    fn initialize() -> Result<exports::opencpn::portable::lifecycle::PluginInfo, ServiceError> {
+impl exports::opencpn::opp::lifecycle::Guest for IPolars {
+    fn initialize() -> Result<exports::opencpn::opp::lifecycle::PluginInfo, ServiceError> {
         IPolars::initialize().map_err(service_error)
     }
     fn enable() -> Result<(), ServiceError> {
@@ -1519,12 +1529,12 @@ impl exports::opencpn::portable::lifecycle::Guest for IPolars {
     fn disable() {
         IPolars::disable()
     }
-    fn on_action(id: String) -> Result<(), ServiceError> {
-        IPolars::on_action(id).map_err(service_error)
+    fn on_action(invocation: ActionInvocation) -> Result<(), ServiceError> {
+        IPolars::on_action(invocation.action_id).map_err(service_error)
     }
 }
 
-impl exports::opencpn::portable::surface_event_sink::Guest for IPolars {
+impl exports::opencpn::opp::surface_event_sink::Guest for IPolars {
     fn on_surface_event(
         surface: String,
         control: String,
@@ -1534,21 +1544,37 @@ impl exports::opencpn::portable::surface_event_sink::Guest for IPolars {
     }
 }
 
-impl exports::opencpn::portable::job_event_sink::Guest for IPolars {
-    fn on_job_event(_: String, _: JobEvent) {}
-}
-
-impl exports::opencpn::portable::event_sink::Guest for IPolars {
+impl exports::opencpn::opp::event_sink::Guest for IPolars {
     fn on_event(event: Event) -> Result<(), ServiceError> {
-        if event.kind == EventKind::Nmea0183 {
-            IPolars::on_navigation_sentence(event.payload);
+        if let EventPayload::Nmea0183(sentence) = event.payload {
+            IPolars::on_navigation_sentence(sentence);
         }
         Ok(())
     }
 }
 
-impl exports::opencpn::portable::plugin_message_sink::Guest for IPolars {
-    fn on_plugin_message(_message_id: String, _message_body: String) -> Result<(), ServiceError> {
+impl exports::opencpn::opp::input_sink::Guest for IPolars {
+    fn on_pointer(_value: PointerEvent) -> Result<bool, ServiceError> {
+        Ok(false)
+    }
+
+    fn on_key(_value: KeyEvent) -> Result<bool, ServiceError> {
+        Ok(false)
+    }
+}
+
+impl exports::opencpn::opp::timer_sink::Guest for IPolars {
+    fn on_timer(_value: TimerEvent) -> Result<(), ServiceError> {
+        Ok(())
+    }
+}
+
+impl exports::opencpn::opp::rpc_sink::Guest for IPolars {
+    fn on_request(_source_package: String, _request: RpcRequest) -> Result<(), ServiceError> {
+        Ok(())
+    }
+
+    fn on_response(_source_package: String, _response: RpcResponse) -> Result<(), ServiceError> {
         Ok(())
     }
 }
