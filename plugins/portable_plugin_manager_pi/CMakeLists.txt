@@ -48,6 +48,8 @@ file(GLOB_RECURSE PPM_PORTABLE_API_V02_SOURCES CONFIGURE_DEPENDS
   "${OPENCPN_SOURCE_DIR}/portable-runtime/contracts/0.2/*.wit")
 file(GLOB_RECURSE PPM_OPP_API_V04_SOURCES CONFIGURE_DEPENDS
   "${OPENCPN_SOURCE_DIR}/portable-runtime/contracts/0.4/*.wit")
+file(GLOB_RECURSE PPM_OPP_API_V05_SOURCES CONFIGURE_DEPENDS
+  "${OPENCPN_SOURCE_DIR}/portable-runtime/contracts/0.5/*.wit")
 add_custom_command(
   OUTPUT "${PPM_RUNTIME_BRIDGE}"
   COMMAND ${CMAKE_COMMAND} -E env
@@ -168,7 +170,7 @@ if(BUILD_TESTING)
       "${PPM_SDK_TEMPLATE_TARGET_DIR}/wasm32-wasip2/release/portable_plugin_template.wasm")
   file(GLOB_RECURSE PPM_SDK_TEMPLATE_SOURCES CONFIGURE_DEPENDS
     "${PPM_SDK_TEMPLATE_DIR}/src/*.rs"
-    "${PPM_RUNTIME_SOURCE_DIR}/contracts/0.4/*.wit")
+    "${PPM_RUNTIME_SOURCE_DIR}/contracts/0.5/*.wit")
   add_custom_command(
     OUTPUT "${PPM_SDK_TEMPLATE_COMPONENT}"
     COMMAND ${CMAKE_COMMAND} -E env
@@ -179,7 +181,7 @@ if(BUILD_TESTING)
     DEPENDS ${PPM_SDK_TEMPLATE_SOURCES}
             "${PPM_SDK_TEMPLATE_DIR}/Cargo.toml"
             "${PPM_SDK_TEMPLATE_DIR}/Cargo.lock"
-    COMMENT "Building the standalone OPP API 0.4 author template"
+    COMMENT "Building the standalone OPP API 0.5 author template"
     VERBATIM)
   add_custom_target(ppm_sdk_template_build
                     DEPENDS "${PPM_SDK_TEMPLATE_COMPONENT}")
@@ -190,7 +192,7 @@ if(BUILD_TESTING)
   target_link_libraries(ppm_portable_fake_host PRIVATE
     ppm_runtime_bridge Threads::Threads ${CMAKE_DL_LIBS})
   add_dependencies(ppm_portable_fake_host ppm_sdk_template_build)
-  add_test(NAME ppm_opp_api_v04_fake_host
+  add_test(NAME ppm_opp_api_v05_fake_host
            COMMAND ppm_portable_fake_host "${PPM_SDK_TEMPLATE_COMPONENT}")
 
   add_executable(ppm_cm93_semantic_reader_test
@@ -593,7 +595,7 @@ if(BUILD_TESTING)
     DEPENDS ${PPM_TEST_IGRIB_SOURCES}
             "${OPENCPN_SOURCE_DIR}/portable-plugins/igrib/component/Cargo.toml"
             "${OPENCPN_SOURCE_DIR}/portable-plugins/igrib/component/Cargo.lock"
-            ${PPM_PORTABLE_API_V02_SOURCES}
+            ${PPM_OPP_API_V05_SOURCES}
     COMMENT "Building the portable lifecycle test component"
     VERBATIM)
   add_custom_target(ppm_test_igrib_component
@@ -616,7 +618,7 @@ if(BUILD_TESTING)
     DEPENDS ${PPM_TEST_IWEATHER_SOURCES}
             "${OPENCPN_SOURCE_DIR}/portable-plugins/iweather-routing/component/Cargo.toml"
             "${OPENCPN_SOURCE_DIR}/portable-plugins/iweather-routing/component/Cargo.lock"
-            ${PPM_PORTABLE_API_V02_SOURCES}
+            ${PPM_OPP_API_V05_SOURCES}
     COMMENT "Building the iWeatherRouting lifecycle test component"
     VERBATIM)
   add_custom_target(ppm_test_iweather_component
@@ -778,8 +780,8 @@ if(BUILD_TESTING)
     PPM_TEST_IGRIB_UI="${OPENCPN_SOURCE_DIR}/portable-plugins/igrib/package/igrib-viewer.ui.json"
     PPM_TEST_IWEATHER_WASM="${PPM_TEST_IWEATHER_WASM}"
     PPM_TEST_IWEATHER_UI="${OPENCPN_SOURCE_DIR}/portable-plugins/iweather-routing/package/iweather-routing.ui.json"
-    PPM_TEST_API_V04_WASM="${PPM_SDK_TEMPLATE_COMPONENT}"
-    PPM_TEST_API_V04_UI="${PPM_RUNTIME_SOURCE_DIR}/sdk/rust-template/package/ui/template.ui.json")
+    PPM_TEST_API_V05_WASM="${PPM_SDK_TEMPLATE_COMPONENT}"
+    PPM_TEST_API_V05_UI="${PPM_RUNTIME_SOURCE_DIR}/sdk/rust-template/package/ui/template.ui.json")
   target_link_libraries(ppm_runtime_engine_test PRIVATE
     ${wxWidgets_LIBRARIES}
     ocpn::wxjson

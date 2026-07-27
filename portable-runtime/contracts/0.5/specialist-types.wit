@@ -1,0 +1,57 @@
+package opencpn:opp@0.5.0;
+
+interface specialist-types {
+  use types.{geo-point};
+
+  record geo-segment {
+    start: geo-point,
+    end: geo-point,
+  }
+
+  record environment-sample-request {
+    latitude: f64,
+    longitude: f64,
+    unix-time: s64,
+  }
+
+  record environment-sample {
+    wind-u-knots: option<f64>,
+    wind-v-knots: option<f64>,
+    current-u-knots: option<f64>,
+    current-v-knots: option<f64>,
+    wave-height-metres: option<f64>,
+  }
+
+  enum chart-coverage-state {
+    covered,
+    unsafe,
+    missing-coverage,
+    unknown,
+  }
+
+  record chart-segment-result {
+    state: chart-coverage-state,
+    charts-considered: u32,
+    diagnostic: string,
+  }
+
+  record final-chart-safety-options {
+    safety-margin-nautical-miles: f64,
+    minimum-depth-metres: f64,
+    require-authoritative: bool,
+  }
+
+  variant job-event {
+    progress(u8),
+    completed,
+    cancelled,
+    failed(string),
+  }
+
+  record environment-dataset-status {
+    provider-package: string,
+    generation: string,
+    summary: string,
+    available: bool,
+  }
+}

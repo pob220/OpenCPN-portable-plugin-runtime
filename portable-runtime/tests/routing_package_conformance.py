@@ -42,6 +42,8 @@ def main():
             raise RuntimeError("package identity is incorrect")
         if manifest.get("portable_world") != "passage-weather-routing-plugin":
             raise RuntimeError("package does not select the continuous passage world")
+        if manifest.get("portable_api") != ">=0.5.0 <0.6.0":
+            raise RuntimeError("package does not select OPP API 0.5")
         required = {
             "weather-routing.compute",
             "environment.consume",
@@ -194,20 +196,10 @@ def main():
             if isinstance(service, dict)
         ):
             raise RuntimeError("routing package omits its environment service")
-        legacy_interface = (
-            destination / "interfaces" / "opencpn-portable.wit"
-        )
         modular_interfaces = (
-            destination / "interfaces" / "opencpn-portable-0.2"
+            destination / "interfaces" / "opencpn-opp-0.5"
         )
-        if legacy_interface.is_file():
-            interface = legacy_interface.read_text()
-            operations = (
-                "environment-sample-batch",
-                "charts-query-segments",
-                "calculate-route",
-            )
-        elif modular_interfaces.is_dir():
+        if modular_interfaces.is_dir():
             interface = "\n".join(
                 path.read_text()
                 for path in sorted(modular_interfaces.glob("*.wit"))
@@ -217,6 +209,12 @@ def main():
             raise RuntimeError(
                 "routing package omits its declared portable interface contract"
             )
+        for declaration in (
+            "package opencpn:opp@0.5.0",
+            "world passage-weather-routing-plugin-world",
+        ):
+            if declaration not in interface:
+                raise RuntimeError(f"portable interface omits {declaration}")
         for operation in operations:
             if operation not in interface:
                 raise RuntimeError(f"portable interface omits {operation}")

@@ -173,8 +173,8 @@ copy_file "${source_root}/data/svg/traditional/emblem-download.svg" \
   "${igrib_root}/resources/http-download.svg"
 copy_file "${source_root}/portable-plugins/igrib/package/igrib-viewer.ui.json" \
   "${igrib_root}/ui/igrib-viewer.ui.json"
-cmake -E copy_directory "${source_root}/portable-runtime/contracts/0.2" \
-  "${igrib_root}/interfaces/opencpn-portable-0.2"
+cmake -E copy_directory "${source_root}/portable-runtime/contracts/0.5" \
+  "${igrib_root}/interfaces/opencpn-opp-0.5"
 copy_file "${source_root}/COPYING.gplv2" \
   "${igrib_root}/licenses/GPL-2.0.txt"
 copy_file "${source_root}/portable-plugins/igrib/README.md" \
@@ -197,8 +197,8 @@ copy_file \
 copy_file \
   "${source_root}/portable-plugins/iweather-routing/package/iweather-routing.ui.json" \
   "${iweather_root}/ui/iweather-routing.ui.json"
-cmake -E copy_directory "${source_root}/portable-runtime/contracts/0.2" \
-  "${iweather_root}/interfaces/opencpn-portable-0.2"
+cmake -E copy_directory "${source_root}/portable-runtime/contracts/0.5" \
+  "${iweather_root}/interfaces/opencpn-opp-0.5"
 copy_file "${source_root}/COPYING.gplv2" \
   "${iweather_root}/licenses/GPL-2.0.txt"
 copy_file "${source_root}/portable-plugins/iweather-routing/README.md" \

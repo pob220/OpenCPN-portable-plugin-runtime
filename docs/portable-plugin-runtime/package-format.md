@@ -66,7 +66,7 @@ The current signed development profile uses this shape:
   "version": "2.3.1",
   "component": "component/plugin.wasm",
   "runtime": ">=0.1.0 <0.2.0",
-  "portable_api": ">=0.4.0 <0.5.0",
+  "portable_api": ">=0.5.0 <0.6.0",
   "portable_world": "plugin",
   "surfaces": {
     "weather.main": "ui/weather.ui.json"
@@ -94,7 +94,10 @@ Requirements:
 - `version` is SemVer 2.0.0. Build metadata does not determine update precedence.
 - `runtime` versions the loader/supervisor contract, not Wasmtime's library
   release. `portable_api` independently selects a frozen WIT profile and
-  `portable_world` selects its world. OPP API 0.4 accepts only `plugin`.
+  `portable_world` selects its world. OPP API 0.5 accepts `plugin`,
+  `environment-provider-plugin`, `weather-routing-plugin`, or
+  `passage-weather-routing-plugin`; packages select the smallest applicable
+  world.
 - ranges use one documented grammar; prereleases require explicit opt-in.
 - permissions are exact capability identifiers. A manifest cannot grant itself
   a capability or enlarge host quotas.

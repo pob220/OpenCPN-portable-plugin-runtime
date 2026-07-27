@@ -1,10 +1,13 @@
 wit_bindgen::generate!({
-    path: "../../../portable-runtime/contracts/0.2",
-    world: "plugin-world",
+    path: "../../../portable-runtime/contracts/0.5",
+    world: "environment-provider-plugin-world",
 });
 
-use opencpn::portable::types::{
-    ChartCoverageState, GeoPoint, GeoSegment, JobEvent, LogLevel, OverlayStyle, ServiceError,
+use opencpn::opp::specialist_types::{ChartCoverageState, GeoSegment, JobEvent};
+use opencpn::opp::types::{
+    ActionInvocation, ActionLocation, ActionRegistration, Color, Event, GeoPoint, KeyEvent,
+    LogLevel, PointerEvent, RpcRequest, RpcResponse, SceneCanvasTarget, SceneLayer, ScenePrimitive,
+    SceneRenderPhase, SceneStyle, SceneUpdate, ServiceError, SurfaceRole, TimerEvent,
     VesselPosition,
 };
 
@@ -29,43 +32,71 @@ mod host {
         tooltip: &str,
         icon: Option<&str>,
     ) -> Result<u32, String> {
-        opencpn::portable::actions::register(action_id, label, tooltip, icon).map_err(text)
+        opencpn::opp::actions::register(&ActionRegistration {
+            action_id: action_id.into(),
+            label: label.into(),
+            tooltip: tooltip.into(),
+            icon_resource: icon.map(str::to_owned),
+            locations: vec![ActionLocation::Toolbar],
+        })
+        .map_err(text)
     }
     pub fn log(level: LogLevel, message: &str) {
-        opencpn::portable::diagnostics::log(level, message)
+        opencpn::opp::diagnostics::log(level, message)
     }
     pub fn clear_scene(scene_id: &str) -> Result<(), String> {
-        opencpn::portable::scenes::clear(scene_id).map_err(text)
+        opencpn::opp::scenes::clear(scene_id).map_err(text)
     }
     pub fn cancel_job(job_id: &str) -> Result<(), String> {
-        opencpn::portable::jobs::cancel(job_id).map_err(text)
+        opencpn::opp::compute_jobs::cancel(job_id).map_err(text)
     }
     pub fn open_environmental_viewer() -> Result<(), String> {
-        opencpn::portable::surfaces::open("environment.viewer").map_err(text)
+        opencpn::opp::surfaces::open("environment.viewer", SurfaceRole::ToolWindow).map_err(text)
     }
     pub fn get_vessel_position() -> Result<VesselPosition, String> {
-        opencpn::portable::navigation::get_vessel_position().map_err(text)
+        opencpn::opp::navigation::get_vessel_position().map_err(text)
     }
     pub fn setting_get(key: &str) -> Result<Option<String>, String> {
-        opencpn::portable::settings::get(key).map_err(text)
+        opencpn::opp::settings::get(key).map_err(text)
     }
     pub fn setting_set(key: &str, value: &str) -> Result<(), String> {
-        opencpn::portable::settings::set(key, value).map_err(text)
+        opencpn::opp::settings::set(key, value).map_err(text)
     }
     pub fn submit_polyline(
         scene_id: &str,
         points: &[GeoPoint],
-        style: OverlayStyle,
+        style: SceneStyle,
     ) -> Result<(), String> {
-        opencpn::portable::scenes::submit_polyline(scene_id, points, style).map_err(text)
+        opencpn::opp::scenes::submit(&SceneUpdate {
+            scene_id: scene_id.into(),
+            revision: 1,
+            replace: true,
+            canvas_target: SceneCanvasTarget::All,
+            selected_canvases: Vec::new(),
+            render_phase: SceneRenderPhase::AboveVessels,
+            layers: vec![SceneLayer {
+                layer_id: "weather-window".into(),
+                z_index: 0,
+                visible: true,
+                primitives: vec![ScenePrimitive::Polyline(
+                    opencpn::opp::types::PolylinePrimitive {
+                        primitive_id: "coverage-window".into(),
+                        points: points.to_vec(),
+                        style,
+                        interactive: false,
+                    },
+                )],
+            }],
+        })
+        .map_err(text)
     }
     pub fn charts_query_segments(
         segments: &[GeoSegment],
-    ) -> Result<Vec<opencpn::portable::types::ChartSegmentResult>, String> {
-        opencpn::portable::chart_safety::query_segments(segments).map_err(text)
+    ) -> Result<Vec<opencpn::opp::specialist_types::ChartSegmentResult>, String> {
+        opencpn::opp::chart_safety::query_segments(segments).map_err(text)
     }
     pub fn start_job(job_id: &str, work_units: u32) -> Result<(), String> {
-        opencpn::portable::jobs::start(job_id, work_units).map_err(text)
+        opencpn::opp::compute_jobs::start(job_id, work_units).map_err(text)
     }
     pub fn network_get_to_private(
         request_id: &str,
@@ -73,11 +104,11 @@ mod host {
         private_name: &str,
         max_bytes: u64,
     ) -> Result<(), String> {
-        opencpn::portable::network::get_to_private(request_id, url, private_name, max_bytes)
+        opencpn::opp::provider_network::get_to_private(request_id, url, private_name, max_bytes)
             .map_err(text)
     }
     pub fn storage_private_read(private_name: &str) -> Result<Vec<u8>, String> {
-        opencpn::portable::storage::private_read(private_name).map_err(text)
+        opencpn::opp::private_storage::read(private_name).map_err(text)
     }
 }
 
@@ -97,6 +128,11 @@ fn fallback_position() -> VesselPosition {
         longitude: -4.15,
         course_over_ground: None,
         speed_over_ground: None,
+        heading_true: None,
+        heading_magnetic: None,
+        magnetic_variation: None,
+        fix_unix_time: None,
+        satellites: None,
     }
 }
 
@@ -130,7 +166,7 @@ fn weather_window(position: &VesselPosition) -> Vec<GeoPoint> {
 }
 
 impl IGrib {
-    fn initialize() -> Result<exports::opencpn::portable::lifecycle::PluginInfo, String> {
+    fn initialize() -> Result<exports::opencpn::opp::lifecycle::PluginInfo, String> {
         host::register_action(
             ACTION_TOGGLE,
             "iGRIB",
@@ -138,7 +174,7 @@ impl IGrib {
             Some("resources/igrib.svg"),
         )?;
         host::log(LogLevel::Info, "iGRIB portable component initialised");
-        Ok(exports::opencpn::portable::lifecycle::PluginInfo {
+        Ok(exports::opencpn::opp::lifecycle::PluginInfo {
             id: "org.opencpn.igrib".into(),
             name: "iGRIB".into(),
             version: env!("CARGO_PKG_VERSION").into(),
@@ -180,12 +216,16 @@ impl IGrib {
                 host::submit_polyline(
                     SCENE_WEATHER,
                     &weather_window(&position),
-                    OverlayStyle {
-                        red: 30,
-                        green: 170,
-                        blue: 245,
-                        alpha: 225,
+                    SceneStyle {
+                        stroke: Some(Color {
+                            red: 30,
+                            green: 170,
+                            blue: 245,
+                            alpha: 225,
+                        }),
+                        fill: None,
                         width_pixels: 4.0,
+                        dash_pattern: Vec::new(),
                     },
                 )?;
                 let window = weather_window(&position);
@@ -295,8 +335,8 @@ impl IGrib {
     }
 }
 
-impl exports::opencpn::portable::lifecycle::Guest for IGrib {
-    fn initialize() -> Result<exports::opencpn::portable::lifecycle::PluginInfo, ServiceError> {
+impl exports::opencpn::opp::lifecycle::Guest for IGrib {
+    fn initialize() -> Result<exports::opencpn::opp::lifecycle::PluginInfo, ServiceError> {
         IGrib::initialize().map_err(service_error)
     }
     fn enable() -> Result<(), ServiceError> {
@@ -305,12 +345,12 @@ impl exports::opencpn::portable::lifecycle::Guest for IGrib {
     fn disable() {
         IGrib::disable()
     }
-    fn on_action(action_id: String) -> Result<(), ServiceError> {
-        IGrib::on_action(action_id).map_err(service_error)
+    fn on_action(invocation: ActionInvocation) -> Result<(), ServiceError> {
+        IGrib::on_action(invocation.action_id).map_err(service_error)
     }
 }
 
-impl exports::opencpn::portable::surface_event_sink::Guest for IGrib {
+impl exports::opencpn::opp::surface_event_sink::Guest for IGrib {
     fn on_surface_event(
         surface_id: String,
         control_id: String,
@@ -320,20 +360,40 @@ impl exports::opencpn::portable::surface_event_sink::Guest for IGrib {
     }
 }
 
-impl exports::opencpn::portable::job_event_sink::Guest for IGrib {
+impl exports::opencpn::opp::job_event_sink::Guest for IGrib {
     fn on_job_event(job_id: String, event: JobEvent) {
         IGrib::on_job_event(job_id, event)
     }
 }
 
-impl exports::opencpn::portable::event_sink::Guest for IGrib {
-    fn on_event(_event: opencpn::portable::types::Event) -> Result<(), ServiceError> {
+impl exports::opencpn::opp::event_sink::Guest for IGrib {
+    fn on_event(_event: Event) -> Result<(), ServiceError> {
         Ok(())
     }
 }
 
-impl exports::opencpn::portable::plugin_message_sink::Guest for IGrib {
-    fn on_plugin_message(_message_id: String, _message_body: String) -> Result<(), ServiceError> {
+impl exports::opencpn::opp::input_sink::Guest for IGrib {
+    fn on_pointer(_value: PointerEvent) -> Result<bool, ServiceError> {
+        Ok(false)
+    }
+
+    fn on_key(_value: KeyEvent) -> Result<bool, ServiceError> {
+        Ok(false)
+    }
+}
+
+impl exports::opencpn::opp::timer_sink::Guest for IGrib {
+    fn on_timer(_value: TimerEvent) -> Result<(), ServiceError> {
+        Ok(())
+    }
+}
+
+impl exports::opencpn::opp::rpc_sink::Guest for IGrib {
+    fn on_request(_source_package: String, _request: RpcRequest) -> Result<(), ServiceError> {
+        Ok(())
+    }
+
+    fn on_response(_source_package: String, _response: RpcResponse) -> Result<(), ServiceError> {
         Ok(())
     }
 }

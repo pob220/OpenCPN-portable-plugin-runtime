@@ -162,8 +162,8 @@ class BetaToolsTest(unittest.TestCase):
         source = (BETA / "build-linux.sh").read_text()
         self.assertIn('share/opencpn/"*', source)
         self.assertIn('ln -s "../share/opencpn/$name"', source)
-        self.assertIn("org.opencpn.igrib-0.1.0.ocpnp", source)
-        self.assertIn("org.opencpn.iweather-routing-0.1.0.ocpnp", source)
+        self.assertIn("org.opencpn.igrib-0.2.0.ocpnp", source)
+        self.assertIn("org.opencpn.iweather-routing-0.2.0.ocpnp", source)
 
     def test_beta_prerequisites_cover_generator_dependencies(self):
         source = (BETA / "debian-prerequisites.sh").read_text()

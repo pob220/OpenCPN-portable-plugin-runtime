@@ -3,10 +3,10 @@
   "id": "org.opencpn.portable-template",
   "name": "Portable Plugin Template",
   "version": "0.1.0",
-  "description": "Minimal OPP API 0.4 portable plugin author template",
+  "description": "Minimal OPP API 0.5 portable plugin author template",
   "component": "component/portable-plugin-template.wasm",
   "runtime": ">=0.1.0 <0.2.0",
-  "portable_api": ">=0.4.0 <0.5.0",
+  "portable_api": ">=0.5.0 <0.6.0",
   "portable_world": "plugin",
   "surfaces": {
     "template.main": "ui/template.ui.json"

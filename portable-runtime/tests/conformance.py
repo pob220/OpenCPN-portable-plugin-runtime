@@ -112,6 +112,23 @@ def main():
         if rollback is not None:
             raise RuntimeError("fresh conformance install unexpectedly created rollback")
         report["checks"]["signed_package_install"] = "passed"
+        manifest = json.loads((destination / "manifest.json").read_text())
+        if manifest.get("portable_api") != ">=0.5.0 <0.6.0" or \
+                manifest.get("portable_world") != "environment-provider-plugin":
+            raise RuntimeError("iGRIB does not select the OPP API 0.5 provider world")
+        interfaces = destination / "interfaces" / "opencpn-opp-0.5"
+        contract = "\n".join(
+            path.read_text() for path in sorted(interfaces.glob("*.wit"))
+        )
+        for declaration in (
+            "package opencpn:opp@0.5.0",
+            "world environment-provider-plugin-world",
+            "interface provider-network",
+            "interface compute-jobs",
+        ):
+            if declaration not in contract:
+                raise RuntimeError(f"iGRIB interface omits {declaration}")
+        report["checks"]["opp_api_0_5_provider_contract"] = "passed"
 
         action_resources = [
             destination / "resources" / "igrib.svg",

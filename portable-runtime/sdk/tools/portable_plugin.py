@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone OPP API 0.4 portable-plugin scaffold, linter and packager."""
+"""Standalone OPP API 0.5 portable-plugin scaffold, linter and packager."""
 
 from __future__ import annotations
 
@@ -24,8 +24,14 @@ SAFE_VERSION = re.compile(
     r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
 )
-API_04 = ">=0.4.0 <0.5.0"
+API_05 = ">=0.5.0 <0.6.0"
 RUNTIME_01 = ">=0.1.0 <0.2.0"
+WORLDS = {
+    "plugin",
+    "environment-provider-plugin",
+    "weather-routing-plugin",
+    "passage-weather-routing-plugin",
+}
 PERMISSIONS = {
     "ui.commands",
     "ui.surfaces",
@@ -126,10 +132,12 @@ def lint_manifest(path: pathlib.Path, require_files: bool = True) -> dict:
         raise LintError("version must be semantic versioning")
     if value.get("runtime") != RUNTIME_01:
         raise LintError(f"runtime must be {RUNTIME_01!r}")
-    if value.get("portable_api") != API_04:
-        raise LintError(f"portable_api must be {API_04!r} for this SDK")
-    if value.get("portable_world") != "plugin":
-        raise LintError("OPP API 0.4 supports only the plugin world")
+    if value.get("portable_api") != API_05:
+        raise LintError(f"portable_api must be {API_05!r} for this SDK")
+    if value.get("portable_world") not in WORLDS:
+        raise LintError(
+            "portable_world must select an OPP API 0.5 universal profile"
+        )
     component = safe_relative(value.get("component"), "component")
     permissions = value.get("permissions")
     if not isinstance(permissions, list) or any(
@@ -293,12 +301,12 @@ def command_new(args: argparse.Namespace) -> None:
     manifest["id"] = args.id
     manifest["name"] = args.name
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", "utf-8")
-    contracts = pathlib.Path(__file__).resolve().parents[2] / "contracts" / "0.4"
-    shutil.copytree(contracts, destination / "contracts" / "0.4")
+    contracts = pathlib.Path(__file__).resolve().parents[2] / "contracts" / "0.5"
+    shutil.copytree(contracts, destination / "contracts" / "0.5")
     source_path = destination / "src" / "lib.rs"
     source_path.write_text(
         source_path.read_text("utf-8").replace(
-            'path: "../../contracts/0.4"', 'path: "contracts/0.4"'
+            'path: "../../contracts/0.5"', 'path: "contracts/0.5"'
         ),
         "utf-8",
     )

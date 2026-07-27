@@ -13,14 +13,16 @@ extern "C" {
 #define OCPN_PORTABLE_API_V02 2u
 #define OCPN_PORTABLE_API_V03 3u
 #define OCPN_PORTABLE_API_V04 4u
+#define OCPN_PORTABLE_API_V05 5u
 #define OCPN_PORTABLE_WORLD_PLUGIN 0u
 #define OCPN_PORTABLE_WORLD_WEATHER_ROUTING 1u
 #define OCPN_PORTABLE_WORLD_PASSAGE_ROUTING 2u
+#define OCPN_PORTABLE_WORLD_ENVIRONMENT_PROVIDER 3u
 
 typedef struct ocpn_portable_runtime ocpn_portable_runtime;
 
 /*
- * OPP API 0.4 action invocation context. location values follow the WIT
+ * OPP API 0.4 and later action invocation context. location values follow the WIT
  * action-location declaration: 0 toolbar, 1 chart, 2 AIS, 3 route,
  * 4 waypoint and 5 track context menu.
  */
@@ -324,9 +326,9 @@ typedef struct ocpn_portable_host_callbacks {
       const ocpn_portable_final_chart_safety_options* options,
       ocpn_portable_chart_segment_result* results, size_t result_count);
   /*
-   * Private bounded transport for API 0.3's typed author services. WIT is
-   * the public contract. The bridge supplies a policy-bounded output buffer
-   * and the host reports the actual response length.
+   * Private bounded transport for API 0.3 and later typed author services.
+   * WIT is the public contract. The bridge supplies a policy-bounded output
+   * buffer and the host reports the actual response length.
    */
   int32_t (*author_service_call)(void* user_data, const char* operation,
                                  size_t operation_len, const char* request_json,

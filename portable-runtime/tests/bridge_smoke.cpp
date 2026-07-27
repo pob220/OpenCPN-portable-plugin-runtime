@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -50,6 +51,74 @@ struct HostState {
 
 std::string Text(const char* value, size_t length) {
   return value ? std::string(value, length) : std::string();
+}
+
+std::string JsonString(const std::string& value, const std::string& key) {
+  const std::string marker = "\"" + key + "\":";
+  const auto field = value.find(marker);
+  if (field == std::string::npos) return {};
+  const auto first = value.find('"', field + marker.size());
+  if (first == std::string::npos) return {};
+  std::string decoded;
+  bool escaped = false;
+  for (std::size_t index = first + 1; index < value.size(); ++index) {
+    const char next = value[index];
+    if (escaped) {
+      switch (next) {
+        case 'n':
+          decoded.push_back('\n');
+          break;
+        case 'r':
+          decoded.push_back('\r');
+          break;
+        case 't':
+          decoded.push_back('\t');
+          break;
+        default:
+          decoded.push_back(next);
+          break;
+      }
+      escaped = false;
+    } else if (next == '\\') {
+      escaped = true;
+    } else if (next == '"') {
+      return decoded;
+    } else {
+      decoded.push_back(next);
+    }
+  }
+  return {};
+}
+
+std::vector<ocpn_portable_geo_point> JsonPoints(const std::string& value) {
+  std::vector<ocpn_portable_geo_point> points;
+  std::size_t offset = 0;
+  while ((offset = value.find("\"latitude\":", offset)) !=
+         std::string::npos) {
+    offset += std::strlen("\"latitude\":");
+    char* end = nullptr;
+    const double latitude = std::strtod(value.c_str() + offset, &end);
+    if (!end) break;
+    const auto longitude_field = value.find("\"longitude\":", end - value.c_str());
+    if (longitude_field == std::string::npos) break;
+    const auto longitude_offset =
+        longitude_field + std::strlen("\"longitude\":");
+    const double longitude =
+        std::strtod(value.c_str() + longitude_offset, &end);
+    if (!end) break;
+    points.push_back({latitude, longitude});
+    offset = static_cast<std::size_t>(end - value.c_str());
+  }
+  return points;
+}
+
+std::string JsonEscape(const std::string& value) {
+  std::string escaped;
+  for (const char next : value) {
+    if (next == '"' || next == '\\') escaped.push_back('\\');
+    escaped.push_back(next);
+  }
+  return escaped;
 }
 
 void Log(void* data, uint32_t, const char* message, size_t length) {
@@ -315,6 +384,63 @@ int32_t ChartsQueryFinalSafety(
   return 0;
 }
 
+int32_t AuthorServiceCall(void* data, const char* operation,
+                          size_t operation_len, const char* request_json,
+                          size_t request_json_len, char* response_json,
+                          size_t response_capacity, size_t* response_len) {
+  auto& state = *static_cast<HostState*>(data);
+  const std::string name = Text(operation, operation_len);
+  const std::string request = Text(request_json, request_json_len);
+  std::string response = "{}";
+  if (name == "actions.register") {
+    state.actions.push_back(JsonString(request, "action_id"));
+    state.action_icons.push_back(JsonString(request, "icon_resource"));
+    response =
+        "{\"host_action_id\":" + std::to_string(1000 + state.actions.size()) +
+        "}";
+  } else if (name == "navigation.get-vessel-position") {
+    response =
+        "{\"latitude\":50.0,\"longitude\":-4.0,"
+        "\"course_over_ground\":92.0,\"speed_over_ground\":6.5,"
+        "\"heading_true\":null,\"heading_magnetic\":null,"
+        "\"magnetic_variation\":null,\"fix_unix_time\":null,"
+        "\"satellites\":null}";
+  } else if (name == "settings.get") {
+    const auto item = state.settings.find(JsonString(request, "key"));
+    response = item == state.settings.end()
+                   ? "{\"value\":null}"
+                   : "{\"value\":\"" + JsonEscape(item->second) + "\"}";
+  } else if (name == "settings.set") {
+    state.settings[JsonString(request, "key")] = JsonString(request, "value");
+  } else if (name == "surfaces.open") {
+    const std::string id = JsonString(request, "surface_id");
+    state.environmental_viewer_opened = id == "environment.viewer";
+    state.weather_routing_opened = id == "routing.workbench";
+  } else if (name == "scenes.submit") {
+    state.scene_id = JsonString(request, "scene_id");
+    state.points = JsonPoints(request);
+  } else if (name == "scenes.clear") {
+    state.scene_cleared =
+        JsonString(request, "scene_id") == state.scene_id;
+  } else if (name == "storage.read") {
+    response = "{\"base64\":\"cG9ydGFibGUtaG9zdC1odHRwLW9r\"}";
+  } else if (name == "environment-datasets.current") {
+    response =
+        "{\"provider_package\":\"org.opencpn.igrib\","
+        "\"generation\":\"fixture-1\",\"summary\":\"synthetic fixture\","
+        "\"available\":true}";
+  } else {
+    return -2;
+  }
+  *response_len = response.size();
+  if (response.size() > response_capacity ||
+      (!response.empty() && !response_json)) {
+    return -3;
+  }
+  std::memcpy(response_json, response.data(), response.size());
+  return 0;
+}
+
 ocpn_portable_host_callbacks Callbacks(HostState* state) {
   return {OCPN_PORTABLE_HOST_ABI_VERSION,
           state,
@@ -339,7 +465,8 @@ ocpn_portable_host_callbacks Callbacks(HostState* state) {
           UserFileRead,
           UserFileWrite,
           SendPluginMessage,
-          ChartsQueryFinalSafety};
+          ChartsQueryFinalSafety,
+          AuthorServiceCall};
 }
 
 bool CallSucceeded(int32_t result, const char* operation, const char* error) {
@@ -349,10 +476,10 @@ bool CallSucceeded(int32_t result, const char* operation, const char* error) {
 }
 
 int32_t Initialize(ocpn_portable_runtime* runtime, char* error,
-                   size_t error_capacity) {
+                   size_t error_capacity,
+                   const std::string& version = "0.2.0") {
   const std::string id = "org.opencpn.igrib";
   const std::string name = "iGRIB";
-  const std::string version = "0.1.0";
   return ocpn_portable_runtime_initialize(
       runtime, id.data(), id.size(), name.data(), name.size(), version.data(),
       version.size(), error, error_capacity);
@@ -363,8 +490,8 @@ bool NormalLifecycle(const char* component_path) {
   auto callbacks = Callbacks(&state);
   char error[4096] = {};
   auto* runtime = ocpn_portable_runtime_create(
-      component_path, &callbacks, OCPN_PORTABLE_API_V02,
-      OCPN_PORTABLE_WORLD_PLUGIN, error, sizeof(error));
+      component_path, &callbacks, OCPN_PORTABLE_API_V05,
+      OCPN_PORTABLE_WORLD_ENVIRONMENT_PROVIDER, error, sizeof(error));
   if (!runtime) {
     std::cerr << "create failed: " << error << '\n';
     return false;
@@ -469,7 +596,7 @@ bool TrapIsContained(const char* component_path) {
     std::cerr << "trap-test create failed: " << error << '\n';
     return false;
   }
-  bool ok = CallSucceeded(Initialize(runtime, error, sizeof(error)),
+  bool ok = CallSucceeded(Initialize(runtime, error, sizeof(error), "0.1.0"),
                           "trap-test initialize", error);
   const int32_t result =
       ocpn_portable_runtime_test_trap(runtime, error, sizeof(error));
@@ -484,15 +611,15 @@ bool IdentityMismatchIsRejected(const char* component_path) {
   auto callbacks = Callbacks(&state);
   char error[4096] = {};
   auto* runtime = ocpn_portable_runtime_create(
-      component_path, &callbacks, OCPN_PORTABLE_API_V02,
-      OCPN_PORTABLE_WORLD_PLUGIN, error, sizeof(error));
+      component_path, &callbacks, OCPN_PORTABLE_API_V05,
+      OCPN_PORTABLE_WORLD_ENVIRONMENT_PROVIDER, error, sizeof(error));
   if (!runtime) {
     std::cerr << "identity-test create failed: " << error << '\n';
     return false;
   }
   const std::string wrong_id = "org.opencpn.not-igrib";
   const std::string name = "iGRIB";
-  const std::string version = "0.1.0";
+  const std::string version = "0.2.0";
   const int32_t result = ocpn_portable_runtime_initialize(
       runtime, wrong_id.data(), wrong_id.size(), name.data(), name.size(),
       version.data(), version.size(), error, sizeof(error));
@@ -508,12 +635,12 @@ bool RoutingLifecycle(const char* component_path) {
   auto callbacks = Callbacks(&state);
   char error[4096] = {};
   auto* runtime = ocpn_portable_runtime_create(
-      component_path, &callbacks, OCPN_PORTABLE_API_V02,
+      component_path, &callbacks, OCPN_PORTABLE_API_V05,
       OCPN_PORTABLE_WORLD_PASSAGE_ROUTING, error, sizeof(error));
   if (!runtime) return false;
   const std::string id = "org.opencpn.iweather-routing";
   const std::string name = "iWeatherRouting";
-  const std::string version = "0.1.0";
+  const std::string version = "0.2.0";
   bool ok =
       CallSucceeded(ocpn_portable_runtime_initialize(
                         runtime, id.data(), id.size(), name.data(), name.size(),
@@ -775,7 +902,7 @@ bool RoutingLifecycle(const char* component_path) {
   inspection_request.destination_longitude = -3.8;
   inspection_request.inspection_interval_seconds = 3600;
   inspection_request.include_traces = 1;
-  // This phase verifies API 0.2 inspection scheduling and result marshalling;
+  // This phase verifies OPP API 0.5 inspection scheduling and result marshalling;
   // synthetic chart rejection is covered independently above.
   inspection_request.avoid_unsafe_charts = 0;
   result.point_count = 0;

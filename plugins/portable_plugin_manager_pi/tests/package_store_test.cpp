@@ -127,6 +127,7 @@ struct PackageOptions {
   bool corrupt_signature = false;
   bool https_permission = false;
   std::string portable_api = ">=0.2.0 <0.3.0";
+  std::string portable_world = "plugin";
   std::string https_domain;
   EVP_PKEY* signing_key = nullptr;
 };
@@ -155,7 +156,9 @@ bool BuildPackage(const fs::path& output_path, const std::string& version,
       "\"portable_api\":\"" +
       options.portable_api +
       "\","
-      "\"portable_world\":\"plugin\","
+      "\"portable_world\":\"" +
+      options.portable_world +
+      "\","
       "\"permissions\":[\"ui.commands\"" +
       std::string(options.https_permission ? ",\"network.https\"" : "") + "]," +
       (options.https_domain.empty()
@@ -253,6 +256,25 @@ int main() {
   api_v04_options.portable_api = ">=0.4.0 <0.5.0";
   CHECK(BuildPackage(api_v04, "0.1.1", api_v04_options));
   CHECK(store.Inspect(api_v04).okay);
+
+  for (const std::string world :
+       {"plugin", "environment-provider-plugin", "weather-routing-plugin",
+        "passage-weather-routing-plugin"}) {
+    const fs::path api_v05 = archive_dir / ("opp api 0.5 " + world + ".ocpnp");
+    PackageOptions api_v05_options;
+    api_v05_options.portable_api = ">=0.5.0 <0.6.0";
+    api_v05_options.portable_world = world;
+    CHECK(BuildPackage(api_v05, "0.1.2", api_v05_options));
+    CHECK(store.Inspect(api_v05).okay);
+  }
+
+  const fs::path api_v04_specialist =
+      archive_dir / "opp api 0.4 specialist.ocpnp";
+  PackageOptions api_v04_specialist_options = api_v04_options;
+  api_v04_specialist_options.portable_world = "weather-routing-plugin";
+  CHECK(BuildPackage(api_v04_specialist, "0.1.2",
+                     api_v04_specialist_options));
+  CHECK(!store.Inspect(api_v04_specialist).okay);
 
   const fs::path missing_https_permission =
       archive_dir / "missing https permission.ocpnp";

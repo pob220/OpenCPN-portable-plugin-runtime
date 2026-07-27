@@ -10,8 +10,8 @@ set(OCPN_PORTABLE_RUSTUP_HOME "" CACHE PATH
 set(OCPN_PORTABLE_CARGO_HOME "" CACHE PATH
     "Optional CARGO_HOME for the experimental portable runtime")
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
-file(GLOB_RECURSE _portable_api_v02_sources CONFIGURE_DEPENDS
-     "${CMAKE_CURRENT_SOURCE_DIR}/contracts/0.2/*.wit")
+file(GLOB_RECURSE _portable_api_v05_sources CONFIGURE_DEPENDS
+     "${CMAKE_CURRENT_SOURCE_DIR}/contracts/0.5/*.wit")
 
 option(OCPN_IGRIB_BUILD_NATIVE_HELPER
        "Build the experimental ecCodes iGRIB decode helper" ON)
@@ -87,7 +87,8 @@ endif ()
 
 file(GLOB_RECURSE _bridge_sources CONFIGURE_DEPENDS
      "${CMAKE_CURRENT_SOURCE_DIR}/bridge/src/*.rs"
-     "${CMAKE_CURRENT_SOURCE_DIR}/wit/*.wit")
+     "${CMAKE_CURRENT_SOURCE_DIR}/wit/*.wit"
+     "${CMAKE_CURRENT_SOURCE_DIR}/contracts/*.wit")
 add_custom_command(
   OUTPUT "${_bridge_library}"
   COMMAND ${CMAKE_COMMAND} -E env ${_portable_env}
@@ -247,8 +248,8 @@ add_custom_command(
   COMMAND ${CMAKE_COMMAND} -E remove_directory
           "${_igrib_package}/interfaces"
   COMMAND ${CMAKE_COMMAND} -E copy_directory
-          "${CMAKE_CURRENT_SOURCE_DIR}/contracts/0.2"
-          "${_igrib_package}/interfaces/opencpn-portable-0.2"
+          "${CMAKE_CURRENT_SOURCE_DIR}/contracts/0.5"
+          "${_igrib_package}/interfaces/opencpn-opp-0.5"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           "${CMAKE_SOURCE_DIR}/COPYING.gplv2"
           "${_igrib_package}/licenses/GPL-2.0.txt"
@@ -276,14 +277,14 @@ add_custom_command(
           "${CMAKE_SOURCE_DIR}/data/svg/traditional/emblem-download.svg"
           "${CMAKE_SOURCE_DIR}/COPYING.gplv2"
           "${_igrib_source}/README.md"
-          ${_portable_api_v02_sources}
+          ${_portable_api_v05_sources}
           ${_igrib_decoder_copy}
           ${_igrib_generator_copy}
   COMMENT "Building and assembling the portable iGRIB package"
   VERBATIM
 )
 set(_igrib_archive
-    "${CMAKE_CURRENT_BINARY_DIR}/packages/org.opencpn.igrib-0.1.0.ocpnp")
+    "${CMAKE_CURRENT_BINARY_DIR}/packages/org.opencpn.igrib-0.2.0.ocpnp")
 add_custom_command(
   OUTPUT "${_igrib_archive}"
   COMMAND "${Python3_EXECUTABLE}"
@@ -348,8 +349,8 @@ add_custom_command(
   COMMAND ${CMAKE_COMMAND} -E remove_directory
           "${_iwr_package}/interfaces"
   COMMAND ${CMAKE_COMMAND} -E copy_directory
-          "${CMAKE_CURRENT_SOURCE_DIR}/contracts/0.2"
-          "${_iwr_package}/interfaces/opencpn-portable-0.2"
+          "${CMAKE_CURRENT_SOURCE_DIR}/contracts/0.5"
+          "${_iwr_package}/interfaces/opencpn-opp-0.5"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           "${CMAKE_SOURCE_DIR}/COPYING.gplv2"
           "${_iwr_package}/licenses/GPL-2.0.txt"
@@ -363,11 +364,11 @@ add_custom_command(
           "${_iwr_source}/package/Nicholson35_Mk1_cruising_realistic.pol"
           "${_iwr_source}/package/iweather-routing.ui.json"
           "${_iwr_source}/README.md"
-          ${_portable_api_v02_sources}
+          ${_portable_api_v05_sources}
   COMMENT "Building and assembling the portable iWeatherRouting package"
   VERBATIM)
 set(_iwr_archive
-    "${CMAKE_CURRENT_BINARY_DIR}/packages/org.opencpn.iweather-routing-0.1.0.ocpnp")
+    "${CMAKE_CURRENT_BINARY_DIR}/packages/org.opencpn.iweather-routing-0.2.0.ocpnp")
 add_custom_command(
   OUTPUT "${_iwr_archive}"
   COMMAND "${Python3_EXECUTABLE}"

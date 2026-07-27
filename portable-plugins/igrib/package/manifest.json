@@ -2,12 +2,12 @@
   "format_version": 1,
   "id": "org.opencpn.igrib",
   "name": "iGRIB",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Portable environmental-data proof of concept for OpenCPN",
   "component": "component/igrib.wasm",
   "runtime": ">=0.1.0 <0.2.0",
-  "portable_api": ">=0.2.0 <0.3.0",
-  "portable_world": "plugin",
+  "portable_api": ">=0.5.0 <0.6.0",
+  "portable_world": "environment-provider-plugin",
   "surfaces": {
     "environment.viewer": "ui/igrib-viewer.ui.json"
   },
@@ -19,6 +19,7 @@
   ],
   "permissions": [
     "ui.commands",
+    "ui.surfaces",
     "navigation.position.read",
     "navigation.objects.read",
     "settings.read-write",

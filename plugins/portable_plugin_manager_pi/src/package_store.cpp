@@ -600,10 +600,12 @@ bool ValidateManifestFields(ValidatedArchive* validated,
   const bool portable_api_v02 = portable_api == ">=0.2.0 <0.3.0";
   const bool portable_api_v03 = portable_api == ">=0.3.0 <0.4.0";
   const bool portable_api_v04 = portable_api == ">=0.4.0 <0.5.0";
+  const bool portable_api_v05 = portable_api == ">=0.5.0 <0.6.0";
   const wxString portable_world = manifest["portable_world"].IsString()
                                       ? manifest["portable_world"].AsString()
                                       : "plugin";
   const bool valid_world = portable_world == "plugin" ||
+                           portable_world == "environment-provider-plugin" ||
                            portable_world == "weather-routing-plugin" ||
                            portable_world == "passage-weather-routing-plugin";
   std::string component;
@@ -612,11 +614,14 @@ bool ValidateManifestFields(ValidatedArchive* validated,
       validated->name.size() > 256 ||
       manifest["runtime"].AsString() != ">=0.1.0 <0.2.0" ||
       (!portable_api_v01 && !portable_api_v02 && !portable_api_v03 &&
-       !portable_api_v04) ||
+       !portable_api_v04 && !portable_api_v05) ||
       !valid_world || (portable_api_v01 && portable_world != "plugin") ||
-      ((portable_api_v02 || portable_api_v03 || portable_api_v04) &&
+      ((portable_api_v02 || portable_api_v03 || portable_api_v04 ||
+        portable_api_v05) &&
        !manifest["portable_world"].IsString()) ||
       ((portable_api_v03 || portable_api_v04) && portable_world != "plugin") ||
+      (portable_api_v02 &&
+       portable_world == "environment-provider-plugin") ||
       !CheckedArchivePath(manifest["component"].AsString().utf8_str(),
                           &component, diagnostic) ||
       validated->entries.count(component) == 0 ||

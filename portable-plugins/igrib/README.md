@@ -4,6 +4,8 @@ iGRIB is the standalone environmental reference plugin for OpenCPN's
 experimental hybrid portable-plugin runtime. It does not load, call or require
 the native xGRIB plugin. The portable Component Model guest registers actions,
 uses typed OpenCPN services and requests a host-owned environmental surface.
+It targets the OPP API 0.5 `environment-provider-plugin` world, combining the
+complete general author surface with supervised provider jobs and networking.
 
 The current proof implements:
 

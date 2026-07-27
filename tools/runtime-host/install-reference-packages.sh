@@ -27,7 +27,7 @@ case "${1:-}" in
   *) usage >&2; exit 2 ;;
 esac
 
-if pgrep -af "${runtime_root}/app/bin/opencpn" >/dev/null; then
+if pgrep -af "^${runtime_root}/app/bin/opencpn( |$)" >/dev/null; then
   printf 'The isolated RuntimeHost OpenCPN is running; close it first.\n' >&2
   exit 1
 fi

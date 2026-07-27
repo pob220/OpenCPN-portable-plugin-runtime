@@ -155,15 +155,15 @@ int main() {
               "\"format_version\":1,"
               "\"id\":\"org.opencpn.igrib\","
               "\"name\":\"iGRIB\","
-              "\"version\":\"0.1.0\","
+              "\"version\":\"0.2.0\","
               "\"component\":\"component/igrib.wasm\","
               "\"runtime\":\">=0.1.0 <0.2.0\","
-              "\"portable_api\":\">=0.2.0 <0.3.0\","
-              "\"portable_world\":\"plugin\","
+              "\"portable_api\":\">=0.5.0 <0.6.0\","
+              "\"portable_world\":\"environment-provider-plugin\","
               "\"surfaces\":{\"environment.viewer\":"
               "\"ui/igrib-viewer.ui.json\"},"
               "\"permissions\":["
-              "\"ui.commands\",\"navigation.position.read\","
+              "\"ui.commands\",\"ui.surfaces\",\"navigation.position.read\","
               "\"navigation.objects.read\",\"settings.read-write\","
               "\"overlay.submit\",\"jobs.compute\",\"environment.datasets\","
               "\"storage.user-selected\",\"network.providers\","
@@ -223,7 +223,7 @@ int main() {
     CHECK(actions.empty());
     std::string diagnostic;
     const auto requested = engine.RequestedPermissions(package_id);
-    CHECK(requested.size() == 15);
+    CHECK(requested.size() == 16);
     CHECK(!engine.Enable(package_id, &diagnostic));
     CHECK(diagnostic == "permission approval is required");
     CHECK(actions.empty());
@@ -349,17 +349,17 @@ int main() {
               "\"format_version\":1,"
               "\"id\":\"org.opencpn.igrib\","
               "\"name\":\"iGRIB\","
-              "\"version\":\"0.1.0\","
+              "\"version\":\"0.2.0\","
               "\"component\":\"component/igrib.wasm\","
               "\"runtime\":\">=0.1.0 <0.2.0\","
-              "\"portable_api\":\">=0.2.0 <0.3.0\","
-              "\"portable_world\":\"plugin\","
+              "\"portable_api\":\">=0.5.0 <0.6.0\","
+              "\"portable_world\":\"environment-provider-plugin\","
               "\"surfaces\":{\"environment.viewer\":"
               "\"ui/igrib-viewer.ui.json\"},"
               "\"provides\":[{\"interface\":"
               "\"org.opencpn.environment.provider\",\"version\":\"0.1.0\"}],"
               "\"permissions\":["
-              "\"ui.commands\",\"navigation.position.read\","
+              "\"ui.commands\",\"ui.surfaces\",\"navigation.position.read\","
               "\"navigation.objects.read\",\"settings.read-write\","
               "\"overlay.submit\",\"jobs.compute\",\"environment.datasets\","
               "\"storage.user-selected\",\"network.providers\","
@@ -386,10 +386,10 @@ int main() {
               "\"format_version\":1,"
               "\"id\":\"org.opencpn.iweather-routing\","
               "\"name\":\"iWeatherRouting\","
-              "\"version\":\"0.1.0\","
+              "\"version\":\"0.2.0\","
               "\"component\":\"component/iweather-routing.wasm\","
               "\"runtime\":\">=0.1.0 <0.2.0\","
-              "\"portable_api\":\">=0.2.0 <0.3.0\","
+              "\"portable_api\":\">=0.5.0 <0.6.0\","
               "\"portable_world\":\"passage-weather-routing-plugin\","
               "\"surfaces\":{\"routing.workbench\":"
               "\"ui/iweather-routing.ui.json\"},"
@@ -397,7 +397,8 @@ int main() {
               "\"org.opencpn.environment.provider\","
               "\"range\":\">=0.1.0 <0.2.0\"}],"
               "\"permissions\":["
-              "\"ui.commands\",\"navigation.position.read\","
+              "\"ui.commands\",\"ui.surfaces\",\"settings.read-write\","
+              "\"navigation.position.read\","
               "\"navigation.objects.read\",\"weather-routing.compute\","
               "\"environment.consume\",\"charts.coverage\","
               "\"storage.user-selected\",\"navigation.routes.write\"],"
@@ -571,13 +572,13 @@ int main() {
   fs::create_directories(author_package_root / "component", error);
   CHECK(!error);
   fs::copy_file(
-      PPM_TEST_API_V04_WASM,
+      PPM_TEST_API_V05_WASM,
       author_package_root / "component" / "portable-plugin-template.wasm",
       fs::copy_options::overwrite_existing, error);
   CHECK(!error);
   fs::create_directories(author_package_root / "ui", error);
   CHECK(!error);
-  fs::copy_file(PPM_TEST_API_V04_UI,
+  fs::copy_file(PPM_TEST_API_V05_UI,
                 author_package_root / "ui" / "template.ui.json",
                 fs::copy_options::overwrite_existing, error);
   CHECK(!error);
@@ -589,7 +590,7 @@ int main() {
               "\"version\":\"0.1.0\","
               "\"component\":\"component/portable-plugin-template.wasm\","
               "\"runtime\":\">=0.1.0 <0.2.0\","
-              "\"portable_api\":\">=0.4.0 <0.5.0\","
+              "\"portable_api\":\">=0.5.0 <0.6.0\","
               "\"portable_world\":\"plugin\","
               "\"surfaces\":{\"template.main\":\"ui/template.ui.json\"},"
               "\"permissions\":[\"ui.commands\",\"ui.surfaces\","
@@ -616,7 +617,7 @@ int main() {
             const std::string&) {
           if (id == author_package_id && surface == "template.main" &&
               control == "hello" &&
-              state.find("OPP API 0.4 surface callback is working") !=
+              state.find("OPP API 0.5 surface callback is working") !=
                   std::string::npos)
             ++author_responses;
         });

@@ -4,8 +4,8 @@
 selects it from the signed manifest and a dedicated legacy guest is exercised
 by the bridge smoke test.
 
-`0.2` is the additive, modular API used by the reference iGRIB,
-iWeatherRouting and capability-lab packages. Host services, lifecycle,
+`0.2` is the additive, modular compatibility API used by capability-lab and
+older packages. Host services, lifecycle,
 filtered events, plugin messages and callback sinks are separate interfaces.
 Most packages select `plugin-world`; route engines select the strictly larger
 `weather-routing-plugin-world`. Engines which preserve tactical state through
@@ -29,6 +29,13 @@ package-scoped communication endpoints, allowlisted NMEA 2000 output and
 controlled HTTPS. iPolars is the first substantial reference package migrated
 to this profile. The 0.1–0.3 contracts remain frozen.
 
+`0.5` is the universal OPP profile. It retains the complete 0.4 general
+author surface and adds environment-provider, weather-routing and continuous
+passage-routing worlds under the `opencpn:opp@0.5.0` namespace. iGRIB and
+iWeatherRouting are the reference specialist packages. Selecting a smaller
+world remains a least-authority decision; it does not fragment OPP into
+separate APIs.
+
 `chart-safety` is a host-owned, renderer-independent service. Portable route
 engines submit value-only segment geometry and vessel clearance requirements;
 the host retains all chart objects and returns typed land, drying, depth and
@@ -38,6 +45,6 @@ from authoritative vector/CM93 chart semantics.
 The complete versioned WIT directory is shipped in each reference package.
 Installed manifests select exactly one compatible major-minor range:
 `>=0.1.0 <0.2.0`, `>=0.2.0 <0.3.0`, `>=0.3.0 <0.4.0`, or
-`>=0.4.0 <0.5.0`. API `0.2` and later manifests must declare their world. The
-bridge keeps all four versions side by side; OPP API 0.4 does not reinterpret
-an installed component.
+`>=0.4.0 <0.5.0`, or `>=0.5.0 <0.6.0`. API `0.2` and later manifests must
+declare their world. The bridge keeps all versions side by side; OPP API 0.5
+does not reinterpret an installed component.

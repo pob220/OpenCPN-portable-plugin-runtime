@@ -36,7 +36,7 @@ a successful module build alone is not runtime evidence.
 - modeless surfaces owned by the OpenCPN frame, with deferred foreground
   activation after toolbar events;
 - versioned navigation, environmental, chart, routing and overlay services;
-- OPP API 0.4 typed events, contextual actions, multi-canvas scenes,
+- OPP API 0.5 universal worlds, typed events, contextual actions, multi-canvas scenes,
   revisioned navigation, safe NMEA 2000 output and controlled HTTPS;
 - iPolars, iGRIB and iWeatherRouting as complete reference workloads.
 

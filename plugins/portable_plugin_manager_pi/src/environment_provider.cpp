@@ -922,6 +922,11 @@ public:
            std::to_string(dataset->times.size()) + " forecast times)";
   }
 
+  std::string Generation() const {
+    std::lock_guard<std::mutex> lock(dataset_mutex);
+    return dataset ? std::to_string(dataset->revision) : std::string{};
+  }
+
   fs::path package_root;
   fs::path private_root;
   mutable std::mutex dataset_mutex;
@@ -956,6 +961,10 @@ bool EnvironmentProvider::SampleBatch(
 }
 
 std::string EnvironmentProvider::Summary() const { return impl_->Summary(); }
+
+std::string EnvironmentProvider::Generation() const {
+  return impl_->Generation();
+}
 
 bool EnvironmentProvider::Available() const {
   std::lock_guard<std::mutex> lock(impl_->dataset_mutex);

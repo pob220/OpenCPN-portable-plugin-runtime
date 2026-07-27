@@ -1405,7 +1405,8 @@ std::int32_t RuntimeEngine::Impl::OpenNamedSurface(
   const bool has_permission =
       instance && instance->owner &&
       (instance->owner->Permitted(*instance, "ui.commands") ||
-       (instance->portable_api == OCPN_PORTABLE_API_V04 &&
+       ((instance->portable_api == OCPN_PORTABLE_API_V04 ||
+         instance->portable_api == OCPN_PORTABLE_API_V05) &&
         instance->owner->Permitted(*instance, "ui.surfaces")));
   if (!instance || !instance->owner || !has_permission || !instance->enabled ||
       instance->failed) {
@@ -2333,7 +2334,8 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
   const std::string request_text = Text(request_json, request_json_length);
   if (!instance || !instance->owner || !response_length ||
       (instance->portable_api != OCPN_PORTABLE_API_V03 &&
-       instance->portable_api != OCPN_PORTABLE_API_V04) ||
+       instance->portable_api != OCPN_PORTABLE_API_V04 &&
+       instance->portable_api != OCPN_PORTABLE_API_V05) ||
       operation_name.empty() || operation_name.size() > 128 ||
       request_text.size() > kAuthorRequestLimit) {
     return -1;
@@ -2358,6 +2360,34 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
                   const std::string& message, bool retryable = false) {
     return finish(status, AuthorError(code, message, retryable));
   };
+
+  if (operation_name == "environment-datasets.current") {
+    if (instance->portable_api != OCPN_PORTABLE_API_V05 ||
+        (!instance->owner->Permitted(*instance, "environment.consume") &&
+         !instance->owner->Permitted(*instance, "environment.datasets"))) {
+      return fail(-4, "permission-denied",
+                  "environment dataset metadata permission was not granted");
+    }
+    const Instance* provider =
+        instance->environment_provider
+            ? instance
+            : instance->owner->CompatibleProvider(
+                  *instance, "org.opencpn.environment.provider");
+    wxJSONValue response;
+    response["provider_package"] = provider ? provider->id : "";
+    response["generation"] =
+        provider && provider->environment_provider
+            ? provider->environment_provider->Generation()
+            : "";
+    response["summary"] =
+        provider && provider->environment_provider
+            ? provider->environment_provider->Summary()
+            : "No compatible environmental dataset is available";
+    response["available"] =
+        provider && provider->environment_provider &&
+        provider->environment_provider->Available();
+    return finish(0, response);
+  }
 
   if (operation_name == "navigation.get-vessel-position") {
     if (!instance->owner->Permitted(*instance, "navigation.position.read"))
@@ -2415,7 +2445,8 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
         action.toolbar = true;
       else if (location == "chart-context-menu") {
         action.context_menu = true;
-      } else if (instance->portable_api == OCPN_PORTABLE_API_V04 &&
+      } else if ((instance->portable_api == OCPN_PORTABLE_API_V04 ||
+                  instance->portable_api == OCPN_PORTABLE_API_V05) &&
                  (location == "ais-context-menu" ||
                   location == "route-context-menu" ||
                   location == "waypoint-context-menu" ||
@@ -2980,7 +3011,8 @@ std::int32_t RuntimeEngine::Impl::AuthorServiceCall(
     Instance* target = instance->owner->Find(target_package);
     if (!target || !target->enabled || target->failed ||
         (target->portable_api != OCPN_PORTABLE_API_V03 &&
-         target->portable_api != OCPN_PORTABLE_API_V04))
+         target->portable_api != OCPN_PORTABLE_API_V04 &&
+         target->portable_api != OCPN_PORTABLE_API_V05))
       return fail(-6, "target-unavailable",
                   "RPC target package is not enabled for API 0.3", true);
 
@@ -3521,11 +3553,13 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
   const bool portable_api_v02 = portable_api == ">=0.2.0 <0.3.0";
   const bool portable_api_v03 = portable_api == ">=0.3.0 <0.4.0";
   const bool portable_api_v04 = portable_api == ">=0.4.0 <0.5.0";
+  const bool portable_api_v05 = portable_api == ">=0.5.0 <0.6.0";
   const wxString portable_world = manifest["portable_world"].IsString()
                                       ? manifest["portable_world"].AsString()
                                       : "plugin";
   const bool supported_world =
       portable_world == "plugin" ||
+      portable_world == "environment-provider-plugin" ||
       portable_world == "weather-routing-plugin" ||
       portable_world == "passage-weather-routing-plugin";
   const bool development = manifest["development"].AsBool();
@@ -3540,11 +3574,14 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
       !IsSemanticVersion(version) || !SafeRelativePath(component) ||
       manifest["runtime"].AsString() != ">=0.1.0 <0.2.0" ||
       (!portable_api_v01 && !portable_api_v02 && !portable_api_v03 &&
-       !portable_api_v04) ||
+       !portable_api_v04 && !portable_api_v05) ||
       !supported_world || (portable_api_v01 && portable_world != "plugin") ||
-      ((portable_api_v02 || portable_api_v03 || portable_api_v04) &&
+      ((portable_api_v02 || portable_api_v03 || portable_api_v04 ||
+        portable_api_v05) &&
        !manifest["portable_world"].IsString()) ||
       ((portable_api_v03 || portable_api_v04) && portable_world != "plugin") ||
+      (portable_api_v02 &&
+       portable_world == "environment-provider-plugin") ||
       root.filename() != id.ToStdString()) {
     if (diagnostic) *diagnostic = "incompatible installed package";
     wxLogError("PPM incompatible installed package at %s", root.string());
@@ -3572,7 +3609,8 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
     }
   }
   instance->portable_api =
-      portable_api_v04 ? OCPN_PORTABLE_API_V04
+      portable_api_v05 ? OCPN_PORTABLE_API_V05
+      : portable_api_v04 ? OCPN_PORTABLE_API_V04
       : portable_api_v03
           ? OCPN_PORTABLE_API_V03
           : (portable_api_v02 ? OCPN_PORTABLE_API_V02 : OCPN_PORTABLE_API_V01);
@@ -3580,6 +3618,8 @@ bool RuntimeEngine::Impl::LoadRoot(const fs::path& root, bool developer_mode,
                                  ? OCPN_PORTABLE_WORLD_PASSAGE_ROUTING
                              : portable_world == "weather-routing-plugin"
                                  ? OCPN_PORTABLE_WORLD_WEATHER_ROUTING
+                             : portable_world == "environment-provider-plugin"
+                                 ? OCPN_PORTABLE_WORLD_ENVIRONMENT_PROVIDER
                                  : OCPN_PORTABLE_WORLD_PLUGIN;
   if (development && !developer_mode) {
     instance->failed = true;
@@ -3975,7 +4015,8 @@ bool RuntimeEngine::Impl::HandleAction(const std::string& package_id,
         }
         std::array<char, kErrorCapacity> error{};
         int status = 0;
-        if (instance.portable_api == OCPN_PORTABLE_API_V04) {
+        if (instance.portable_api == OCPN_PORTABLE_API_V04 ||
+            instance.portable_api == OCPN_PORTABLE_API_V05) {
           const std::map<std::string, std::uint32_t> locations{
               {"toolbar", 0},
               {"chart-context-menu", 1},
@@ -4503,7 +4544,8 @@ bool RuntimeEngine::DeliverPointerEvent(
     auto& instance = *item;
     if (!instance.enabled || instance.failed || !instance.runtime ||
         (instance.portable_api != OCPN_PORTABLE_API_V03 &&
-         instance.portable_api != OCPN_PORTABLE_API_V04) ||
+         instance.portable_api != OCPN_PORTABLE_API_V04 &&
+         instance.portable_api != OCPN_PORTABLE_API_V05) ||
         !impl_->Permitted(instance, "chart.input.pointer"))
       continue;
     std::lock_guard<std::mutex> lock(instance.runtime_mutex);
@@ -4536,7 +4578,8 @@ bool RuntimeEngine::DeliverKeyEvent(std::uint32_t key_code,
     auto& instance = *item;
     if (!instance.enabled || instance.failed || !instance.runtime ||
         (instance.portable_api != OCPN_PORTABLE_API_V03 &&
-         instance.portable_api != OCPN_PORTABLE_API_V04) ||
+         instance.portable_api != OCPN_PORTABLE_API_V04 &&
+         instance.portable_api != OCPN_PORTABLE_API_V05) ||
         !impl_->Permitted(instance, "chart.input.keyboard"))
       continue;
     std::lock_guard<std::mutex> lock(instance.runtime_mutex);

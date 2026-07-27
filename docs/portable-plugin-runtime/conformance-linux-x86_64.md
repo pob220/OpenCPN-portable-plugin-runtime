@@ -12,7 +12,7 @@ Command:
 
 ```text
 python3 portable-runtime/tests/conformance.py \
-  --package <build>/org.opencpn.igrib-0.1.0.ocpnp \
+  --package <build>/org.opencpn.igrib-0.2.0.ocpnp \
   --trusted-key portable-runtime/development-keys/igrib-ed25519-public.pem \
   --fixture <44.8-MB-environment-fixture.grb> --full-generator
 ```

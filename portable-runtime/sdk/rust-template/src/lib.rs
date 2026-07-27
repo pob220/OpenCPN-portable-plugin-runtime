@@ -1,5 +1,5 @@
 wit_bindgen::generate!({
-    path: "../../contracts/0.4",
+    path: "../../contracts/0.5",
     world: "plugin-world",
 });
 
@@ -26,7 +26,7 @@ impl exports::opencpn::opp::lifecycle::Guest for Template {
         opencpn::opp::actions::register(&ActionRegistration {
             action_id: ACTION_ID.into(),
             label: "Portable hello".into(),
-            tooltip: "Exercise the OPP API 0.4 author template".into(),
+            tooltip: "Exercise the OPP API 0.5 author template".into(),
             icon_resource: None,
             locations: vec![ActionLocation::Toolbar, ActionLocation::ChartContextMenu],
         })?;
@@ -106,7 +106,7 @@ impl exports::opencpn::opp::surface_event_sink::Guest for Template {
         if control_id != "hello" && control_id != "refresh" {
             return Err(error(format!("unknown control {control_id}")));
         }
-        Ok(r#"{"template-status":"OPP API 0.4 surface callback is working"}"#.into())
+        Ok(r#"{"template-status":"OPP API 0.5 surface callback is working"}"#.into())
     }
 }
 

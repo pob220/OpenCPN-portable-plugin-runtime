@@ -19,12 +19,12 @@ version.
 
 ## Version and profile policy
 
-The WIT package identifier for the first named profile is
-`opencpn:opp@0.4.0`; manifests select it with
-`">=0.4.0 <0.5.0"` and world `"plugin"`.
+The current WIT package identifier is `opencpn:opp@0.5.0`; manifests select it
+with `">=0.5.0 <0.6.0"` and one of the four least-authority worlds described
+in the OPP API 0.5 author guide.
 
 API 0.1, 0.2 and 0.3 are frozen compatibility contracts. The Manager loads
-them side by side and does not reinterpret their payloads. OPP API 0.4 is an
+them side by side and does not reinterpret their payloads. OPP API 0.4 was an
 additive successor, not an in-place mutation:
 
 - typed event variants replace the old kind-plus-JSON envelope;
@@ -38,6 +38,11 @@ additive successor, not an in-place mutation:
 - NMEA 2000 output is restricted to informational PGNs; and
 - HTTPS is brokered by the host, bounded and restricted to exact domains
   declared in `https_domains`.
+
+OPP API 0.5 preserves that complete general surface and adds first-class
+environment-provider, weather-routing and continuous passage-routing worlds.
+Specialist plugins no longer need to remain on API 0.2 to retain their
+services.
 
 The package format, runtime version and OPP API version remain independent.
 This prevents a package-container change from silently changing guest

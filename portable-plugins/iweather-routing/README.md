@@ -1,6 +1,8 @@
 # iWeatherRouting
 
-iWeatherRouting is the second portable-plugin reference workload. Its bounded
+iWeatherRouting is the second portable-plugin reference workload. Its OPP API
+0.5 continuous-passage world combines the complete general author surface with
+immutable environment batches, routing control and chart safety. Its bounded
 three-stage route search executes inside the WebAssembly component: adaptive
 forward isochrones first, destination-side reverse-isocrone bridge recovery
 second, and a time-dependent position/time/heading/tack graph fallback last.

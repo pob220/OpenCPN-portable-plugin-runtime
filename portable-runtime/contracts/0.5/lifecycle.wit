@@ -1,0 +1,51 @@
+package opencpn:opp@0.5.0;
+
+interface lifecycle {
+  use types.{action-invocation, service-error};
+
+  record plugin-info {
+    id: string,
+    name: string,
+    version: string,
+  }
+
+  initialize: func() -> result<plugin-info, service-error>;
+  enable: func() -> result<_, service-error>;
+  disable: func();
+  on-action: func(value: action-invocation) -> result<_, service-error>;
+}
+
+interface event-sink {
+  use types.{event, service-error};
+  on-event: func(value: event) -> result<_, service-error>;
+}
+
+interface surface-event-sink {
+  use types.{service-error};
+
+  on-surface-event: func(
+    surface-id: string,
+    control-id: string,
+    value-json: string,
+  ) -> result<string, service-error>;
+}
+
+interface input-sink {
+  use types.{key-event, pointer-event, service-error};
+
+  on-pointer: func(value: pointer-event) -> result<bool, service-error>;
+  on-key: func(value: key-event) -> result<bool, service-error>;
+}
+
+interface timer-sink {
+  use types.{service-error, timer-event};
+  on-timer: func(value: timer-event) -> result<_, service-error>;
+}
+
+interface rpc-sink {
+  use types.{rpc-request, rpc-response, service-error};
+  on-request: func(source-package: string, request: rpc-request)
+    -> result<_, service-error>;
+  on-response: func(source-package: string, response: rpc-response)
+    -> result<_, service-error>;
+}

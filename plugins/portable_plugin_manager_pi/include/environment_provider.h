@@ -34,6 +34,7 @@ public:
                    std::vector<EnvironmentSample>* samples,
                    const Cancelled& cancelled, std::string* diagnostic) const;
   std::string Summary() const;
+  std::string Generation() const;
   bool Available() const;
   void Resume();
   void RequestStop();

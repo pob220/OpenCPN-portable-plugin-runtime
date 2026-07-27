@@ -211,14 +211,122 @@ mod api_v04 {
     });
 }
 
+mod api_v05_imports {
+    wasmtime::component::bindgen!({
+        path: "../contracts/0.5",
+        interfaces: "
+            import opencpn:opp/specialist-types@0.5.0;
+            import opencpn:opp/compute-jobs@0.5.0;
+            import opencpn:opp/environment@0.5.0;
+            import opencpn:opp/environment-datasets@0.5.0;
+            import opencpn:opp/routing-control@0.5.0;
+            import opencpn:opp/chart-safety@0.5.0;
+            import opencpn:opp/provider-network@0.5.0;
+        ",
+        with: {
+            "opencpn:opp/types@0.5.0": crate::api_v04_imports::opencpn::opp::types,
+        },
+    });
+}
+
+mod api_v05_general_imports {
+    wasmtime::component::bindgen!({
+        path: "../contracts/0.5",
+        interfaces: "
+            import opencpn:opp/types@0.5.0;
+            import opencpn:opp/diagnostics@0.5.0;
+            import opencpn:opp/settings@0.5.0;
+            import opencpn:opp/actions@0.5.0;
+            import opencpn:opp/surfaces@0.5.0;
+            import opencpn:opp/navigation@0.5.0;
+            import opencpn:opp/scenes@0.5.0;
+            import opencpn:opp/private-storage@0.5.0;
+            import opencpn:opp/user-files@0.5.0;
+            import opencpn:opp/timers@0.5.0;
+            import opencpn:opp/navigation-output@0.5.0;
+            import opencpn:opp/plugin-messages@0.5.0;
+            import opencpn:opp/plugin-rpc@0.5.0;
+            import opencpn:opp/event-subscriptions@0.5.0;
+            import opencpn:opp/host-environment@0.5.0;
+            import opencpn:opp/communications@0.5.0;
+            import opencpn:opp/https@0.5.0;
+        ",
+        with: {
+            "opencpn:opp/types@0.5.0": crate::api_v04_imports::opencpn::opp::types,
+        },
+    });
+}
+
+macro_rules! api_v05_general_bindings {
+    ($module:ident, $world:literal $(, $specialist:literal => $binding:path)*) => {
+        mod $module {
+            wasmtime::component::bindgen!({
+                path: "../contracts/0.5",
+                world: $world,
+                with: {
+                    "opencpn:opp/types@0.5.0": crate::api_v04_imports::opencpn::opp::types,
+                    "opencpn:opp/diagnostics@0.5.0": crate::api_v05_general_imports::opencpn::opp::diagnostics,
+                    "opencpn:opp/settings@0.5.0": crate::api_v05_general_imports::opencpn::opp::settings,
+                    "opencpn:opp/actions@0.5.0": crate::api_v05_general_imports::opencpn::opp::actions,
+                    "opencpn:opp/surfaces@0.5.0": crate::api_v05_general_imports::opencpn::opp::surfaces,
+                    "opencpn:opp/navigation@0.5.0": crate::api_v05_general_imports::opencpn::opp::navigation,
+                    "opencpn:opp/scenes@0.5.0": crate::api_v05_general_imports::opencpn::opp::scenes,
+                    "opencpn:opp/private-storage@0.5.0": crate::api_v05_general_imports::opencpn::opp::private_storage,
+                    "opencpn:opp/user-files@0.5.0": crate::api_v05_general_imports::opencpn::opp::user_files,
+                    "opencpn:opp/timers@0.5.0": crate::api_v05_general_imports::opencpn::opp::timers,
+                    "opencpn:opp/navigation-output@0.5.0": crate::api_v05_general_imports::opencpn::opp::navigation_output,
+                    "opencpn:opp/host-environment@0.5.0": crate::api_v05_general_imports::opencpn::opp::host_environment,
+                    "opencpn:opp/communications@0.5.0": crate::api_v05_general_imports::opencpn::opp::communications,
+                    "opencpn:opp/https@0.5.0": crate::api_v05_general_imports::opencpn::opp::https,
+                    "opencpn:opp/plugin-messages@0.5.0": crate::api_v05_general_imports::opencpn::opp::plugin_messages,
+                    "opencpn:opp/plugin-rpc@0.5.0": crate::api_v05_general_imports::opencpn::opp::plugin_rpc,
+                    "opencpn:opp/event-subscriptions@0.5.0": crate::api_v05_general_imports::opencpn::opp::event_subscriptions,
+                    $($specialist: $binding,)*
+                },
+            });
+        }
+    };
+}
+
+api_v05_general_bindings!(api_v05, "plugin-world");
+api_v05_general_bindings!(
+    api_v05_environment_provider,
+    "environment-provider-plugin-world",
+    "opencpn:opp/specialist-types@0.5.0" => crate::api_v05_imports::opencpn::opp::specialist_types,
+    "opencpn:opp/compute-jobs@0.5.0" => crate::api_v05_imports::opencpn::opp::compute_jobs,
+    "opencpn:opp/environment-datasets@0.5.0" => crate::api_v05_imports::opencpn::opp::environment_datasets,
+    "opencpn:opp/chart-safety@0.5.0" => crate::api_v05_imports::opencpn::opp::chart_safety,
+    "opencpn:opp/provider-network@0.5.0" => crate::api_v05_imports::opencpn::opp::provider_network
+);
+api_v05_general_bindings!(
+    api_v05_routing,
+    "weather-routing-plugin-world",
+    "opencpn:opp/specialist-types@0.5.0" => crate::api_v05_imports::opencpn::opp::specialist_types,
+    "opencpn:opp/environment@0.5.0" => crate::api_v05_imports::opencpn::opp::environment,
+    "opencpn:opp/environment-datasets@0.5.0" => crate::api_v05_imports::opencpn::opp::environment_datasets,
+    "opencpn:opp/routing-control@0.5.0" => crate::api_v05_imports::opencpn::opp::routing_control,
+    "opencpn:opp/chart-safety@0.5.0" => crate::api_v05_imports::opencpn::opp::chart_safety
+);
+api_v05_general_bindings!(
+    api_v05_passage,
+    "passage-weather-routing-plugin-world",
+    "opencpn:opp/specialist-types@0.5.0" => crate::api_v05_imports::opencpn::opp::specialist_types,
+    "opencpn:opp/environment@0.5.0" => crate::api_v05_imports::opencpn::opp::environment,
+    "opencpn:opp/environment-datasets@0.5.0" => crate::api_v05_imports::opencpn::opp::environment_datasets,
+    "opencpn:opp/routing-control@0.5.0" => crate::api_v05_imports::opencpn::opp::routing_control,
+    "opencpn:opp/chart-safety@0.5.0" => crate::api_v05_imports::opencpn::opp::chart_safety
+);
+
 const HOST_ABI_VERSION: u32 = 15;
 const PORTABLE_API_V01: u32 = 1;
 const PORTABLE_API_V02: u32 = 2;
 const PORTABLE_API_V03: u32 = 3;
 const PORTABLE_API_V04: u32 = 4;
+const PORTABLE_API_V05: u32 = 5;
 const PORTABLE_WORLD_PLUGIN: u32 = 0;
 const PORTABLE_WORLD_WEATHER_ROUTING: u32 = 1;
 const PORTABLE_WORLD_PASSAGE_ROUTING: u32 = 2;
+const PORTABLE_WORLD_ENVIRONMENT_PROVIDER: u32 = 3;
 const ROUTE_POINT_LIMIT: usize = 20_000;
 const ROUTE_INSPECTION_POINT_LIMIT: usize = 200_000;
 const ROUTE_INSPECTION_LINE_LIMIT: usize = 10_000;
@@ -674,6 +782,10 @@ enum ApiKind {
     V02PassageRouting,
     V03,
     V04,
+    V05,
+    V05EnvironmentProvider,
+    V05WeatherRouting,
+    V05PassageRouting,
 }
 
 enum RuntimeBindings {
@@ -683,6 +795,10 @@ enum RuntimeBindings {
     V02PassageRouting(api_v02_passage::PassageWeatherRoutingPluginWorld),
     V03(api_v03::PluginWorld),
     V04(api_v04::PluginWorld),
+    V05(api_v05::PluginWorld),
+    V05EnvironmentProvider(api_v05_environment_provider::EnvironmentProviderPluginWorld),
+    V05WeatherRouting(api_v05_routing::WeatherRoutingPluginWorld),
+    V05PassageRouting(api_v05_passage::PassageWeatherRoutingPluginWorld),
 }
 
 pub struct Runtime {
@@ -732,6 +848,27 @@ fn instantiate_runtime(
         ApiKind::V04 => {
             api_v04::PluginWorld::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)?;
         }
+        ApiKind::V05 => {
+            api_v05::PluginWorld::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)?;
+        }
+        ApiKind::V05EnvironmentProvider => {
+            api_v05_environment_provider::EnvironmentProviderPluginWorld::add_to_linker::<
+                _,
+                HasSelf<_>,
+            >(&mut linker, |state| state)?;
+        }
+        ApiKind::V05WeatherRouting => {
+            api_v05_routing::WeatherRoutingPluginWorld::add_to_linker::<_, HasSelf<_>>(
+                &mut linker,
+                |state| state,
+            )?;
+        }
+        ApiKind::V05PassageRouting => {
+            api_v05_passage::PassageWeatherRoutingPluginWorld::add_to_linker::<_, HasSelf<_>>(
+                &mut linker,
+                |state| state,
+            )?;
+        }
     }
 
     let limits = StoreLimitsBuilder::new()
@@ -776,6 +913,24 @@ fn instantiate_runtime(
         ApiKind::V04 => RuntimeBindings::V04(api_v04::PluginWorld::instantiate(
             &mut store, &component, &linker,
         )?),
+        ApiKind::V05 => RuntimeBindings::V05(api_v05::PluginWorld::instantiate(
+            &mut store, &component, &linker,
+        )?),
+        ApiKind::V05EnvironmentProvider => RuntimeBindings::V05EnvironmentProvider(
+            api_v05_environment_provider::EnvironmentProviderPluginWorld::instantiate(
+                &mut store, &component, &linker,
+            )?,
+        ),
+        ApiKind::V05WeatherRouting => RuntimeBindings::V05WeatherRouting(
+            api_v05_routing::WeatherRoutingPluginWorld::instantiate(
+                &mut store, &component, &linker,
+            )?,
+        ),
+        ApiKind::V05PassageRouting => RuntimeBindings::V05PassageRouting(
+            api_v05_passage::PassageWeatherRoutingPluginWorld::instantiate(
+                &mut store, &component, &linker,
+            )?,
+        ),
     };
     Ok(Runtime {
         engine,
@@ -2479,7 +2634,7 @@ impl HostState {
         let callback = self.callbacks.author_service_call.ok_or_else(|| {
             v04_error(
                 "service-unavailable",
-                "OPP API 0.4 author service transport is unavailable",
+                "OPP author service transport is unavailable",
                 false,
             )
         })?;
@@ -2541,7 +2696,7 @@ impl HostState {
                 error
                     .get("message")
                     .and_then(Value::as_str)
-                    .unwrap_or("OPP API 0.4 host service failed"),
+                    .unwrap_or("OPP host service failed"),
                 error
                     .get("retryable")
                     .and_then(Value::as_bool)
@@ -3361,6 +3516,460 @@ impl api_v04_imports::opencpn::opp::https::Host for HostState {
     }
 }
 
+// OPP 0.5 deliberately preserves the general-service wire shapes from 0.4.
+// The interfaces still need their own canonical linker registrations because
+// component interface versions are part of the import name.  Keep one tested
+// implementation of the behaviour and delegate the 0.5 bindings to it.
+use api_v05_general_imports::opencpn::opp as v05_general;
+
+impl v05_general::diagnostics::Host for HostState {
+    fn log(&mut self, level: v04_types::LogLevel, message: String) {
+        <Self as api_v04_imports::opencpn::opp::diagnostics::Host>::log(self, level, message)
+    }
+}
+
+impl v05_general::settings::Host for HostState {
+    fn get(&mut self, key: String) -> Result<Option<String>, v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::settings::Host>::get(self, key)
+    }
+
+    fn set(&mut self, key: String, value: String) -> Result<(), v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::settings::Host>::set(self, key, value)
+    }
+}
+
+impl v05_general::actions::Host for HostState {
+    fn register(
+        &mut self,
+        request: v04_types::ActionRegistration,
+    ) -> Result<u32, v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::actions::Host>::register(self, request)
+    }
+
+    fn set_state(
+        &mut self,
+        action_id: String,
+        state: v04_types::ActionState,
+    ) -> Result<(), v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::actions::Host>::set_state(self, action_id, state)
+    }
+
+    fn unregister(&mut self, action_id: String) -> Result<(), v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::actions::Host>::unregister(self, action_id)
+    }
+}
+
+impl v05_general::surfaces::Host for HostState {
+    fn open(
+        &mut self,
+        surface_id: String,
+        role: v04_types::SurfaceRole,
+    ) -> Result<(), v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::surfaces::Host>::open(self, surface_id, role)
+    }
+}
+
+impl v05_general::navigation::Host for HostState {
+    fn get_vessel_position(
+        &mut self,
+    ) -> Result<v04_types::VesselPosition, v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::navigation::Host>::get_vessel_position(self)
+    }
+
+    fn list_objects(
+        &mut self,
+        kind: v04_types::NavigationObjectKind,
+        limit: u32,
+    ) -> Result<Vec<v04_types::NavigationObject>, v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::navigation::Host>::list_objects(self, kind, limit)
+    }
+
+    fn list_page(
+        &mut self,
+        kind: v04_types::NavigationObjectKind,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> Result<v04_types::NavigationPage, v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::navigation::Host>::list_page(
+            self, kind, cursor, limit,
+        )
+    }
+
+    fn get_object(
+        &mut self,
+        kind: v04_types::NavigationObjectKind,
+        id: String,
+    ) -> Result<Option<v04_types::NavigationObject>, v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::navigation::Host>::get_object(self, kind, id)
+    }
+
+    fn mutate_with_confirmation(
+        &mut self,
+        mutation: v04_types::NavigationMutation,
+    ) -> Result<v04_types::NavigationMutationResult, v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::navigation::Host>::mutate_with_confirmation(
+            self, mutation,
+        )
+    }
+}
+
+impl v05_general::scenes::Host for HostState {
+    fn submit(&mut self, update: v04_types::SceneUpdate) -> Result<(), v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::scenes::Host>::submit(self, update)
+    }
+
+    fn clear(&mut self, scene_id: String) -> Result<(), v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::scenes::Host>::clear(self, scene_id)
+    }
+}
+
+impl v05_general::private_storage::Host for HostState {
+    fn read(&mut self, name: String) -> Result<Vec<u8>, v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::private_storage::Host>::read(self, name)
+    }
+
+    fn write_atomic(
+        &mut self,
+        name: String,
+        value: Vec<u8>,
+    ) -> Result<(), v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::private_storage::Host>::write_atomic(
+            self, name, value,
+        )
+    }
+
+    fn list_names(&mut self, prefix: String) -> Result<Vec<String>, v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::private_storage::Host>::list_names(self, prefix)
+    }
+
+    fn delete(&mut self, name: String) -> Result<bool, v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::private_storage::Host>::delete(self, name)
+    }
+}
+
+impl v05_general::user_files::Host for HostState {
+    fn read(&mut self, grant_token: String) -> Result<Vec<u8>, v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::user_files::Host>::read(self, grant_token)
+    }
+
+    fn write(
+        &mut self,
+        grant_token: String,
+        value: Vec<u8>,
+    ) -> Result<(), v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::user_files::Host>::write(self, grant_token, value)
+    }
+}
+
+impl v05_general::timers::Host for HostState {
+    fn schedule(
+        &mut self,
+        timer_id: String,
+        delay_milliseconds: u32,
+        repeat_milliseconds: Option<u32>,
+    ) -> Result<(), v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::timers::Host>::schedule(
+            self,
+            timer_id,
+            delay_milliseconds,
+            repeat_milliseconds,
+        )
+    }
+
+    fn cancel(&mut self, timer_id: String) -> Result<bool, v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::timers::Host>::cancel(self, timer_id)
+    }
+}
+
+impl v05_general::navigation_output::Host for HostState {
+    fn send_nmea0183(&mut self, sentence: String) -> Result<(), v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::navigation_output::Host>::send_nmea0183(
+            self, sentence,
+        )
+    }
+
+    fn send_nmea2000(
+        &mut self,
+        endpoint_id: String,
+        pgn: u32,
+        destination: u8,
+        priority: u8,
+        payload: Vec<u8>,
+    ) -> Result<(), v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::navigation_output::Host>::send_nmea2000(
+            self,
+            endpoint_id,
+            pgn,
+            destination,
+            priority,
+            payload,
+        )
+    }
+}
+
+impl v05_general::plugin_messages::Host for HostState {
+    fn send(
+        &mut self,
+        message_id: String,
+        message_body: String,
+    ) -> Result<(), v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::plugin_messages::Host>::send(
+            self,
+            message_id,
+            message_body,
+        )
+    }
+}
+
+impl v05_general::plugin_rpc::Host for HostState {
+    fn register_service(&mut self, service: String) -> Result<(), v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::plugin_rpc::Host>::register_service(self, service)
+    }
+
+    fn unregister_service(&mut self, service: String) -> Result<(), v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::plugin_rpc::Host>::unregister_service(self, service)
+    }
+
+    fn request(
+        &mut self,
+        target_package: String,
+        request: v04_types::RpcRequest,
+    ) -> Result<(), v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::plugin_rpc::Host>::request(
+            self,
+            target_package,
+            request,
+        )
+    }
+
+    fn respond(
+        &mut self,
+        target_package: String,
+        response: v04_types::RpcResponse,
+    ) -> Result<(), v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::plugin_rpc::Host>::respond(
+            self,
+            target_package,
+            response,
+        )
+    }
+}
+
+impl v05_general::event_subscriptions::Host for HostState {
+    fn subscribe(
+        &mut self,
+        request: v04_types::Subscription,
+    ) -> Result<u64, v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::event_subscriptions::Host>::subscribe(self, request)
+    }
+
+    fn unsubscribe(&mut self, subscription_id: u64) -> Result<(), v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::event_subscriptions::Host>::unsubscribe(
+            self,
+            subscription_id,
+        )
+    }
+}
+
+impl v05_general::host_environment::Host for HostState {
+    fn get(&mut self) -> Result<v04_types::HostEnvironmentSnapshot, v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::host_environment::Host>::get(self)
+    }
+}
+
+impl v05_general::communications::Host for HostState {
+    fn list_output_endpoints(
+        &mut self,
+    ) -> Result<Vec<v04_types::CommunicationEndpoint>, v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::communications::Host>::list_output_endpoints(self)
+    }
+}
+
+impl v05_general::https::Host for HostState {
+    fn request(
+        &mut self,
+        request: v04_types::HttpsRequest,
+    ) -> Result<v04_types::HttpsResponse, v04_types::ServiceError> {
+        <Self as api_v04_imports::opencpn::opp::https::Host>::request(self, request)
+    }
+}
+
+use api_v05_imports::opencpn::opp::specialist_types as v05_specialist;
+
+impl api_v05_imports::opencpn::opp::specialist_types::Host for HostState {}
+
+impl api_v05_imports::opencpn::opp::compute_jobs::Host for HostState {
+    fn start(&mut self, job_id: String, work_units: u32) -> Result<(), v04_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::start_job(self, job_id, work_units)
+            .map_err(|message| v04_error("host-service-failed", message, false))
+    }
+
+    fn cancel(&mut self, job_id: String) -> Result<(), v04_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::cancel_job(self, job_id)
+            .map_err(|message| v04_error("host-service-failed", message, false))
+    }
+}
+
+impl api_v05_imports::opencpn::opp::environment::Host for HostState {
+    fn sample_batch(
+        &mut self,
+        requests: Vec<v05_specialist::EnvironmentSampleRequest>,
+    ) -> Result<Vec<v05_specialist::EnvironmentSample>, v04_types::ServiceError> {
+        let requests = requests
+            .into_iter()
+            .map(
+                |request| opencpn::portable::host::EnvironmentSampleRequest {
+                    latitude: request.latitude,
+                    longitude: request.longitude,
+                    unix_time: request.unix_time,
+                },
+            )
+            .collect();
+        <Self as opencpn::portable::host::Host>::environment_sample_batch(self, requests)
+            .map(|samples| {
+                samples
+                    .into_iter()
+                    .map(|sample| v05_specialist::EnvironmentSample {
+                        wind_u_knots: sample.wind_u_knots,
+                        wind_v_knots: sample.wind_v_knots,
+                        current_u_knots: sample.current_u_knots,
+                        current_v_knots: sample.current_v_knots,
+                        wave_height_metres: sample.wave_height_metres,
+                    })
+                    .collect()
+            })
+            .map_err(|message| v04_error("host-service-failed", message, false))
+    }
+}
+
+impl api_v05_imports::opencpn::opp::environment_datasets::Host for HostState {
+    fn current(
+        &mut self,
+    ) -> Result<v05_specialist::EnvironmentDatasetStatus, v04_types::ServiceError> {
+        let value = self.v04_author_call("environment-datasets.current", json!({}))?;
+        Ok(v05_specialist::EnvironmentDatasetStatus {
+            provider_package: v04_json_text(&value, "provider_package")?,
+            generation: v04_json_text(&value, "generation")?,
+            summary: v04_json_text(&value, "summary")?,
+            available: value
+                .get("available")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| {
+                    v04_error(
+                        "invalid-host-response",
+                        "missing boolean field available",
+                        false,
+                    )
+                })?,
+        })
+    }
+}
+
+impl api_v05_imports::opencpn::opp::routing_control::Host for HostState {
+    fn progress(&mut self, percent: u8, message: String) {
+        <Self as opencpn::portable::host::Host>::routing_progress(self, percent, message);
+    }
+
+    fn cancelled(&mut self) -> bool {
+        <Self as opencpn::portable::host::Host>::routing_cancelled(self)
+    }
+}
+
+fn v05_geo_segments(
+    segments: Vec<v05_specialist::GeoSegment>,
+) -> Vec<opencpn::portable::host::GeoSegment> {
+    segments
+        .into_iter()
+        .map(|segment| opencpn::portable::host::GeoSegment {
+            start: opencpn::portable::host::GeoPoint {
+                latitude: segment.start.latitude,
+                longitude: segment.start.longitude,
+            },
+            end: opencpn::portable::host::GeoPoint {
+                latitude: segment.end.latitude,
+                longitude: segment.end.longitude,
+            },
+        })
+        .collect()
+}
+
+fn v05_chart_results(
+    results: Vec<opencpn::portable::host::ChartSegmentResult>,
+) -> Vec<v05_specialist::ChartSegmentResult> {
+    results
+        .into_iter()
+        .map(|result| v05_specialist::ChartSegmentResult {
+            state: match result.state {
+                opencpn::portable::host::ChartCoverageState::Covered => {
+                    v05_specialist::ChartCoverageState::Covered
+                }
+                opencpn::portable::host::ChartCoverageState::Unsafe => {
+                    v05_specialist::ChartCoverageState::Unsafe
+                }
+                opencpn::portable::host::ChartCoverageState::MissingCoverage => {
+                    v05_specialist::ChartCoverageState::MissingCoverage
+                }
+                opencpn::portable::host::ChartCoverageState::Unknown => {
+                    v05_specialist::ChartCoverageState::Unknown
+                }
+            },
+            charts_considered: result.charts_considered,
+            diagnostic: result.diagnostic,
+        })
+        .collect()
+}
+
+impl api_v05_imports::opencpn::opp::chart_safety::Host for HostState {
+    fn query_segments(
+        &mut self,
+        segments: Vec<v05_specialist::GeoSegment>,
+    ) -> Result<Vec<v05_specialist::ChartSegmentResult>, v04_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::charts_query_segments(
+            self,
+            v05_geo_segments(segments),
+        )
+        .map(v05_chart_results)
+        .map_err(|message| v04_error("host-service-failed", message, false))
+    }
+
+    fn query_final_safety(
+        &mut self,
+        segments: Vec<v05_specialist::GeoSegment>,
+        options: v05_specialist::FinalChartSafetyOptions,
+    ) -> Result<Vec<v05_specialist::ChartSegmentResult>, v04_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::charts_query_final_safety(
+            self,
+            v05_geo_segments(segments),
+            opencpn::portable::host::FinalChartSafetyOptions {
+                safety_margin_nautical_miles: options.safety_margin_nautical_miles,
+                minimum_depth_metres: options.minimum_depth_metres,
+                require_authoritative: options.require_authoritative,
+            },
+        )
+        .map(v05_chart_results)
+        .map_err(|message| v04_error("host-service-failed", message, false))
+    }
+}
+
+impl api_v05_imports::opencpn::opp::provider_network::Host for HostState {
+    fn get_to_private(
+        &mut self,
+        request_id: String,
+        url: String,
+        private_name: String,
+        maximum_bytes: u64,
+    ) -> Result<(), v04_types::ServiceError> {
+        <Self as opencpn::portable::host::Host>::network_get_to_private(
+            self,
+            request_id,
+            url,
+            private_name,
+            maximum_bytes,
+        )
+        .map_err(|message| v04_error("host-service-failed", message, false))
+    }
+}
+
 fn write_error(error: *mut c_char, capacity: usize, message: &str) {
     if error.is_null() || capacity == 0 {
         return;
@@ -3465,6 +4074,12 @@ pub unsafe extern "C" fn ocpn_portable_runtime_create(
             (PORTABLE_API_V02, PORTABLE_WORLD_PASSAGE_ROUTING) => ApiKind::V02PassageRouting,
             (PORTABLE_API_V03, PORTABLE_WORLD_PLUGIN) => ApiKind::V03,
             (PORTABLE_API_V04, PORTABLE_WORLD_PLUGIN) => ApiKind::V04,
+            (PORTABLE_API_V05, PORTABLE_WORLD_PLUGIN) => ApiKind::V05,
+            (PORTABLE_API_V05, PORTABLE_WORLD_ENVIRONMENT_PROVIDER) => {
+                ApiKind::V05EnvironmentProvider
+            }
+            (PORTABLE_API_V05, PORTABLE_WORLD_WEATHER_ROUTING) => ApiKind::V05WeatherRouting,
+            (PORTABLE_API_V05, PORTABLE_WORLD_PASSAGE_ROUTING) => ApiKind::V05PassageRouting,
             _ => anyhow::bail!(
                 "unsupported portable API/world combination {portable_api}/{portable_world}"
             ),
@@ -3606,6 +4221,34 @@ pub unsafe extern "C" fn ocpn_portable_runtime_initialize(
                     .map_err(v04_guest_error)?;
                 (info.id, info.name, info.version)
             }
+            RuntimeBindings::V05(bindings) => {
+                let info = bindings
+                    .opencpn_opp_lifecycle()
+                    .call_initialize(&mut runtime.store)?
+                    .map_err(v04_guest_error)?;
+                (info.id, info.name, info.version)
+            }
+            RuntimeBindings::V05EnvironmentProvider(bindings) => {
+                let info = bindings
+                    .opencpn_opp_lifecycle()
+                    .call_initialize(&mut runtime.store)?
+                    .map_err(v04_guest_error)?;
+                (info.id, info.name, info.version)
+            }
+            RuntimeBindings::V05WeatherRouting(bindings) => {
+                let info = bindings
+                    .opencpn_opp_lifecycle()
+                    .call_initialize(&mut runtime.store)?
+                    .map_err(v04_guest_error)?;
+                (info.id, info.name, info.version)
+            }
+            RuntimeBindings::V05PassageRouting(bindings) => {
+                let info = bindings
+                    .opencpn_opp_lifecycle()
+                    .call_initialize(&mut runtime.store)?
+                    .map_err(v04_guest_error)?;
+                (info.id, info.name, info.version)
+            }
         };
         if id != expected_id || name != expected_name || version != expected_version {
             anyhow::bail!(
@@ -3657,6 +4300,22 @@ pub unsafe extern "C" fn ocpn_portable_runtime_enable(
                 .opencpn_opp_lifecycle()
                 .call_enable(&mut runtime.store)?
                 .map_err(v04_guest_error)?,
+            RuntimeBindings::V05(bindings) => bindings
+                .opencpn_opp_lifecycle()
+                .call_enable(&mut runtime.store)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05EnvironmentProvider(bindings) => bindings
+                .opencpn_opp_lifecycle()
+                .call_enable(&mut runtime.store)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05WeatherRouting(bindings) => bindings
+                .opencpn_opp_lifecycle()
+                .call_enable(&mut runtime.store)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05PassageRouting(bindings) => bindings
+                .opencpn_opp_lifecycle()
+                .call_enable(&mut runtime.store)?
+                .map_err(v04_guest_error)?,
         }
         Ok(())
     })();
@@ -3673,30 +4332,43 @@ pub unsafe extern "C" fn ocpn_portable_runtime_disable(
         write_error(error, error_capacity, "runtime is null");
         return -1;
     };
-    let result = (|| -> anyhow::Result<()> {
-        prepare_call(runtime)?;
-        match &runtime.bindings {
-            RuntimeBindings::V01(bindings) => bindings
-                .opencpn_portable_plugin()
-                .call_disable(&mut runtime.store)?,
-            RuntimeBindings::V02(bindings) => bindings
-                .opencpn_portable_lifecycle()
-                .call_disable(&mut runtime.store)?,
-            RuntimeBindings::V02WeatherRouting(bindings) => bindings
-                .opencpn_portable_lifecycle()
-                .call_disable(&mut runtime.store)?,
-            RuntimeBindings::V02PassageRouting(bindings) => bindings
-                .opencpn_portable_lifecycle()
-                .call_disable(&mut runtime.store)?,
-            RuntimeBindings::V03(bindings) => bindings
-                .opencpn_portable_lifecycle()
-                .call_disable(&mut runtime.store)?,
-            RuntimeBindings::V04(bindings) => bindings
-                .opencpn_opp_lifecycle()
-                .call_disable(&mut runtime.store)?,
-        }
-        Ok(())
-    })();
+    let result =
+        (|| -> anyhow::Result<()> {
+            prepare_call(runtime)?;
+            match &runtime.bindings {
+                RuntimeBindings::V01(bindings) => bindings
+                    .opencpn_portable_plugin()
+                    .call_disable(&mut runtime.store)?,
+                RuntimeBindings::V02(bindings) => bindings
+                    .opencpn_portable_lifecycle()
+                    .call_disable(&mut runtime.store)?,
+                RuntimeBindings::V02WeatherRouting(bindings) => bindings
+                    .opencpn_portable_lifecycle()
+                    .call_disable(&mut runtime.store)?,
+                RuntimeBindings::V02PassageRouting(bindings) => bindings
+                    .opencpn_portable_lifecycle()
+                    .call_disable(&mut runtime.store)?,
+                RuntimeBindings::V03(bindings) => bindings
+                    .opencpn_portable_lifecycle()
+                    .call_disable(&mut runtime.store)?,
+                RuntimeBindings::V04(bindings) => bindings
+                    .opencpn_opp_lifecycle()
+                    .call_disable(&mut runtime.store)?,
+                RuntimeBindings::V05(bindings) => bindings
+                    .opencpn_opp_lifecycle()
+                    .call_disable(&mut runtime.store)?,
+                RuntimeBindings::V05EnvironmentProvider(bindings) => bindings
+                    .opencpn_opp_lifecycle()
+                    .call_disable(&mut runtime.store)?,
+                RuntimeBindings::V05WeatherRouting(bindings) => bindings
+                    .opencpn_opp_lifecycle()
+                    .call_disable(&mut runtime.store)?,
+                RuntimeBindings::V05PassageRouting(bindings) => bindings
+                    .opencpn_opp_lifecycle()
+                    .call_disable(&mut runtime.store)?,
+            }
+            Ok(())
+        })();
     ffi_result(result, error, error_capacity)
 }
 
@@ -3741,6 +4413,70 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_action(
                     action_id,
                     context: api_v04::opencpn::opp::types::ActionContext {
                         location: api_v04::opencpn::opp::types::ActionLocation::Toolbar,
+                        canvas_index: None,
+                        position: None,
+                        object_kind: None,
+                        object_id: None,
+                    },
+                };
+                bindings
+                    .opencpn_opp_lifecycle()
+                    .call_on_action(&mut runtime.store, &invocation)?
+                    .map_err(v04_guest_error)?
+            }
+            RuntimeBindings::V05(bindings) => {
+                let invocation = v04_types::ActionInvocation {
+                    action_id,
+                    context: v04_types::ActionContext {
+                        location: v04_types::ActionLocation::Toolbar,
+                        canvas_index: None,
+                        position: None,
+                        object_kind: None,
+                        object_id: None,
+                    },
+                };
+                bindings
+                    .opencpn_opp_lifecycle()
+                    .call_on_action(&mut runtime.store, &invocation)?
+                    .map_err(v04_guest_error)?
+            }
+            RuntimeBindings::V05EnvironmentProvider(bindings) => {
+                let invocation = v04_types::ActionInvocation {
+                    action_id,
+                    context: v04_types::ActionContext {
+                        location: v04_types::ActionLocation::Toolbar,
+                        canvas_index: None,
+                        position: None,
+                        object_kind: None,
+                        object_id: None,
+                    },
+                };
+                bindings
+                    .opencpn_opp_lifecycle()
+                    .call_on_action(&mut runtime.store, &invocation)?
+                    .map_err(v04_guest_error)?
+            }
+            RuntimeBindings::V05WeatherRouting(bindings) => {
+                let invocation = v04_types::ActionInvocation {
+                    action_id,
+                    context: v04_types::ActionContext {
+                        location: v04_types::ActionLocation::Toolbar,
+                        canvas_index: None,
+                        position: None,
+                        object_kind: None,
+                        object_id: None,
+                    },
+                };
+                bindings
+                    .opencpn_opp_lifecycle()
+                    .call_on_action(&mut runtime.store, &invocation)?
+                    .map_err(v04_guest_error)?
+            }
+            RuntimeBindings::V05PassageRouting(bindings) => {
+                let invocation = v04_types::ActionInvocation {
+                    action_id,
+                    context: v04_types::ActionContext {
+                        location: v04_types::ActionLocation::Toolbar,
                         canvas_index: None,
                         position: None,
                         object_kind: None,
@@ -3815,7 +4551,23 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_action_v04(
                 .opencpn_opp_lifecycle()
                 .call_on_action(&mut runtime.store, &invocation)?
                 .map_err(v04_guest_error)?,
-            _ => anyhow::bail!("contextual actions require OPP API 0.4"),
+            RuntimeBindings::V05(bindings) => bindings
+                .opencpn_opp_lifecycle()
+                .call_on_action(&mut runtime.store, &invocation)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05EnvironmentProvider(bindings) => bindings
+                .opencpn_opp_lifecycle()
+                .call_on_action(&mut runtime.store, &invocation)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05WeatherRouting(bindings) => bindings
+                .opencpn_opp_lifecycle()
+                .call_on_action(&mut runtime.store, &invocation)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05PassageRouting(bindings) => bindings
+                .opencpn_opp_lifecycle()
+                .call_on_action(&mut runtime.store, &invocation)?
+                .map_err(v04_guest_error)?,
+            _ => anyhow::bail!("contextual actions require OPP API 0.4 or later"),
         }
         Ok(())
     })();
@@ -3871,6 +4623,22 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_surface_event(
                 .call_on_surface_event(&mut runtime.store, &surface_id, &control_id, &value_json)?
                 .map_err(v03_guest_error)?,
             RuntimeBindings::V04(bindings) => bindings
+                .opencpn_opp_surface_event_sink()
+                .call_on_surface_event(&mut runtime.store, &surface_id, &control_id, &value_json)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05(bindings) => bindings
+                .opencpn_opp_surface_event_sink()
+                .call_on_surface_event(&mut runtime.store, &surface_id, &control_id, &value_json)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05EnvironmentProvider(bindings) => bindings
+                .opencpn_opp_surface_event_sink()
+                .call_on_surface_event(&mut runtime.store, &surface_id, &control_id, &value_json)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05WeatherRouting(bindings) => bindings
+                .opencpn_opp_surface_event_sink()
+                .call_on_surface_event(&mut runtime.store, &surface_id, &control_id, &value_json)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05PassageRouting(bindings) => bindings
                 .opencpn_opp_surface_event_sink()
                 .call_on_surface_event(&mut runtime.store, &surface_id, &control_id, &value_json)?
                 .map_err(v04_guest_error)?,
@@ -3973,6 +4741,25 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_job_event(
             }
             RuntimeBindings::V04(_) => {
                 anyhow::bail!("OPP API 0.4 does not expose legacy host jobs")
+            }
+            RuntimeBindings::V05EnvironmentProvider(bindings) => {
+                let event = match event_kind {
+                    0 => v05_specialist::JobEvent::Progress(progress),
+                    1 => v05_specialist::JobEvent::Completed,
+                    2 => v05_specialist::JobEvent::Cancelled,
+                    3 => v05_specialist::JobEvent::Failed(failed_message.unwrap_or_default()),
+                    _ => anyhow::bail!("invalid job event kind {event_kind}"),
+                };
+                bindings.opencpn_opp_job_event_sink().call_on_job_event(
+                    &mut runtime.store,
+                    &job_id,
+                    &event,
+                )?;
+            }
+            RuntimeBindings::V05(_)
+            | RuntimeBindings::V05WeatherRouting(_)
+            | RuntimeBindings::V05PassageRouting(_) => {
+                anyhow::bail!("this OPP API 0.5 world does not expose compute jobs")
             }
         }
         Ok(())
@@ -4353,8 +5140,52 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_event(
             RuntimeBindings::V04(bindings) => {
                 let event_payload = v04_event_payload(event_kind, &topic, &payload)?;
                 let event = v04_types::Event {
-                    topic,
+                    topic: topic.clone(),
                     payload: event_payload,
+                    sequence,
+                };
+                bindings
+                    .opencpn_opp_event_sink()
+                    .call_on_event(&mut runtime.store, &event)?
+                    .map_err(v04_guest_error)?;
+            }
+            RuntimeBindings::V05(bindings) => {
+                let event = v04_types::Event {
+                    topic: topic.clone(),
+                    payload: v04_event_payload(event_kind, &topic, &payload)?,
+                    sequence,
+                };
+                bindings
+                    .opencpn_opp_event_sink()
+                    .call_on_event(&mut runtime.store, &event)?
+                    .map_err(v04_guest_error)?;
+            }
+            RuntimeBindings::V05EnvironmentProvider(bindings) => {
+                let event = v04_types::Event {
+                    topic: topic.clone(),
+                    payload: v04_event_payload(event_kind, &topic, &payload)?,
+                    sequence,
+                };
+                bindings
+                    .opencpn_opp_event_sink()
+                    .call_on_event(&mut runtime.store, &event)?
+                    .map_err(v04_guest_error)?;
+            }
+            RuntimeBindings::V05WeatherRouting(bindings) => {
+                let event = v04_types::Event {
+                    topic: topic.clone(),
+                    payload: v04_event_payload(event_kind, &topic, &payload)?,
+                    sequence,
+                };
+                bindings
+                    .opencpn_opp_event_sink()
+                    .call_on_event(&mut runtime.store, &event)?
+                    .map_err(v04_guest_error)?;
+            }
+            RuntimeBindings::V05PassageRouting(bindings) => {
+                let event = v04_types::Event {
+                    topic: topic.clone(),
+                    payload: v04_event_payload(event_kind, &topic, &payload)?,
                     sequence,
                 };
                 bindings
@@ -4449,6 +5280,50 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_navigation_sentence(
                     .call_on_event(&mut runtime.store, &event)?
                     .map_err(v04_guest_error)?;
             }
+            RuntimeBindings::V05(bindings) => {
+                let event = v04_types::Event {
+                    topic: String::new(),
+                    payload: v04_types::EventPayload::Nmea0183(sentence),
+                    sequence: 0,
+                };
+                bindings
+                    .opencpn_opp_event_sink()
+                    .call_on_event(&mut runtime.store, &event)?
+                    .map_err(v04_guest_error)?;
+            }
+            RuntimeBindings::V05EnvironmentProvider(bindings) => {
+                let event = v04_types::Event {
+                    topic: String::new(),
+                    payload: v04_types::EventPayload::Nmea0183(sentence),
+                    sequence: 0,
+                };
+                bindings
+                    .opencpn_opp_event_sink()
+                    .call_on_event(&mut runtime.store, &event)?
+                    .map_err(v04_guest_error)?;
+            }
+            RuntimeBindings::V05WeatherRouting(bindings) => {
+                let event = v04_types::Event {
+                    topic: String::new(),
+                    payload: v04_types::EventPayload::Nmea0183(sentence),
+                    sequence: 0,
+                };
+                bindings
+                    .opencpn_opp_event_sink()
+                    .call_on_event(&mut runtime.store, &event)?
+                    .map_err(v04_guest_error)?;
+            }
+            RuntimeBindings::V05PassageRouting(bindings) => {
+                let event = v04_types::Event {
+                    topic: String::new(),
+                    payload: v04_types::EventPayload::Nmea0183(sentence),
+                    sequence: 0,
+                };
+                bindings
+                    .opencpn_opp_event_sink()
+                    .call_on_event(&mut runtime.store, &event)?
+                    .map_err(v04_guest_error)?;
+            }
         }
         Ok(())
     })();
@@ -4516,6 +5391,70 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_plugin_message(
                     .map_err(v03_guest_error)?;
             }
             RuntimeBindings::V04(bindings) => {
+                let event = v04_types::Event {
+                    topic: message_id.clone(),
+                    payload: v04_types::EventPayload::PluginMessage(
+                        v04_types::PluginMessageEvent {
+                            message_id,
+                            message_body,
+                        },
+                    ),
+                    sequence: 0,
+                };
+                bindings
+                    .opencpn_opp_event_sink()
+                    .call_on_event(&mut runtime.store, &event)?
+                    .map_err(v04_guest_error)?;
+            }
+            RuntimeBindings::V05(bindings) => {
+                let event = v04_types::Event {
+                    topic: message_id.clone(),
+                    payload: v04_types::EventPayload::PluginMessage(
+                        v04_types::PluginMessageEvent {
+                            message_id,
+                            message_body,
+                        },
+                    ),
+                    sequence: 0,
+                };
+                bindings
+                    .opencpn_opp_event_sink()
+                    .call_on_event(&mut runtime.store, &event)?
+                    .map_err(v04_guest_error)?;
+            }
+            RuntimeBindings::V05EnvironmentProvider(bindings) => {
+                let event = v04_types::Event {
+                    topic: message_id.clone(),
+                    payload: v04_types::EventPayload::PluginMessage(
+                        v04_types::PluginMessageEvent {
+                            message_id,
+                            message_body,
+                        },
+                    ),
+                    sequence: 0,
+                };
+                bindings
+                    .opencpn_opp_event_sink()
+                    .call_on_event(&mut runtime.store, &event)?
+                    .map_err(v04_guest_error)?;
+            }
+            RuntimeBindings::V05WeatherRouting(bindings) => {
+                let event = v04_types::Event {
+                    topic: message_id.clone(),
+                    payload: v04_types::EventPayload::PluginMessage(
+                        v04_types::PluginMessageEvent {
+                            message_id,
+                            message_body,
+                        },
+                    ),
+                    sequence: 0,
+                };
+                bindings
+                    .opencpn_opp_event_sink()
+                    .call_on_event(&mut runtime.store, &event)?
+                    .map_err(v04_guest_error)?;
+            }
+            RuntimeBindings::V05PassageRouting(bindings) => {
                 let event = v04_types::Event {
                     topic: message_id.clone(),
                     payload: v04_types::EventPayload::PluginMessage(
@@ -4609,6 +5548,32 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_pointer_event(
         let hit_primitive_id = (!hit_primitive_id.is_null())
             .then(|| input_string(hit_primitive_id, hit_primitive_id_len))
             .transpose()?;
+        let v04_event = v04_types::PointerEvent {
+            kind: match kind {
+                0 => v04_types::PointerKind::Move,
+                1 => v04_types::PointerKind::Press,
+                2 => v04_types::PointerKind::Release,
+                3 => v04_types::PointerKind::DoubleClick,
+                _ => v04_types::PointerKind::Wheel,
+            },
+            button: match button {
+                0 => v04_types::PointerButton::None,
+                1 => v04_types::PointerButton::Primary,
+                2 => v04_types::PointerButton::Middle,
+                _ => v04_types::PointerButton::Secondary,
+            },
+            canvas_index,
+            x_pixels,
+            y_pixels,
+            position: position.map(|(latitude, longitude)| v04_types::GeoPoint {
+                latitude,
+                longitude,
+            }),
+            wheel_rotation,
+            modifiers: v04_input_modifiers(modifiers),
+            hit_scene_id: hit_scene_id.clone(),
+            hit_primitive_id: hit_primitive_id.clone(),
+        };
         let value = match &runtime.bindings {
             RuntimeBindings::V03(bindings) => {
                 let event = v03_types::PointerEvent {
@@ -4642,39 +5607,27 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_pointer_event(
                     .call_on_pointer(&mut runtime.store, &event)?
                     .map_err(v03_guest_error)?
             }
-            RuntimeBindings::V04(bindings) => {
-                let event = v04_types::PointerEvent {
-                    kind: match kind {
-                        0 => v04_types::PointerKind::Move,
-                        1 => v04_types::PointerKind::Press,
-                        2 => v04_types::PointerKind::Release,
-                        3 => v04_types::PointerKind::DoubleClick,
-                        _ => v04_types::PointerKind::Wheel,
-                    },
-                    button: match button {
-                        0 => v04_types::PointerButton::None,
-                        1 => v04_types::PointerButton::Primary,
-                        2 => v04_types::PointerButton::Middle,
-                        _ => v04_types::PointerButton::Secondary,
-                    },
-                    canvas_index,
-                    x_pixels,
-                    y_pixels,
-                    position: position.map(|(latitude, longitude)| v04_types::GeoPoint {
-                        latitude,
-                        longitude,
-                    }),
-                    wheel_rotation,
-                    modifiers: v04_input_modifiers(modifiers),
-                    hit_scene_id,
-                    hit_primitive_id,
-                };
-                bindings
-                    .opencpn_opp_input_sink()
-                    .call_on_pointer(&mut runtime.store, &event)?
-                    .map_err(v04_guest_error)?
-            }
-            _ => anyhow::bail!("input events require portable API 0.3 or OPP API 0.4"),
+            RuntimeBindings::V04(bindings) => bindings
+                .opencpn_opp_input_sink()
+                .call_on_pointer(&mut runtime.store, &v04_event)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05(bindings) => bindings
+                .opencpn_opp_input_sink()
+                .call_on_pointer(&mut runtime.store, &v04_event)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05EnvironmentProvider(bindings) => bindings
+                .opencpn_opp_input_sink()
+                .call_on_pointer(&mut runtime.store, &v04_event)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05WeatherRouting(bindings) => bindings
+                .opencpn_opp_input_sink()
+                .call_on_pointer(&mut runtime.store, &v04_event)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05PassageRouting(bindings) => bindings
+                .opencpn_opp_input_sink()
+                .call_on_pointer(&mut runtime.store, &v04_event)?
+                .map_err(v04_guest_error)?,
+            _ => anyhow::bail!("input events require portable API 0.3 or OPP API 0.4 or later"),
         };
         unsafe { *handled = u8::from(value) };
         Ok(())
@@ -4709,6 +5662,13 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_key_event(
         } else {
             None
         };
+        let v04_event = v04_types::KeyEvent {
+            key_code,
+            unicode,
+            pressed: pressed != 0,
+            repeat: repeat != 0,
+            modifiers: v04_input_modifiers(modifiers),
+        };
         let value = match &runtime.bindings {
             RuntimeBindings::V03(bindings) => {
                 let event = v03_types::KeyEvent {
@@ -4723,20 +5683,29 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_key_event(
                     .call_on_key(&mut runtime.store, event)?
                     .map_err(v03_guest_error)?
             }
-            RuntimeBindings::V04(bindings) => {
-                let event = v04_types::KeyEvent {
-                    key_code,
-                    unicode,
-                    pressed: pressed != 0,
-                    repeat: repeat != 0,
-                    modifiers: v04_input_modifiers(modifiers),
-                };
-                bindings
-                    .opencpn_opp_input_sink()
-                    .call_on_key(&mut runtime.store, event)?
-                    .map_err(v04_guest_error)?
+            RuntimeBindings::V04(bindings) => bindings
+                .opencpn_opp_input_sink()
+                .call_on_key(&mut runtime.store, v04_event)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05(bindings) => bindings
+                .opencpn_opp_input_sink()
+                .call_on_key(&mut runtime.store, v04_event)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05EnvironmentProvider(bindings) => bindings
+                .opencpn_opp_input_sink()
+                .call_on_key(&mut runtime.store, v04_event)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05WeatherRouting(bindings) => bindings
+                .opencpn_opp_input_sink()
+                .call_on_key(&mut runtime.store, v04_event)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05PassageRouting(bindings) => bindings
+                .opencpn_opp_input_sink()
+                .call_on_key(&mut runtime.store, v04_event)?
+                .map_err(v04_guest_error)?,
+            _ => {
+                anyhow::bail!("keyboard events require portable API 0.3 or OPP API 0.4 or later")
             }
-            _ => anyhow::bail!("keyboard events require portable API 0.3 or OPP API 0.4"),
         };
         unsafe { *handled = u8::from(value) };
         Ok(())
@@ -4761,6 +5730,11 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_timer(
     let result = (|| -> anyhow::Result<()> {
         prepare_call(runtime)?;
         let timer_id = input_string(timer_id, timer_id_len)?;
+        let v04_event = v04_types::TimerEvent {
+            timer_id: timer_id.clone(),
+            scheduled_unix_milliseconds,
+            fired_unix_milliseconds,
+        };
         match &runtime.bindings {
             RuntimeBindings::V03(bindings) => {
                 let event = v03_types::TimerEvent {
@@ -4773,18 +5747,27 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_timer(
                     .call_on_timer(&mut runtime.store, &event)?
                     .map_err(v03_guest_error)?;
             }
-            RuntimeBindings::V04(bindings) => {
-                let event = v04_types::TimerEvent {
-                    timer_id,
-                    scheduled_unix_milliseconds,
-                    fired_unix_milliseconds,
-                };
-                bindings
-                    .opencpn_opp_timer_sink()
-                    .call_on_timer(&mut runtime.store, &event)?
-                    .map_err(v04_guest_error)?;
-            }
-            _ => anyhow::bail!("timer events require portable API 0.3 or OPP API 0.4"),
+            RuntimeBindings::V04(bindings) => bindings
+                .opencpn_opp_timer_sink()
+                .call_on_timer(&mut runtime.store, &v04_event)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05(bindings) => bindings
+                .opencpn_opp_timer_sink()
+                .call_on_timer(&mut runtime.store, &v04_event)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05EnvironmentProvider(bindings) => bindings
+                .opencpn_opp_timer_sink()
+                .call_on_timer(&mut runtime.store, &v04_event)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05WeatherRouting(bindings) => bindings
+                .opencpn_opp_timer_sink()
+                .call_on_timer(&mut runtime.store, &v04_event)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05PassageRouting(bindings) => bindings
+                .opencpn_opp_timer_sink()
+                .call_on_timer(&mut runtime.store, &v04_event)?
+                .map_err(v04_guest_error)?,
+            _ => anyhow::bail!("timer events require portable API 0.3 or OPP API 0.4 or later"),
         }
         Ok(())
     })();
@@ -4852,6 +5835,7 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_rpc_request(
         }
         let source = input_string(source_package, source_package_len)?;
         let json: Value = serde_json::from_str(&input_string(request_json, request_json_len)?)?;
+        let v04_request = parse_v04_rpc_request(&json).map_err(v04_guest_error)?;
         match &runtime.bindings {
             RuntimeBindings::V03(bindings) => {
                 let request = parse_rpc_request(&json).map_err(v03_guest_error)?;
@@ -4861,13 +5845,28 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_rpc_request(
                     .map_err(v03_guest_error)?;
             }
             RuntimeBindings::V04(bindings) => {
-                let request = parse_v04_rpc_request(&json).map_err(v04_guest_error)?;
                 bindings
                     .opencpn_opp_rpc_sink()
-                    .call_on_request(&mut runtime.store, &source, &request)?
+                    .call_on_request(&mut runtime.store, &source, &v04_request)?
                     .map_err(v04_guest_error)?;
             }
-            _ => anyhow::bail!("typed RPC requires portable API 0.3 or OPP API 0.4"),
+            RuntimeBindings::V05(bindings) => bindings
+                .opencpn_opp_rpc_sink()
+                .call_on_request(&mut runtime.store, &source, &v04_request)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05EnvironmentProvider(bindings) => bindings
+                .opencpn_opp_rpc_sink()
+                .call_on_request(&mut runtime.store, &source, &v04_request)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05WeatherRouting(bindings) => bindings
+                .opencpn_opp_rpc_sink()
+                .call_on_request(&mut runtime.store, &source, &v04_request)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05PassageRouting(bindings) => bindings
+                .opencpn_opp_rpc_sink()
+                .call_on_request(&mut runtime.store, &source, &v04_request)?
+                .map_err(v04_guest_error)?,
+            _ => anyhow::bail!("typed RPC requires portable API 0.3 or OPP API 0.4 or later"),
         }
         Ok(())
     })();
@@ -4895,6 +5894,7 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_rpc_response(
         }
         let source = input_string(source_package, source_package_len)?;
         let json: Value = serde_json::from_str(&input_string(response_json, response_json_len)?)?;
+        let v04_response = parse_v04_rpc_response(&json).map_err(v04_guest_error)?;
         match &runtime.bindings {
             RuntimeBindings::V03(bindings) => {
                 let response = parse_rpc_response(&json).map_err(v03_guest_error)?;
@@ -4904,13 +5904,28 @@ pub unsafe extern "C" fn ocpn_portable_runtime_on_rpc_response(
                     .map_err(v03_guest_error)?;
             }
             RuntimeBindings::V04(bindings) => {
-                let response = parse_v04_rpc_response(&json).map_err(v04_guest_error)?;
                 bindings
                     .opencpn_opp_rpc_sink()
-                    .call_on_response(&mut runtime.store, &source, &response)?
+                    .call_on_response(&mut runtime.store, &source, &v04_response)?
                     .map_err(v04_guest_error)?;
             }
-            _ => anyhow::bail!("typed RPC requires portable API 0.3 or OPP API 0.4"),
+            RuntimeBindings::V05(bindings) => bindings
+                .opencpn_opp_rpc_sink()
+                .call_on_response(&mut runtime.store, &source, &v04_response)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05EnvironmentProvider(bindings) => bindings
+                .opencpn_opp_rpc_sink()
+                .call_on_response(&mut runtime.store, &source, &v04_response)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05WeatherRouting(bindings) => bindings
+                .opencpn_opp_rpc_sink()
+                .call_on_response(&mut runtime.store, &source, &v04_response)?
+                .map_err(v04_guest_error)?,
+            RuntimeBindings::V05PassageRouting(bindings) => bindings
+                .opencpn_opp_rpc_sink()
+                .call_on_response(&mut runtime.store, &source, &v04_response)?
+                .map_err(v04_guest_error)?,
+            _ => anyhow::bail!("typed RPC requires portable API 0.3 or OPP API 0.4 or later"),
         }
         Ok(())
     })();
@@ -5278,6 +6293,112 @@ fn write_normalized_route(route: NormalizedRoute, output: &mut RouteResult) -> a
     Ok(())
 }
 
+macro_rules! calculate_passage_guest {
+    (
+        $bindings:expr,
+        $runtime:expr,
+        $passage_accessor:ident,
+        $guest_error:ident,
+        $request:expr,
+        $output:expr,
+        $polars:expr
+    ) => {{
+        use routing::RouteRequest as GuestRouteRequest;
+        let guest_polars = $polars
+            .into_iter()
+            .map(|polar| routing::PolarGrid {
+                identity: polar.identity,
+                true_wind_speeds_knots: polar.true_wind_speeds_knots,
+                true_wind_angles_degrees: polar.true_wind_angles_degrees,
+                boat_speeds_knots: polar.boat_speeds_knots,
+            })
+            .collect();
+        let guest_route = build_route_request!(
+            GuestRouteRequest,
+            $request.route,
+            guest_polars,
+            inspection_interval_seconds:
+                ($request.route.inspection_interval_seconds != 0)
+                    .then_some($request.route.inspection_interval_seconds),
+            include_traces: $request.route.include_traces != 0
+        );
+        let raw_gates = unsafe { slice::from_raw_parts($request.gates, $request.gate_count) };
+        let mut gates = Vec::with_capacity(raw_gates.len());
+        for gate in raw_gates {
+            let id = input_string(gate.id, gate.id_len)?;
+            let name = input_string(gate.name, gate.name_len)?;
+            if id.is_empty()
+                || id.len() > 1024
+                || name.is_empty()
+                || name.len() > 1024
+                || !gate.latitude.is_finite()
+                || !gate.longitude.is_finite()
+                || gate.latitude.abs() > 90.0
+                || gate.longitude.abs() > 180.0
+            {
+                anyhow::bail!("passage gate is invalid");
+            }
+            gates.push(passage::PassageGate {
+                id,
+                name,
+                latitude: gate.latitude,
+                longitude: gate.longitude,
+            });
+        }
+        let passage_result = ($bindings)
+            .$passage_accessor()
+            .call_calculate_passage(
+                &mut $runtime.store,
+                &passage::PassageRequest {
+                    route: guest_route,
+                    gates,
+                    departure_offset_seconds: $request.departure_offset_seconds,
+                },
+            )?
+            .map_err($guest_error)?;
+        if passage_result.legs.len() > $output.leg_capacity
+            || (!passage_result.legs.is_empty() && $output.legs.is_null())
+        {
+            anyhow::bail!(
+                "passage result requires {} legs, capacity is {}",
+                passage_result.legs.len(),
+                $output.leg_capacity
+            );
+        }
+        let point_count = passage_result.route.points.len();
+        for (index, leg) in passage_result.legs.into_iter().enumerate() {
+            let point_offset = leg.point_offset as usize;
+            let leg_point_count = leg.point_count as usize;
+            if leg.start_gate_index >= leg.end_gate_index
+                || leg.end_gate_index as usize >= $request.gate_count
+                || point_offset > point_count
+                || leg_point_count > point_count.saturating_sub(point_offset)
+                || leg_point_count < 2
+                || leg.arrival_unix_time <= leg.departure_unix_time
+                || !leg.distance_nautical_miles.is_finite()
+                || leg.distance_nautical_miles < 0.0
+            {
+                anyhow::bail!("component returned an invalid passage leg");
+            }
+            unsafe {
+                *$output.legs.add(index) = PassageLeg {
+                    start_gate_index: leg.start_gate_index,
+                    end_gate_index: leg.end_gate_index,
+                    point_offset,
+                    point_count: leg_point_count,
+                    departure_unix_time: leg.departure_unix_time,
+                    arrival_unix_time: leg.arrival_unix_time,
+                    distance_nautical_miles: leg.distance_nautical_miles,
+                    states_examined: leg.states_examined,
+                };
+            }
+            $output.leg_count = index + 1;
+        }
+        $output.validation_samples = passage_result.validation_samples;
+        write_normalized_route(normalize_route!(passage_result.route), &mut $output.route)
+    }};
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ocpn_portable_runtime_calculate_route(
     runtime: *mut Runtime,
@@ -5362,6 +6483,60 @@ pub unsafe extern "C" fn ocpn_portable_runtime_calculate_route(
                     .map_err(anyhow::Error::msg)?;
                 normalize_route!(route)
             }
+            RuntimeBindings::V05PassageRouting(bindings) => {
+                use api_v05_passage::exports::opencpn::opp::weather_routing_engine as routing;
+                use routing::RouteRequest as GuestRouteRequest;
+                let polars = polars
+                    .into_iter()
+                    .map(|polar| routing::PolarGrid {
+                        identity: polar.identity,
+                        true_wind_speeds_knots: polar.true_wind_speeds_knots,
+                        true_wind_angles_degrees: polar.true_wind_angles_degrees,
+                        boat_speeds_knots: polar.boat_speeds_knots,
+                    })
+                    .collect();
+                let guest_request = build_route_request!(
+                    GuestRouteRequest,
+                    request,
+                    polars,
+                    inspection_interval_seconds:
+                        (request.inspection_interval_seconds != 0)
+                            .then_some(request.inspection_interval_seconds),
+                    include_traces: request.include_traces != 0
+                );
+                let route = bindings
+                    .opencpn_opp_weather_routing_engine()
+                    .call_calculate_route(&mut runtime.store, &guest_request)?
+                    .map_err(v04_guest_error)?;
+                normalize_route!(route)
+            }
+            RuntimeBindings::V05WeatherRouting(bindings) => {
+                use api_v05_routing::exports::opencpn::opp::weather_routing_engine as routing;
+                use routing::RouteRequest as GuestRouteRequest;
+                let polars = polars
+                    .into_iter()
+                    .map(|polar| routing::PolarGrid {
+                        identity: polar.identity,
+                        true_wind_speeds_knots: polar.true_wind_speeds_knots,
+                        true_wind_angles_degrees: polar.true_wind_angles_degrees,
+                        boat_speeds_knots: polar.boat_speeds_knots,
+                    })
+                    .collect();
+                let guest_request = build_route_request!(
+                    GuestRouteRequest,
+                    request,
+                    polars,
+                    inspection_interval_seconds:
+                        (request.inspection_interval_seconds != 0)
+                            .then_some(request.inspection_interval_seconds),
+                    include_traces: request.include_traces != 0
+                );
+                let route = bindings
+                    .opencpn_opp_weather_routing_engine()
+                    .call_calculate_route(&mut runtime.store, &guest_request)?
+                    .map_err(v04_guest_error)?;
+                normalize_route!(route)
+            }
             RuntimeBindings::V02PassageRouting(bindings) => {
                 use api_v02_passage::exports::opencpn::portable::weather_routing_engine as routing;
                 use routing::RouteRequest as GuestRouteRequest;
@@ -5424,6 +6599,9 @@ pub unsafe extern "C" fn ocpn_portable_runtime_calculate_route(
             }
             RuntimeBindings::V04(_) => {
                 anyhow::bail!("OPP API 0.4 plugin world does not export weather routing")
+            }
+            RuntimeBindings::V05(_) | RuntimeBindings::V05EnvironmentProvider(_) => {
+                anyhow::bail!("this OPP API 0.5 world does not export weather routing")
             }
         };
         output.point_count = route.points.len();
@@ -5664,104 +6842,35 @@ pub unsafe extern "C" fn ocpn_portable_runtime_calculate_passage(
                 boat_speeds_knots: input_doubles(raw.boat_speeds_knots, raw.boat_speed_count)?,
             });
         }
-        let RuntimeBindings::V02PassageRouting(bindings) = &runtime.bindings else {
-            anyhow::bail!("component does not export continuous passage routing");
-        };
-        use api_v02_passage::exports::opencpn::portable::passage_routing_engine as passage;
-        use api_v02_passage::exports::opencpn::portable::weather_routing_engine as routing;
-        use routing::RouteRequest as GuestRouteRequest;
-        let guest_polars = polars
-            .into_iter()
-            .map(|polar| routing::PolarGrid {
-                identity: polar.identity,
-                true_wind_speeds_knots: polar.true_wind_speeds_knots,
-                true_wind_angles_degrees: polar.true_wind_angles_degrees,
-                boat_speeds_knots: polar.boat_speeds_knots,
-            })
-            .collect();
-        let guest_route = build_route_request!(
-            GuestRouteRequest,
-            request.route,
-            guest_polars,
-            inspection_interval_seconds:
-                (request.route.inspection_interval_seconds != 0)
-                    .then_some(request.route.inspection_interval_seconds),
-            include_traces: request.route.include_traces != 0
-        );
-        let raw_gates = unsafe { slice::from_raw_parts(request.gates, request.gate_count) };
-        let mut gates = Vec::with_capacity(raw_gates.len());
-        for gate in raw_gates {
-            let id = input_string(gate.id, gate.id_len)?;
-            let name = input_string(gate.name, gate.name_len)?;
-            if id.is_empty()
-                || id.len() > 1024
-                || name.is_empty()
-                || name.len() > 1024
-                || !gate.latitude.is_finite()
-                || !gate.longitude.is_finite()
-                || gate.latitude.abs() > 90.0
-                || gate.longitude.abs() > 180.0
-            {
-                anyhow::bail!("passage gate is invalid");
+        match &runtime.bindings {
+            RuntimeBindings::V02PassageRouting(bindings) => {
+                use api_v02_passage::exports::opencpn::portable::passage_routing_engine as passage;
+                use api_v02_passage::exports::opencpn::portable::weather_routing_engine as routing;
+                calculate_passage_guest!(
+                    bindings,
+                    runtime,
+                    opencpn_portable_passage_routing_engine,
+                    v02_guest_error,
+                    request,
+                    output,
+                    polars
+                )
             }
-            gates.push(passage::PassageGate {
-                id,
-                name,
-                latitude: gate.latitude,
-                longitude: gate.longitude,
-            });
-        }
-        let passage_result = bindings
-            .opencpn_portable_passage_routing_engine()
-            .call_calculate_passage(
-                &mut runtime.store,
-                &passage::PassageRequest {
-                    route: guest_route,
-                    gates,
-                    departure_offset_seconds: request.departure_offset_seconds,
-                },
-            )?
-            .map_err(v02_guest_error)?;
-        if passage_result.legs.len() > output.leg_capacity
-            || (!passage_result.legs.is_empty() && output.legs.is_null())
-        {
-            anyhow::bail!(
-                "passage result requires {} legs, capacity is {}",
-                passage_result.legs.len(),
-                output.leg_capacity
-            );
-        }
-        let point_count = passage_result.route.points.len();
-        for (index, leg) in passage_result.legs.into_iter().enumerate() {
-            let point_offset = leg.point_offset as usize;
-            let leg_point_count = leg.point_count as usize;
-            if leg.start_gate_index >= leg.end_gate_index
-                || leg.end_gate_index as usize >= request.gate_count
-                || point_offset > point_count
-                || leg_point_count > point_count.saturating_sub(point_offset)
-                || leg_point_count < 2
-                || leg.arrival_unix_time <= leg.departure_unix_time
-                || !leg.distance_nautical_miles.is_finite()
-                || leg.distance_nautical_miles < 0.0
-            {
-                anyhow::bail!("component returned an invalid passage leg");
+            RuntimeBindings::V05PassageRouting(bindings) => {
+                use api_v05_passage::exports::opencpn::opp::passage_routing_engine as passage;
+                use api_v05_passage::exports::opencpn::opp::weather_routing_engine as routing;
+                calculate_passage_guest!(
+                    bindings,
+                    runtime,
+                    opencpn_opp_passage_routing_engine,
+                    v04_guest_error,
+                    request,
+                    output,
+                    polars
+                )
             }
-            unsafe {
-                *output.legs.add(index) = PassageLeg {
-                    start_gate_index: leg.start_gate_index,
-                    end_gate_index: leg.end_gate_index,
-                    point_offset,
-                    point_count: leg_point_count,
-                    departure_unix_time: leg.departure_unix_time,
-                    arrival_unix_time: leg.arrival_unix_time,
-                    distance_nautical_miles: leg.distance_nautical_miles,
-                    states_examined: leg.states_examined,
-                };
-            }
-            output.leg_count = index + 1;
+            _ => anyhow::bail!("component does not export continuous passage routing"),
         }
-        output.validation_samples = passage_result.validation_samples;
-        write_normalized_route(normalize_route!(passage_result.route), &mut output.route)
     })();
     ffi_routing_result(calculated, request.route.max_states, error, error_capacity)
 }
@@ -5786,7 +6895,11 @@ pub unsafe extern "C" fn ocpn_portable_runtime_test_trap(
             | RuntimeBindings::V02WeatherRouting(_)
             | RuntimeBindings::V02PassageRouting(_)
             | RuntimeBindings::V03(_)
-            | RuntimeBindings::V04(_) => {
+            | RuntimeBindings::V04(_)
+            | RuntimeBindings::V05(_)
+            | RuntimeBindings::V05EnvironmentProvider(_)
+            | RuntimeBindings::V05WeatherRouting(_)
+            | RuntimeBindings::V05PassageRouting(_) => {
                 anyhow::bail!("test-trap is available only to portable API 0.1 fixtures")
             }
         }

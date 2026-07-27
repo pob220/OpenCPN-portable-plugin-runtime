@@ -1,17 +1,19 @@
 wit_bindgen::generate!({
-    path: "../../../portable-runtime/contracts/0.2",
+    path: "../../../portable-runtime/contracts/0.5",
     world: "passage-weather-routing-plugin-world",
 });
 
-use exports::opencpn::portable::passage_routing_engine::{
-    PassageLeg, PassageRequest, PassageResult,
-};
-use exports::opencpn::portable::weather_routing_engine::{
+use exports::opencpn::opp::passage_routing_engine::{PassageLeg, PassageRequest, PassageResult};
+use exports::opencpn::opp::weather_routing_engine::{
     PolarGrid, RouteEnvironmentPoint, RouteInspectionLine, RoutePoint, RouteRequest, RouteResult,
 };
-use opencpn::portable::types::{
-    ChartCoverageState, ChartSegmentResult, EnvironmentSample, EnvironmentSampleRequest,
-    FinalChartSafetyOptions, GeoPoint, GeoSegment, JobEvent, LogLevel, ServiceError,
+use opencpn::opp::specialist_types::{
+    ChartCoverageState, ChartSegmentResult, EnvironmentDatasetStatus, EnvironmentSample,
+    EnvironmentSampleRequest, FinalChartSafetyOptions, GeoSegment,
+};
+use opencpn::opp::types::{
+    ActionInvocation, ActionLocation, ActionRegistration, Event, GeoPoint, KeyEvent, LogLevel,
+    PointerEvent, RpcRequest, RpcResponse, ServiceError, SurfaceRole, TimerEvent,
 };
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 
@@ -35,38 +37,48 @@ mod host {
         tooltip: &str,
         icon: Option<&str>,
     ) -> Result<u32, String> {
-        opencpn::portable::actions::register(action_id, label, tooltip, icon).map_err(text)
+        opencpn::opp::actions::register(&ActionRegistration {
+            action_id: action_id.into(),
+            label: label.into(),
+            tooltip: tooltip.into(),
+            icon_resource: icon.map(str::to_owned),
+            locations: vec![ActionLocation::Toolbar],
+        })
+        .map_err(text)
     }
     pub fn log(level: LogLevel, message: &str) {
-        opencpn::portable::diagnostics::log(level, message)
+        opencpn::opp::diagnostics::log(level, message)
     }
     pub fn open_weather_routing() -> Result<(), String> {
-        opencpn::portable::surfaces::open("routing.workbench").map_err(text)
+        opencpn::opp::surfaces::open("routing.workbench", SurfaceRole::ToolWindow).map_err(text)
     }
     pub fn setting_set(key: &str, value: &str) -> Result<(), String> {
-        opencpn::portable::settings::set(key, value).map_err(text)
+        opencpn::opp::settings::set(key, value).map_err(text)
     }
     pub fn environment_sample_batch(
         requests: &[EnvironmentSampleRequest],
     ) -> Result<Vec<EnvironmentSample>, String> {
-        opencpn::portable::environment::sample_batch(requests).map_err(text)
+        opencpn::opp::environment::sample_batch(requests).map_err(text)
+    }
+    pub fn environment_dataset_status() -> Result<EnvironmentDatasetStatus, String> {
+        opencpn::opp::environment_datasets::current().map_err(text)
     }
     pub fn charts_query_segments(
         segments: &[GeoSegment],
     ) -> Result<Vec<ChartSegmentResult>, String> {
-        opencpn::portable::chart_safety::query_segments(segments).map_err(text)
+        opencpn::opp::chart_safety::query_segments(segments).map_err(text)
     }
     pub fn charts_query_final_safety(
         segments: &[GeoSegment],
         options: FinalChartSafetyOptions,
     ) -> Result<Vec<ChartSegmentResult>, String> {
-        opencpn::portable::chart_safety::query_final_safety(segments, options).map_err(text)
+        opencpn::opp::chart_safety::query_final_safety(segments, options).map_err(text)
     }
     pub fn routing_progress(percent: u8, message: &str) {
-        opencpn::portable::routing_control::progress(percent, message)
+        opencpn::opp::routing_control::progress(percent, message)
     }
     pub fn routing_cancelled() -> bool {
-        opencpn::portable::routing_control::cancelled()
+        opencpn::opp::routing_control::cancelled()
     }
 }
 
@@ -4362,7 +4374,7 @@ fn calculate_passage(request: PassageRequest) -> Result<PassageResult, String> {
 }
 
 impl IWeatherRouting {
-    fn initialize() -> Result<exports::opencpn::portable::lifecycle::PluginInfo, String> {
+    fn initialize() -> Result<exports::opencpn::opp::lifecycle::PluginInfo, String> {
         host::register_action(
             ACTION_OPEN,
             "iWeatherRouting",
@@ -4373,13 +4385,25 @@ impl IWeatherRouting {
             LogLevel::Info,
             "iWeatherRouting portable component initialised",
         );
-        Ok(exports::opencpn::portable::lifecycle::PluginInfo {
+        Ok(exports::opencpn::opp::lifecycle::PluginInfo {
             id: "org.opencpn.iweather-routing".into(),
             name: "iWeatherRouting".into(),
             version: env!("CARGO_PKG_VERSION").into(),
         })
     }
     fn enable() -> Result<(), String> {
+        let status = host::environment_dataset_status()?;
+        host::log(
+            if status.available {
+                LogLevel::Info
+            } else {
+                LogLevel::Warning
+            },
+            &format!(
+                "environment provider {} generation {}: {}",
+                status.provider_package, status.generation, status.summary
+            ),
+        );
         Ok(())
     }
     fn disable() {
@@ -4397,7 +4421,10 @@ impl IWeatherRouting {
         control_id: String,
         value_json: String,
     ) -> Result<String, String> {
-        if surface_id != "routing-workbench" && surface_id != "weather-routing.main" {
+        if surface_id != "routing.workbench"
+            && surface_id != "routing-workbench"
+            && surface_id != "weather-routing.main"
+        {
             return Err(format!("unknown iWeatherRouting surface: {surface_id}"));
         }
         if control_id.is_empty() || value_json.len() > 64 * 1024 {
@@ -4408,8 +4435,8 @@ impl IWeatherRouting {
     }
 }
 
-impl exports::opencpn::portable::lifecycle::Guest for IWeatherRouting {
-    fn initialize() -> Result<exports::opencpn::portable::lifecycle::PluginInfo, ServiceError> {
+impl exports::opencpn::opp::lifecycle::Guest for IWeatherRouting {
+    fn initialize() -> Result<exports::opencpn::opp::lifecycle::PluginInfo, ServiceError> {
         IWeatherRouting::initialize().map_err(service_error)
     }
     fn enable() -> Result<(), ServiceError> {
@@ -4418,12 +4445,12 @@ impl exports::opencpn::portable::lifecycle::Guest for IWeatherRouting {
     fn disable() {
         IWeatherRouting::disable()
     }
-    fn on_action(action_id: String) -> Result<(), ServiceError> {
-        IWeatherRouting::on_action(action_id).map_err(service_error)
+    fn on_action(invocation: ActionInvocation) -> Result<(), ServiceError> {
+        IWeatherRouting::on_action(invocation.action_id).map_err(service_error)
     }
 }
 
-impl exports::opencpn::portable::surface_event_sink::Guest for IWeatherRouting {
+impl exports::opencpn::opp::surface_event_sink::Guest for IWeatherRouting {
     fn on_surface_event(
         surface_id: String,
         control_id: String,
@@ -4433,29 +4460,45 @@ impl exports::opencpn::portable::surface_event_sink::Guest for IWeatherRouting {
     }
 }
 
-impl exports::opencpn::portable::job_event_sink::Guest for IWeatherRouting {
-    fn on_job_event(_: String, _: JobEvent) {}
-}
-
-impl exports::opencpn::portable::event_sink::Guest for IWeatherRouting {
-    fn on_event(_event: opencpn::portable::types::Event) -> Result<(), ServiceError> {
+impl exports::opencpn::opp::event_sink::Guest for IWeatherRouting {
+    fn on_event(_event: Event) -> Result<(), ServiceError> {
         Ok(())
     }
 }
 
-impl exports::opencpn::portable::plugin_message_sink::Guest for IWeatherRouting {
-    fn on_plugin_message(_message_id: String, _message_body: String) -> Result<(), ServiceError> {
+impl exports::opencpn::opp::input_sink::Guest for IWeatherRouting {
+    fn on_pointer(_value: PointerEvent) -> Result<bool, ServiceError> {
+        Ok(false)
+    }
+
+    fn on_key(_value: KeyEvent) -> Result<bool, ServiceError> {
+        Ok(false)
+    }
+}
+
+impl exports::opencpn::opp::timer_sink::Guest for IWeatherRouting {
+    fn on_timer(_value: TimerEvent) -> Result<(), ServiceError> {
         Ok(())
     }
 }
 
-impl exports::opencpn::portable::weather_routing_engine::Guest for IWeatherRouting {
+impl exports::opencpn::opp::rpc_sink::Guest for IWeatherRouting {
+    fn on_request(_source_package: String, _request: RpcRequest) -> Result<(), ServiceError> {
+        Ok(())
+    }
+
+    fn on_response(_source_package: String, _response: RpcResponse) -> Result<(), ServiceError> {
+        Ok(())
+    }
+}
+
+impl exports::opencpn::opp::weather_routing_engine::Guest for IWeatherRouting {
     fn calculate_route(request: RouteRequest) -> Result<RouteResult, ServiceError> {
         calculate(request).map_err(service_error)
     }
 }
 
-impl exports::opencpn::portable::passage_routing_engine::Guest for IWeatherRouting {
+impl exports::opencpn::opp::passage_routing_engine::Guest for IWeatherRouting {
     fn calculate_passage(request: PassageRequest) -> Result<PassageResult, ServiceError> {
         calculate_passage(request).map_err(service_error)
     }

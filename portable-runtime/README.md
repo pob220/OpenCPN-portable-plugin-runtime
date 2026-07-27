@@ -88,14 +88,14 @@ python3 portable-runtime/tools/install_package.py \
   --trusted-key \
 org.opencpn.development.igrib-2026=portable-runtime/development-keys/igrib-ed25519-public.pem \
   --developer --replace \
-  build-portable/portable-runtime/packages/org.opencpn.igrib-0.1.0.ocpnp
+  build-portable/portable-runtime/packages/org.opencpn.igrib-0.2.0.ocpnp
 
 python3 portable-runtime/tools/install_package.py \
   --root /path/to/test-profile/portable-plugins \
   --trusted-key \
 org.opencpn.development.portable-reference-2026=portable-runtime/development-keys/igrib-ed25519-public.pem \
   --developer --replace \
-  build-portable/portable-runtime/packages/org.opencpn.iweather-routing-0.1.0.ocpnp
+  build-portable/portable-runtime/packages/org.opencpn.iweather-routing-0.2.0.ocpnp
 ```
 
 `--replace` verifies and stages the new package, atomically switches it into
@@ -115,12 +115,12 @@ Run the same package-policy/helper checks on each target:
 
 ```sh
 python3 portable-runtime/tests/conformance.py \
-  --package build-portable/portable-runtime/packages/org.opencpn.igrib-0.1.0.ocpnp \
+  --package build-portable/portable-runtime/packages/org.opencpn.igrib-0.2.0.ocpnp \
   --trusted-key portable-runtime/development-keys/igrib-ed25519-public.pem \
   --fixture /path/to/test.grb --full-generator
 
 python3 portable-runtime/tests/routing_package_conformance.py \
-  --package build-portable/portable-runtime/packages/org.opencpn.iweather-routing-0.1.0.ocpnp \
+  --package build-portable/portable-runtime/packages/org.opencpn.iweather-routing-0.2.0.ocpnp \
   --trusted-key portable-runtime/development-keys/igrib-ed25519-public.pem
 ```
 

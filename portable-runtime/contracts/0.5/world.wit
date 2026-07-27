@@ -1,0 +1,50 @@
+package opencpn:opp@0.5.0;
+
+world plugin-world {
+  import diagnostics;
+  import settings;
+  import actions;
+  import surfaces;
+  import navigation;
+  import scenes;
+  import private-storage;
+  import user-files;
+  import timers;
+  import navigation-output;
+  import host-environment;
+  import communications;
+  import https;
+  import plugin-messages;
+  import plugin-rpc;
+  import event-subscriptions;
+
+  export lifecycle;
+  export surface-event-sink;
+  export event-sink;
+  export input-sink;
+  export timer-sink;
+  export rpc-sink;
+}
+
+world environment-provider-plugin-world {
+  include plugin-world;
+  import compute-jobs;
+  import environment-datasets;
+  import chart-safety;
+  import provider-network;
+  export job-event-sink;
+}
+
+world weather-routing-plugin-world {
+  include plugin-world;
+  import environment;
+  import environment-datasets;
+  import routing-control;
+  import chart-safety;
+  export weather-routing-engine;
+}
+
+world passage-weather-routing-plugin-world {
+  include weather-routing-plugin-world;
+  export passage-routing-engine;
+}

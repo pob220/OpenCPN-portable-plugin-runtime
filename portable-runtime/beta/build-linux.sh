@@ -11,8 +11,8 @@ jobs="${OCPN_BETA_JOBS:-$(nproc)}"
 cmake_generator="${OCPN_BETA_CMAKE_GENERATOR:-Ninja}"
 generator_source="$repo_root/portable-runtime/vendor/environmental-grib-generator"
 generator_binary="$generator_build/environmental-grib"
-igrib_package="$opencpn_build/portable-runtime/packages/org.opencpn.igrib-0.1.0.ocpnp"
-iwr_package="$opencpn_build/portable-runtime/packages/org.opencpn.iweather-routing-0.1.0.ocpnp"
+igrib_package="$opencpn_build/portable-runtime/packages/org.opencpn.igrib-0.2.0.ocpnp"
+iwr_package="$opencpn_build/portable-runtime/packages/org.opencpn.iweather-routing-0.2.0.ocpnp"
 trusted_key="$repo_root/portable-runtime/development-keys/igrib-ed25519-public.pem"
 
 usage() {

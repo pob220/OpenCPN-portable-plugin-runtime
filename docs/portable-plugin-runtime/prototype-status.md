@@ -14,10 +14,12 @@ Manager and approving individual package capabilities.
 
 - Conventional native Portable Plugin Manager using Wasmtime 46.0.1; stock
   OpenCPN's loader and C++ ABI remain intact.
-- Frozen API 0.1–0.3 contracts remain loadable beside the new OPP API 0.4
-  general author profile. OPP API 0.4 adds typed events, contextual actions,
+- Frozen API 0.1–0.3 and OPP API 0.4 contracts remain loadable beside the
+  universal OPP API 0.5 profile. OPP API 0.5 preserves typed events, contextual actions,
   host-environment values, semantic surface roles, revisioned navigation,
-  multi-canvas scenes, safe communication endpoints and controlled HTTPS.
+  multi-canvas scenes, safe communication endpoints and controlled HTTPS,
+  while adding least-authority environment-provider, weather-routing and
+  continuous passage-routing worlds.
 - Bounded manifest discovery, runtime/API negotiation, permission allow-list,
   component/manifest identity matching, inert ambient WASI, 256 MiB component
   memory limit, finite fuel and epoch interruption.

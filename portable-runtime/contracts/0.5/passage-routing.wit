@@ -1,0 +1,45 @@
+package opencpn:opp@0.5.0;
+
+interface passage-routing-engine {
+  use types.{service-error};
+  use weather-routing-engine.{route-request, route-result};
+
+  /// One immutable pass-through gate in an ordered passage.
+  record passage-gate {
+    id: string,
+    name: string,
+    latitude: f64,
+    longitude: f64,
+  }
+
+  /// A stable span in the delivered passage geometry for one gate-to-gate leg.
+  record passage-leg {
+    start-gate-index: u32,
+    end-gate-index: u32,
+    point-offset: u32,
+    point-count: u32,
+    departure-unix-time: s64,
+    arrival-unix-time: s64,
+    distance-nautical-miles: f64,
+    states-examined: u32,
+    diagnostic: string,
+  }
+
+  record passage-request {
+    route: route-request,
+    gates: list<passage-gate>,
+    /// Host scheduling metadata used only for unambiguous progress reporting.
+    departure-offset-seconds: s64,
+  }
+
+  record passage-result {
+    route: route-result,
+    legs: list<passage-leg>,
+    validation-samples: u64,
+  }
+
+  /// Calculate and independently validate one continuous passage. Tactical
+  /// vessel state is preserved at every pass-through gate.
+  calculate-passage: func(request: passage-request)
+    -> result<passage-result, service-error>;
+}

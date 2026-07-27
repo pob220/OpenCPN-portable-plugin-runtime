@@ -29,7 +29,7 @@ class ToolingTest(unittest.TestCase):
             "description": "fixture",
             "component": "component/plugin.wasm",
             "runtime": ">=0.1.0 <0.2.0",
-            "portable_api": ">=0.4.0 <0.5.0",
+            "portable_api": ">=0.5.0 <0.6.0",
             "portable_world": "plugin",
             "event_subscriptions": [
                 {
@@ -104,6 +104,21 @@ class ToolingTest(unittest.TestCase):
         ]
         self.write_manifest()
         portable_plugin.lint_manifest(self.manifest_path)
+
+    def test_all_opp_0_5_worlds_are_accepted(self):
+        for world in (
+            "plugin",
+            "environment-provider-plugin",
+            "weather-routing-plugin",
+            "passage-weather-routing-plugin",
+        ):
+            self.manifest["portable_world"] = world
+            self.write_manifest()
+            portable_plugin.lint_manifest(self.manifest_path)
+        self.manifest["portable_world"] = "native-plugin"
+        self.write_manifest()
+        with self.assertRaises(portable_plugin.LintError):
+            portable_plugin.lint_manifest(self.manifest_path)
 
 
 if __name__ == "__main__":

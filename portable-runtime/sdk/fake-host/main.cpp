@@ -73,7 +73,7 @@ int main(int argc, char** argv) {
   callbacks.author_service_call = AuthorCall;
   std::array<char, 4096> error{};
   ocpn_portable_runtime* runtime = ocpn_portable_runtime_create(
-      argv[1], &callbacks, OCPN_PORTABLE_API_V04, OCPN_PORTABLE_WORLD_PLUGIN,
+      argv[1], &callbacks, OCPN_PORTABLE_API_V05, OCPN_PORTABLE_WORLD_PLUGIN,
       error.data(), error.size());
   if (!runtime) {
     std::cerr << "create failed: " << error.data() << '\n';
@@ -138,6 +138,6 @@ int main(int argc, char** argv) {
     std::cerr << "surface callback returned empty state\n";
     return 1;
   }
-  std::cout << "OPP API 0.4 fake-host conformance passed\n";
+  std::cout << "OPP API 0.5 fake-host conformance passed\n";
   return 0;
 }

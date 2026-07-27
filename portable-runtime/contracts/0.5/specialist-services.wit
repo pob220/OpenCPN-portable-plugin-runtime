@@ -1,0 +1,65 @@
+package opencpn:opp@0.5.0;
+
+interface compute-jobs {
+  use types.{service-error};
+
+  start: func(job-id: string, work-units: u32) -> result<_, service-error>;
+  cancel: func(job-id: string) -> result<_, service-error>;
+}
+
+interface environment {
+  use specialist-types.{environment-sample, environment-sample-request};
+  use types.{service-error};
+
+  /// Evaluate one bounded batch against one immutable host-owned dataset
+  /// generation. A provider replacement cannot split a batch.
+  sample-batch: func(requests: list<environment-sample-request>)
+    -> result<list<environment-sample>, service-error>;
+}
+
+interface environment-datasets {
+  use specialist-types.{environment-dataset-status};
+  use types.{service-error};
+
+  /// Describe the immutable provider generation selected for this package.
+  current: func() -> result<environment-dataset-status, service-error>;
+}
+
+interface routing-control {
+  progress: func(percent: u8, message: string);
+  cancelled: func() -> bool;
+}
+
+interface chart-safety {
+  use specialist-types.{
+    chart-segment-result,
+    final-chart-safety-options,
+    geo-segment,
+  };
+  use types.{service-error};
+
+  query-segments: func(segments: list<geo-segment>)
+    -> result<list<chart-segment-result>, service-error>;
+  query-final-safety: func(
+    segments: list<geo-segment>,
+    options: final-chart-safety-options,
+  ) -> result<list<chart-segment-result>, service-error>;
+}
+
+interface provider-network {
+  use types.{service-error};
+
+  /// Download through host provider policy and atomically publish the result
+  /// into package-private storage. Credentials are never returned to Wasm.
+  get-to-private: func(
+    request-id: string,
+    url: string,
+    private-name: string,
+    maximum-bytes: u64,
+  ) -> result<_, service-error>;
+}
+
+interface job-event-sink {
+  use specialist-types.{job-event};
+  on-job-event: func(job-id: string, event: job-event);
+}
